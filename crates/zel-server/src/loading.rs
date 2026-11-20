@@ -17,11 +17,61 @@
 
 use super::*;
 use std::collections::BTreeSet;
-use zel_cmdline::RepositoryName;
+use zel_cmdline::{RepositoryMapping, RepositoryName};
 use zel_packages::{
-    lookup::EventKind, LoaderConfig, PackageEvent, PackageLoader, PatternResolver,
-    SimpleRepoResolver, Target as PkgTarget,
+    lookup::{EventKind, RepoResolver, RepoResolverSlot},
+    LoaderConfig, PackageEvent, PackageLoader, PatternResolver, SimpleRepoResolver,
+    Target as PkgTarget,
 };
+
+/// Delegates external repository lookups through the runtime's live [`RepoResolverSlot`] so a
+/// reused [`zel_rules::TargetResolver`] always routes new lookups to the active command's
+/// installed Bzlmod resolver.
+struct SlotRepoResolver {
+    slot: RepoResolverSlot,
+    workspace_dir: PathFragment,
+}
+
+impl RepoResolver for SlotRepoResolver {
+    fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        if let Some(r) = self.slot.get() {
+            return r.repo_root(repo);
+        }
+        if repo.is_main() || repo.name() == "_main" {
+            return Some(self.workspace_dir.clone());
+        }
+        None
+    }
+
+    fn resolve_repo_root(
+        &self,
+        repo: &RepositoryName,
+    ) -> Result<PathFragment, zel_packages::lookup::RepoRootError> {
+        if let Some(r) = self.slot.get() {
+            return r.resolve_repo_root(repo);
+        }
+        self.repo_root(repo)
+            .ok_or(zel_packages::lookup::RepoRootError::NotFound)
+    }
+
+    fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
+        if let Some(r) = self.slot.get() {
+            return r.mapping(owner);
+        }
+        RepositoryMapping::always_fallback()
+    }
+
+    fn module_name_and_version(&self, repo: &RepositoryName) -> Option<(String, String)> {
+        self.slot.get()?.module_name_and_version(repo)
+    }
+
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        if let Some(r) = self.slot.get() {
+            return r.autoload_module_repo(module_name, repo_name);
+        }
+        None
+    }
+}
 
 /// Flattens a (possibly repeated, comma-separated) list option into strings.
 pub(crate) fn opt_list(parsed: &ParsedCommandOptions, name: &str) -> Vec<String> {
@@ -96,57 +146,63 @@ impl BlazeRuntime {
 
     /// Builds a [`PackageLoader`] for one command invocation.
     pub(crate) fn make_loader(&self, parsed: &ParsedCommandOptions) -> Arc<PackageLoader> {
-        let mut resolver = SimpleRepoResolver::new(self.dirs.workspace_dir.clone());
-        // External repositories materialized under `<output_base>/external/<canonical name>`.
-        let ext = self.dirs.output_base.get_relative_str("external");
-        if let Ok(entries) = self.fs.readdir(&ext) {
-            for e in entries {
-                if e.name.starts_with('@') || e.name.starts_with('.') {
-                    continue;
-                }
-                let root = ext.get_relative_str(&e.name);
-                if !self
-                    .fs
-                    .stat(&root, true)
-                    .map(|s| s.is_directory)
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
-                if let Ok(canonical) = RepositoryName::create(&e.name) {
-                    let apparent = e
-                        .name
-                        .split(['+', '~'])
-                        .next()
-                        .unwrap_or(&e.name)
-                        .to_string();
-                    resolver.external.insert(e.name.clone(), root);
-                    resolver.apparent.entry(apparent).or_insert(canonical);
-                }
-            }
-        }
-        // --override_repository=<name>=<path>
-        for o in opt_list(parsed, "override_repository") {
-            if let Some((name, path)) = o.split_once('=') {
-                if let Ok(canonical) = RepositoryName::create(name) {
-                    let p = PathFragment::create(path);
-                    let p = if p.is_absolute() {
-                        p
-                    } else {
-                        self.dirs.workspace_dir.get_relative(&p)
-                    };
-                    resolver.external.insert(name.to_string(), p);
-                    resolver.apparent.insert(name.to_string(), canonical);
-                }
-            }
-        }
         // Bzlmod-aware resolver (installed per command by `CommandResolver::install_for_command`):
-        // fetches external repos on demand and applies canonical repo mappings.
-        let repo_resolver: Arc<dyn zel_packages::lookup::RepoResolver> = self
-            .repo_resolver
-            .slot()
-            .get()
-            .unwrap_or_else(|| Arc::new(resolver));
+        // fetches external repos on demand and applies canonical repo mappings. Delegate through
+        // the live slot so a reused `TargetResolver`'s loader always resolves through the active
+        // command's Bzlmod resolver, and skip scanning `output_base/external` when Bzlmod is active.
+        let repo_resolver: Arc<dyn zel_packages::lookup::RepoResolver> =
+            if self.repo_resolver.slot().get().is_some() {
+                Arc::new(SlotRepoResolver {
+                    slot: self.repo_resolver.slot(),
+                    workspace_dir: self.dirs.workspace_dir.clone(),
+                })
+            } else {
+                let mut resolver = SimpleRepoResolver::new(self.dirs.workspace_dir.clone());
+                // External repositories materialized under `<output_base>/external/<canonical name>`.
+                let ext = self.dirs.output_base.get_relative_str("external");
+                if let Ok(entries) = self.fs.readdir(&ext) {
+                    for e in entries {
+                        if e.name.starts_with('@') || e.name.starts_with('.') {
+                            continue;
+                        }
+                        let root = ext.get_relative_str(&e.name);
+                        if !self
+                            .fs
+                            .stat(&root, true)
+                            .map(|s| s.is_directory)
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+                        if let Ok(canonical) = RepositoryName::create(&e.name) {
+                            let apparent = e
+                                .name
+                                .split(['+', '~'])
+                                .next()
+                                .unwrap_or(&e.name)
+                                .to_string();
+                            resolver.external.insert(e.name.clone(), root);
+                            resolver.apparent.entry(apparent).or_insert(canonical);
+                        }
+                    }
+                }
+                // --override_repository=<name>=<path>
+                for o in opt_list(parsed, "override_repository") {
+                    if let Some((name, path)) = o.split_once('=') {
+                        if let Ok(canonical) = RepositoryName::create(name) {
+                            let p = PathFragment::create(path);
+                            let p = if p.is_absolute() {
+                                p
+                            } else {
+                                self.dirs.workspace_dir.get_relative(&p)
+                            };
+                            resolver.external.insert(name.to_string(), p);
+                            resolver.apparent.insert(name.to_string(), canonical);
+                        }
+                    }
+                }
+                Arc::new(resolver)
+            };
         // Package loading is memoized in the persistent Skyframe graph: the loader reads through
         // the recording file system (so every observed file/directory becomes a dependency) and
         // `load_package` is served by `PACKAGE_LOAD` nodes across commands.
@@ -243,8 +299,27 @@ impl BlazeRuntime {
         if synced.as_ref() == Some(&(seq, sig.clone())) {
             return;
         }
-        let _ = self.skyframe.sync(&sig);
+        let (_report, any_changed) = self.skyframe.sync_and_detect_changes(&sig);
+        if any_changed {
+            self.invalidate_analysis_cache();
+        }
+        *self.last_sync_option_parts.lock().unwrap() = Some(option_parts.to_vec());
         *synced = Some((seq, sig));
+    }
+
+    /// Refreshes the cached `loading_signature` after `CommandResolver::finish()` flushes
+    /// `MODULE.bazel.lock` so the next warm command does not misclassify that self-write as an
+    /// external lockfile edit.
+    pub(crate) fn refresh_loading_signature_after_finish(&self) {
+        let Some(parts) = self.last_sync_option_parts.lock().unwrap().clone() else {
+            return;
+        };
+        let sig = zel_skyframe::executor::loading_signature(
+            self.fs.as_ref(),
+            &self.dirs.workspace_dir,
+            &parts,
+        );
+        self.skyframe.update_loading_options_silently(&sig);
     }
 
     pub(crate) fn pattern_resolver(&self, parsed: &ParsedCommandOptions) -> PatternResolver {
@@ -537,7 +612,10 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, &format!("ERROR: {}", err.message));
                 }
             }
-            writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
+            writeln_bytes(
+                stderr,
+                &format!("INFO: Elapsed time: {:.3}s", crate::command_elapsed_secs()),
+            );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return Err(if is_extension_error {
@@ -559,7 +637,10 @@ impl BlazeRuntime {
                 }
             }
             // The resolver's own note about the repository is superseded by the message above.
-            writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
+            writeln_bytes(
+                stderr,
+                &format!("INFO: Elapsed time: {:.3}s", crate::command_elapsed_secs()),
+            );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return Err(ExitCode::PARSING_FAILURE);
@@ -589,7 +670,10 @@ impl BlazeRuntime {
                 }
                 writeln_bytes(stderr, &format!("ERROR: {}", err.message));
             }
-            writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
+            writeln_bytes(
+                stderr,
+                &format!("INFO: Elapsed time: {:.3}s", crate::command_elapsed_secs()),
+            );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return Err(ExitCode::PARSING_FAILURE);

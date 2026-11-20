@@ -191,15 +191,43 @@ impl SkyframeExecutor {
     /// Per-command synchronization: injects the loading options and invalidates whatever changed
     /// on disk since the last command.
     pub fn sync(&self, loading_options: &str) -> SyncReport {
+        self.sync_inner(loading_options, false).0
+    }
+
+    /// Like [`sync`](Self::sync), and also re-evaluates any dirty leaf filesystem nodes
+    /// (`FILE_STATE` / `DIRECTORY_LISTING_STATE`) to report whether any observed input or loading
+    /// option actually changed value (pruning racy-mtime false positives).
+    pub fn sync_and_detect_changes(&self, loading_options: &str) -> (SyncReport, bool) {
+        self.sync_inner(loading_options, true)
+    }
+
+    /// Updates the cached `loading_options` fingerprint without invalidating existing graph nodes
+    /// (called after `CommandResolver::finish()` writes `MODULE.bazel.lock` for the already-loaded
+    /// module graph so the next warm command does not misclassify that write as an external change).
+    pub fn update_loading_options_silently(&self, loading_options: &str) {
+        let mut last = self.last_loading_options.lock().unwrap();
+        if last.is_some() {
+            *last = Some(loading_options.to_string());
+            self.evaluator.update_precomputed_silently(
+                SkyKey::Precomputed(LOADING_OPTIONS_KEY.to_string()),
+                Arc::new(StringSkyValue(loading_options.to_string())),
+            );
+        }
+    }
+
+    fn sync_inner(&self, loading_options: &str, probe_leaf_changes: bool) -> (SyncReport, bool) {
         let mut report = SyncReport::default();
+        let mut state_reset = false;
         if !self.track_incremental_state.load(Ordering::SeqCst) {
             self.evaluator.clear();
             *self.last_loading_options.lock().unwrap() = None;
+            state_reset = true;
         } else if self.analysis_cache_discarded.swap(false, Ordering::SeqCst) {
             self.evaluator.delete_functions(&[
                 SkyFunctionName::CONFIGURED_TARGET,
                 SkyFunctionName::ACTION_EXECUTION,
             ]);
+            state_reset = true;
         }
         {
             let mut last = self.last_loading_options.lock().unwrap();
@@ -217,7 +245,39 @@ impl SkyframeExecutor {
             report.modified_keys = k.len();
         }
         report.dirtied_nodes = apply_diff(&self.evaluator, &modified);
-        report
+        if !probe_leaf_changes {
+            let any_changed = state_reset
+                || !matches!(modified, ModifiedFileSet::Nothing)
+                || report.loading_options_changed;
+            return (report, any_changed);
+        }
+        let any_changed = if state_reset || report.loading_options_changed {
+            true
+        } else {
+            match &modified {
+                ModifiedFileSet::Nothing => false,
+                ModifiedFileSet::EverythingModified | ModifiedFileSet::EverythingDeleted => true,
+                ModifiedFileSet::Keys(keys) if keys.is_empty() => false,
+                ModifiedFileSet::Keys(keys) => {
+                    let res = self.evaluator.evaluate_with(
+                        keys,
+                        &EvaluationOptions {
+                            keep_going: true,
+                            threads: 1,
+                            ..Default::default()
+                        },
+                    );
+                    if !res.errors.is_empty() || !res.cycles.is_empty() {
+                        true
+                    } else {
+                        let pruned: std::collections::HashSet<&SkyKey> =
+                            res.stats.pruned.iter().collect();
+                        !keys.iter().all(|k| pruned.contains(k))
+                    }
+                }
+            }
+        };
+        (report, any_changed)
     }
 
     /// Number of times the package loader actually ran.

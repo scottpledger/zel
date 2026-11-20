@@ -703,6 +703,7 @@ pub(crate) struct BuildOutcome {
     /// Standard output of the actions (`FileOutErr` dump), printed to the command's stdout.
     pub action_stdout: Vec<u8>,
     pub schedule: ScheduleResult,
+    #[allow(dead_code)]
     pub elapsed: std::time::Duration,
     /// The runtime the actions ran with; tests run through the same strategy registry.
     pub runtime: Option<Arc<ExecRuntime>>,
@@ -931,6 +932,11 @@ pub(crate) fn run_build_actions(
                 PathFragment::create("bazel-out"),
                 Arc::new(zel_vfs::LocalFileSystem::default()),
                 server_digest_function(),
+            )
+            .with_computed_digest_cache(
+                opt_last(parsed, "cache_computed_file_digests")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(50000),
             ),
         )),
     };
@@ -1568,7 +1574,7 @@ pub(crate) fn print_build_failure_trailer(
         stderr,
         &format!(
             "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
-            out.elapsed.as_secs_f64(),
+            crate::command_elapsed_secs(),
             out.schedule.critical_path_ms as f64 / 1000.0
         ),
     );

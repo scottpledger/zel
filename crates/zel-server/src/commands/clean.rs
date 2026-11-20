@@ -283,6 +283,10 @@ impl BlazeRuntime {
         if let Ok(cache) = self.action_cache.lock() {
             cache.clear();
         }
+        self.repo_resolver.invalidate_cache();
+        self.invalidate_analysis_cache();
+        *self.eval_memo.lock().unwrap_or_else(|e| e.into_inner()) =
+            (String::new(), Default::default(), false);
 
         let symlink_prefix = match parsed.get_str("symlink_prefix") {
             Some(p) => p.to_string(),

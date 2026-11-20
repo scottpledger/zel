@@ -242,6 +242,24 @@ impl AnalysisConfig {
             ..Default::default()
         }
     }
+
+    /// Whether another command's `AnalysisConfig` has identical analysis-affecting settings,
+    /// allowing an existing `TargetResolver` (and its toolchain/platform expansion caches) to be
+    /// reused across commands when no inputs changed.
+    pub fn matches_for_reuse(&self, other: &Self) -> bool {
+        self.registered_toolchains == other.registered_toolchains
+            && self.extra_execution_platforms == other.extra_execution_platforms
+            && self.toolchain_patterns == other.toolchain_patterns
+            && self.extra_toolchain_pattern_count == other.extra_toolchain_pattern_count
+            && self.execution_platform_patterns == other.execution_platform_patterns
+            && self.allow_unresolved_symlinks == other.allow_unresolved_symlinks
+            && self.no_compact_repo_mapping == other.no_compact_repo_mapping
+            && self.check_visibility == other.check_visibility
+            && self.host_platform == other.host_platform
+            && self.platforms_repo == other.platforms_repo
+            && self.shell_executable == other.shell_executable
+            && self.sibling_repository_layout == other.sibling_repository_layout
+    }
 }
 
 pub struct TargetResolver {
@@ -266,6 +284,10 @@ pub struct TargetResolver {
     /// key -> deps in attribute order); used by `cquery`.
     #[allow(clippy::type_complexity)]
     edges: Mutex<HashMap<(String, String), Vec<(Label, BuildConfigurationKey)>>>,
+    /// All analysis dependency edges recorded across `analyze()` calls (including toolchains,
+    /// output files, aliases, transitions, and aspect targets) for root-scoped graph queries.
+    #[allow(clippy::type_complexity)]
+    all_deps: Mutex<HashMap<(String, String), Vec<(String, String)>>>,
     /// Analysis-time rule warnings (`ruleContext.ruleWarning`), in the order they were reported.
     warnings: Mutex<Vec<String>>,
     me: Weak<TargetResolver>,
@@ -462,6 +484,7 @@ impl TargetResolver {
             order: Mutex::new(Vec::new()),
             aspects: Mutex::new(HashMap::new()),
             edges: Mutex::new(HashMap::new()),
+            all_deps: Mutex::new(HashMap::new()),
             warnings: Mutex::new(Vec::new()),
             me: me.clone(),
         })
@@ -687,6 +710,13 @@ impl TargetResolver {
             }
         };
         let k = key(label, cfg);
+        if let Some(owner) = self.stack.lock().unwrap().last().cloned() {
+            let mut deps = self.all_deps.lock().unwrap();
+            let entry = deps.entry(owner).or_default();
+            if !entry.contains(&k) {
+                entry.push(k.clone());
+            }
+        }
         if let Some(c) = self.cache.lock().unwrap().get(&k) {
             return Ok(c.clone());
         }
@@ -817,6 +847,69 @@ impl TargetResolver {
         v
     }
 
+    /// Number of configured targets cached in this resolver.
+    pub fn analyzed_count(&self) -> usize {
+        self.cache.lock().unwrap().len()
+    }
+
+    /// Collects the set of `(label, cfg)` keys transitively reachable from `roots`.
+    fn reachable_keys(
+        &self,
+        roots: &[Arc<ConfiguredTarget>],
+    ) -> std::collections::HashSet<(String, String)> {
+        let deps = self.all_deps.lock().unwrap();
+        let mut visited: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut work: Vec<(String, String)> = Vec::with_capacity(roots.len());
+        for r in roots {
+            let k = key(&r.label, &r.configuration);
+            if visited.insert(k.clone()) {
+                work.push(k);
+            }
+        }
+        while let Some(cur) = work.pop() {
+            if let Some(children) = deps.get(&cur) {
+                for ch in children {
+                    if visited.insert(ch.clone()) {
+                        work.push(ch.clone());
+                    }
+                }
+            }
+        }
+        visited
+    }
+
+    /// Every configured target transitively reachable from `roots`, in analysis order, plus
+    /// aspect-decorated targets attached to reachable nodes.
+    pub fn reachable_targets(&self, roots: &[Arc<ConfiguredTarget>]) -> Vec<Arc<ConfiguredTarget>> {
+        let reachable = self.reachable_keys(roots);
+        let mut v: Vec<Arc<ConfiguredTarget>> = self
+            .order
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|ct| reachable.contains(&key(&ct.label, &ct.configuration)))
+            .cloned()
+            .collect();
+        for ct in self.aspects.lock().unwrap().values() {
+            if reachable.contains(&key(&ct.label, &ct.configuration)) {
+                v.push(ct.clone());
+            }
+        }
+        v
+    }
+
+    /// Resets per-command transient bookkeeping while preserving cached configured targets,
+    /// loaded packages, dependency edges, and toolchain/platform expansion caches.
+    pub fn prepare_for_reuse(&self) {
+        self.stack.lock().unwrap().clear();
+        self.stack_cfg.lock().unwrap().clear();
+        self.reported_cycles.lock().unwrap().clear();
+        self.warnings.lock().unwrap().clear();
+        self.defer_cycle_dedup
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Analyses `label` in `cfg` and applies the top-level `aspects` (`--aspects`, values as
     /// returned by [`PackageLoader::load_bzl_export`]) in order; `params` are the raw
     /// `--aspects_parameters` values.
@@ -864,6 +957,32 @@ impl TargetResolver {
             }
         }
         Ok(g)
+    }
+
+    /// Action graph built from a precomputed slice of reachable configured targets plus `extra`
+    /// (e.g. roots decorated by top-level aspects).
+    pub fn action_graph_for_targets(
+        targets: &[Arc<ConfiguredTarget>],
+        extra: &[Arc<ConfiguredTarget>],
+    ) -> Result<zel_analysis::ActionGraph, zel_analysis::ActionConflict> {
+        let mut g = zel_analysis::ActionGraph::new();
+        for ct in targets.iter().chain(extra.iter()) {
+            for a in &ct.typed_actions {
+                g.register(a)?;
+            }
+        }
+        Ok(g)
+    }
+
+    /// Action graph scoped to configured targets transitively reachable from `roots` (plus
+    /// `roots` themselves, which may carry top-level aspects), so unrelated targets cached from
+    /// previous commands in a reused resolver cannot cause spurious action conflicts.
+    pub fn action_graph_for_roots(
+        &self,
+        roots: &[Arc<ConfiguredTarget>],
+    ) -> Result<zel_analysis::ActionGraph, zel_analysis::ActionConflict> {
+        let targets = self.reachable_targets(roots);
+        Self::action_graph_for_targets(&targets, roots)
     }
 
     /// Direct dependencies (label and configuration) of the configured target `label` in `cfg`,
@@ -958,6 +1077,7 @@ impl TargetResolver {
         let mut cache = self.cache.lock().unwrap();
         let mut order = self.order.lock().unwrap();
         let mut edges = self.edges.lock().unwrap();
+        let mut all_deps = self.all_deps.lock().unwrap();
         let mut pkg_sets = self.pkg_sets.lock().unwrap();
         for (k, ct) in other.cache.lock().unwrap().iter() {
             if (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
@@ -967,6 +1087,9 @@ impl TargetResolver {
                 order.push(ct.clone());
                 if let Some(e) = other.edges.lock().unwrap().get(k) {
                     edges.insert(k.clone(), e.clone());
+                }
+                if let Some(d) = other.all_deps.lock().unwrap().get(k) {
+                    all_deps.insert(k.clone(), d.clone());
                 }
                 if let Some(p) = other.pkg_sets.lock().unwrap().get(k) {
                     pkg_sets.insert(k.clone(), p.clone());
@@ -986,6 +1109,10 @@ impl TargetResolver {
             .unwrap()
             .retain(|ct| ct.configuration.core_only);
         self.edges
+            .lock()
+            .unwrap()
+            .retain(|k, _| kept_keys.contains(k));
+        self.all_deps
             .lock()
             .unwrap()
             .retain(|k, _| kept_keys.contains(k));
@@ -1009,6 +1136,10 @@ impl TargetResolver {
                 || ct.configuration.core_only
         });
         self.edges
+            .lock()
+            .unwrap()
+            .retain(|k, _| kept_keys.contains(k));
+        self.all_deps
             .lock()
             .unwrap()
             .retain(|k, _| kept_keys.contains(k));

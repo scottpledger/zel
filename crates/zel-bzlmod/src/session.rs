@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use zel_options::parser::ParsedCommandOptions;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BzlmodConfig {
     pub workspace: PathBuf,
     pub output_base: PathBuf,
@@ -1005,6 +1005,9 @@ impl Session {
         if mode == LockfileMode::Off {
             return Ok(());
         }
+        if !self.rt.lock.lock().unwrap().dirty {
+            return Ok(());
+        }
         let (ws, hid) = self.rt.compute_lockfiles();
         let text = ws.to_text();
         let path = self.cfg.lockfile_path();
@@ -1026,6 +1029,7 @@ impl Session {
             let _ = std::fs::create_dir_all(&self.cfg.output_base);
             let _ = std::fs::write(self.cfg.hidden_lockfile_path(), hid.to_text());
         }
+        self.rt.lock.lock().unwrap().dirty = false;
         Ok(())
     }
 

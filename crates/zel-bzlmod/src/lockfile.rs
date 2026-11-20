@@ -430,6 +430,7 @@ pub fn result_from_lock(e: &LockExt) -> ExtensionResult {
         metadata: lock_to_metadata(&e.metadata),
         env_variables: BTreeMap::new(),
         recorded_file_inputs: BTreeMap::new(),
+        recorded_inputs: e.recorded_inputs.clone(),
     }
 }
 

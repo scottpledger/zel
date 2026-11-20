@@ -626,6 +626,18 @@ impl InMemoryMemoizingEvaluator {
         }
     }
 
+    /// Updates the stored value of an existing precomputed node without advancing `last_changed`
+    /// or dirtying reverse dependencies (used after a command flushes its own `MODULE.bazel.lock`
+    /// so the subsequent command's `loading_signature` does not treat that self-write as an
+    /// external edit).
+    pub fn update_precomputed_silently(&self, key: SkyKey, value: Arc<dyn SkyValue>) {
+        let mut core = self.core.lock().unwrap();
+        if let Some(node) = core.graph.nodes.get_mut(&key) {
+            node.value = Some(NodeValue::Value(value));
+            node.dirty = Dirty::Clean;
+        }
+    }
+
     /// Marks `keys` as changed externally (`NeedsRebuild`) and their transitive reverse
     /// dependencies as needing verification (`DirtyType.CHANGE`). Returns the number of nodes dirtied.
     pub fn invalidate(&self, keys: &[SkyKey]) -> usize {

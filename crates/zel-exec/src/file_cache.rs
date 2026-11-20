@@ -72,6 +72,7 @@ pub struct SingleBuildFileCache<'a> {
     relative_output_path: PathFragment,
     fs: FsRef<'a>,
     digest_fn: Option<crate::DigestFunction>,
+    computed_digest_cache_limit: usize,
     cache: Mutex<HashMap<PathFragment, Result<CachedFileMetadata, FileCacheError>>>,
 }
 
@@ -99,8 +100,14 @@ impl SingleBuildFileCache<'static> {
             relative_output_path,
             fs: FsRef::Owned(fs),
             digest_fn: Some(digest_fn),
+            computed_digest_cache_limit: 0,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn with_computed_digest_cache(mut self, max_entries: usize) -> Self {
+        self.computed_digest_cache_limit = max_entries;
+        self
     }
 }
 
@@ -117,6 +124,7 @@ impl<'a> SingleBuildFileCache<'a> {
             relative_output_path,
             fs: FsRef::Borrowed(fs),
             digest_fn: None,
+            computed_digest_cache_limit: 0,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -177,7 +185,13 @@ impl<'a> SingleBuildFileCache<'a> {
                     )))
                 } else {
                     let digest_res = match self.digest_fn {
-                        Some(df) => fs.read_file(disk_path).map(|b| df.hash(&b)),
+                        Some(df) => crate::cached_file_digest_bytes(
+                            df,
+                            fs,
+                            disk_path,
+                            &st,
+                            self.computed_digest_cache_limit,
+                        ),
                         None => fs.get_digest(disk_path),
                     };
                     match digest_res {
@@ -265,5 +279,113 @@ mod tests {
             cache.get_artifact_metadata(&derived),
             Err(FileCacheError::IllegalState(_))
         ));
+    }
+
+    #[test]
+    fn computed_digest_cache_reuses_unchanged_files_and_invalidates_on_edit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingFs {
+            inner: LocalFileSystem,
+            reads: Arc<AtomicUsize>,
+        }
+        impl FileSystem for CountingFs {
+            fn stat(&self, path: &PathFragment, follow: bool) -> io::Result<zel_vfs::FileStatus> {
+                self.inner.stat(path, follow)
+            }
+            fn read_file(&self, path: &PathFragment) -> io::Result<Vec<u8>> {
+                self.reads.fetch_add(1, Ordering::SeqCst);
+                self.inner.read_file(path)
+            }
+            fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
+                self.inner.write_file(path, content)
+            }
+            fn create_directory(&self, path: &PathFragment) -> io::Result<bool> {
+                self.inner.create_directory(path)
+            }
+            fn delete(&self, path: &PathFragment) -> io::Result<bool> {
+                self.inner.delete(path)
+            }
+            fn readdir(&self, path: &PathFragment) -> io::Result<Vec<zel_vfs::Dirent>> {
+                self.inner.readdir(path)
+            }
+            fn read_symbolic_link(&self, path: &PathFragment) -> io::Result<PathFragment> {
+                self.inner.read_symbolic_link(path)
+            }
+            fn create_symbolic_link(
+                &self,
+                link: &PathFragment,
+                target: &PathFragment,
+            ) -> io::Result<()> {
+                self.inner.create_symbolic_link(link, target)
+            }
+            fn rename(&self, src: &PathFragment, dst: &PathFragment) -> io::Result<()> {
+                self.inner.rename(src, dst)
+            }
+            fn digest_hash_function(&self) -> zel_vfs::DigestHashFunction {
+                self.inner.digest_hash_function()
+            }
+            fn create_directory_and_parents(&self, path: &PathFragment) -> io::Result<()> {
+                self.inner.create_directory_and_parents(path)
+            }
+            fn set_last_modified_time(&self, path: &PathFragment, mtime_ms: i64) -> io::Result<()> {
+                self.inner.set_last_modified_time(path, mtime_ms)
+            }
+        }
+
+        let d = std::env::temp_dir().join(format!("zel-sbfc-digest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let ws = d.join("ws");
+        let er = d.join("ob/execroot/_main");
+        std::fs::create_dir_all(ws.join("pkg")).unwrap();
+        std::fs::create_dir_all(&er).unwrap();
+        let file = ws.join("pkg/stable.txt");
+        std::fs::write(&file, b"version-one").unwrap();
+
+        // Set mtime > 2s in the past so the file is outside the racy-mtime window.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let fs: Arc<dyn FileSystem> = Arc::new(CountingFs {
+            inner: LocalFileSystem::default(),
+            reads: Arc::clone(&reads),
+        });
+        let art = Artifact::source(
+            PathFragment::create("pkg/stable.txt"),
+            Label::parse_canonical("//pkg:t").unwrap(),
+        );
+
+        let mk_cache = || {
+            SingleBuildFileCache::new_owned(
+                PathFragment::create(&er.to_string_lossy()),
+                Some(PathFragment::create(&ws.to_string_lossy())),
+                PathFragment::create("bazel-out"),
+                Arc::clone(&fs),
+                crate::DigestFunction::Sha256,
+            )
+            .with_computed_digest_cache(50_000)
+        };
+
+        let m1 = mk_cache().get_artifact_metadata(&art).unwrap();
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // Fresh SingleBuildFileCache for the next build must reuse the cached digest without reading.
+        let m2 = mk_cache().get_artifact_metadata(&art).unwrap();
+        assert_eq!(m2.digest, m1.digest);
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+
+        // Editing the file (even within the racy window) must bypass/invalidate the cached digest.
+        std::fs::write(&file, b"version-two-edited").unwrap();
+        let m3 = mk_cache().get_artifact_metadata(&art).unwrap();
+        assert_ne!(m3.digest, m1.digest);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

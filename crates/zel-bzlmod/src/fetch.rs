@@ -364,7 +364,7 @@ impl Rt {
         }
     }
 
-    fn marker_path(&self, canonical: &str) -> PathBuf {
+    pub(crate) fn marker_path(&self, canonical: &str) -> PathBuf {
         self.external_dir().join(format!("@{canonical}.marker"))
     }
 
@@ -607,11 +607,20 @@ impl Rt {
             .fetching
             .retain(|c| c != canonical);
         r?;
-        self.state
-            .lock()
-            .unwrap()
-            .fetched
-            .insert(canonical.to_string());
+        let recorded_inputs = std::fs::read_to_string(self.marker_path(canonical))
+            .ok()
+            .map(|text| {
+                text.lines()
+                    .skip(1)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut st = self.state.lock().unwrap();
+        st.fetched.insert(canonical.to_string());
+        st.fetched_recorded_inputs
+            .insert(canonical.to_string(), recorded_inputs);
         Ok(dir)
     }
 
@@ -1827,6 +1836,7 @@ impl Rt {
                             facts: reused_facts,
                             facts_version: reused_ver,
                         });
+                        l.dirty = true;
                     }
                     return Ok(crate::lockfile::result_from_lock(&le));
                 }
@@ -2180,16 +2190,18 @@ impl Rt {
                 ));
             }
         }
+        let recorded_inputs: Vec<String> = rec
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(i, v)| crate::ctx::format_recorded(i, v.as_deref()))
+            .collect();
+        out.recorded_inputs = recorded_inputs.clone();
         if matches!(
             mode,
             crate::lockfile::LockfileMode::Update | crate::lockfile::LockfileMode::Refresh
         ) {
-            let inputs: Vec<String> = rec
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|(i, v)| crate::ctx::format_recorded(i, v.as_deref()))
-                .collect();
+            let inputs = recorded_inputs;
             // `SingleExtensionEvalFunction`: a recorded apparent name that is not visible makes the lockfile entry invalid.
             let invisible: Vec<String> = rec
                 .lock()
@@ -2218,13 +2230,15 @@ impl Rt {
                     .as_ref()
                     .and_then(crate::lockfile::metadata_to_lock),
             };
-            self.lock.lock().unwrap().used.push(crate::rt::UsedLockExt {
+            let mut l = self.lock.lock().unwrap();
+            l.used.push(crate::rt::UsedLockExt {
                 key: lock_key,
                 factors,
                 entry: le,
                 facts: new_facts,
                 facts_version: def.facts_version as i64,
             });
+            l.dirty = true;
         }
         Ok(out)
     }
@@ -5135,6 +5149,7 @@ inspect_repo(name = "via_use_repo_rule")
                     metadata: None,
                     env_variables: BTreeMap::new(),
                     recorded_file_inputs: BTreeMap::new(),
+                    recorded_inputs: Vec::new(),
                 },
             );
             st.evaluating_exts.push(short_id.clone());
@@ -5178,6 +5193,7 @@ inspect_repo(name = "via_use_repo_rule")
                     metadata: None,
                     env_variables: BTreeMap::new(),
                     recorded_file_inputs: BTreeMap::new(),
+                    recorded_inputs: Vec::new(),
                 },
             );
         }
@@ -5197,6 +5213,7 @@ inspect_repo(name = "via_use_repo_rule")
                     metadata: None,
                     env_variables: BTreeMap::new(),
                     recorded_file_inputs: BTreeMap::new(),
+                    recorded_inputs: Vec::new(),
                 },
             );
         }

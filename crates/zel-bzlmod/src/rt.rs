@@ -110,6 +110,9 @@ pub struct ExtensionResult {
     pub metadata: Option<ExtensionMetadata>,
     pub env_variables: BTreeMap<String, Option<String>>,
     pub recorded_file_inputs: BTreeMap<String, String>,
+    /// Serialized recorded inputs (same format as lockfile `recorded_inputs`) used to revalidate
+    /// cached extension evaluations across daemon commands.
+    pub recorded_inputs: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -139,6 +142,129 @@ pub struct LockState {
     pub hidden: crate::lockfile::Lockfile,
     /// Entries (extension key, factors, entry, facts) produced or reused in this session.
     pub used: Vec<UsedLockExt>,
+    /// Whether the lockfile needs to be written on `Session::finish()`.
+    pub dirty: bool,
+}
+
+/// Metadata + content fingerprint for fast, racy-safe staleness checks of watched files.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FileStamp {
+    pub exists: bool,
+    pub is_dir: bool,
+    pub len: u64,
+    pub mtime_ns: i128,
+    pub sha256: Option<String>,
+}
+
+impl FileStamp {
+    const RACY_WINDOW_NS: i128 = 2_000_000_000;
+
+    fn mtime_ns(md: &std::fs::Metadata) -> i128 {
+        md.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as i128)
+            .unwrap_or(0)
+    }
+
+    fn now_ns() -> i128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i128)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn capture(path: &Path) -> Self {
+        let Ok(md) = std::fs::metadata(path) else {
+            return Self {
+                exists: false,
+                is_dir: false,
+                len: 0,
+                mtime_ns: 0,
+                sha256: None,
+            };
+        };
+        let mtime_ns = Self::mtime_ns(&md);
+        if md.is_dir() {
+            return Self {
+                exists: true,
+                is_dir: true,
+                len: 0,
+                mtime_ns,
+                sha256: None,
+            };
+        }
+        let sha256 = std::fs::read(path)
+            .ok()
+            .map(|bytes| crate::hash::sha256_hex(&bytes));
+        Self {
+            exists: true,
+            is_dir: false,
+            len: md.len(),
+            mtime_ns,
+            sha256,
+        }
+    }
+
+    pub(crate) fn capture_with_sha256(path: &Path, sha256: String) -> Self {
+        let Ok(md) = std::fs::metadata(path) else {
+            return Self {
+                exists: false,
+                is_dir: false,
+                len: 0,
+                mtime_ns: 0,
+                sha256: None,
+            };
+        };
+        Self {
+            exists: true,
+            is_dir: md.is_dir(),
+            len: if md.is_dir() { 0 } else { md.len() },
+            mtime_ns: Self::mtime_ns(&md),
+            sha256: if md.is_dir() { None } else { Some(sha256) },
+        }
+    }
+
+    pub(crate) fn matches(&self, path: &Path) -> bool {
+        let Ok(md) = std::fs::metadata(path) else {
+            return !self.exists;
+        };
+        if !self.exists || md.is_dir() != self.is_dir {
+            return false;
+        }
+        let mtime_ns = Self::mtime_ns(&md);
+        if self.is_dir {
+            if mtime_ns != self.mtime_ns || mtime_ns == 0 {
+                return false;
+            }
+            return Self::now_ns().saturating_sub(mtime_ns) > Self::RACY_WINDOW_NS;
+        }
+        if md.len() != self.len {
+            return false;
+        }
+        if mtime_ns == self.mtime_ns
+            && mtime_ns != 0
+            && Self::now_ns().saturating_sub(mtime_ns) > Self::RACY_WINDOW_NS
+        {
+            return true;
+        }
+        let Some(expected) = &self.sha256 else {
+            return false;
+        };
+        std::fs::read(path)
+            .ok()
+            .is_some_and(|bytes| crate::hash::sha256_hex(&bytes) == *expected)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RevalidateOutcome {
+    /// All cached `.bzl` files, extension results, and fetched repositories remain valid.
+    Unchanged,
+    /// One or more cached extensions or repos were evicted; the session itself can remain open.
+    PartialInvalidation,
+    /// A `.bzl` file (or repo supplying a `.bzl` file) changed; reopen the session from scratch.
+    MustReopen,
 }
 
 pub struct Rt {
@@ -214,6 +340,11 @@ pub(crate) struct RtState {
     pub ext_results: HashMap<ExtensionId, ExtensionResult>,
     pub evaluating_exts: Vec<ExtensionId>,
     pub fetched: HashSet<String>,
+    /// Recorded marker input lines (lines after line 0 of `@<canonical>.marker`) for each repo
+    /// currently cached in `fetched`.
+    pub fetched_recorded_inputs: HashMap<String, Vec<String>>,
+    /// Filesystem stamps for every `.bzl` file evaluated/loaded by this `Rt`.
+    pub bzl_file_stamps: HashMap<PathBuf, FileStamp>,
     pub fetching: Vec<String>,
     /// Active collectors for repos created by calling repository rules inside an extension.
     pub collectors: Vec<RepoCollector>,
@@ -932,10 +1063,12 @@ impl Rt {
                 .filter_map(|l| self.resolve_label(&l.module_label, repo, pkg).ok())
                 .map(|(r, p, n)| format!("@@{r}//{p}:{n}"))
                 .collect();
-            st.bzl_deps.insert(
-                key.to_string(),
-                (crate::hash::sha256_hex(src.as_bytes()), children),
+            let sha = crate::hash::sha256_hex(src.as_bytes());
+            st.bzl_file_stamps.insert(
+                path.clone(),
+                FileStamp::capture_with_sha256(&path, sha.clone()),
             );
+            st.bzl_deps.insert(key.to_string(), (sha, children));
         }
         for pass_private in [false, true] {
             for (n, v) in &ctx.exported_assignments {
@@ -1062,10 +1195,13 @@ impl Rt {
                         zel_cmdline::Label::parse_canonical(key).map_err(|e| e.to_string())?;
                     if let Ok(exports) = self.package_loader().load_bzl_exports(&label) {
                         // Record the dependency edge for lockfile digests like `eval_bzl_fresh` does.
-                        self.state.lock().unwrap().bzl_deps.insert(
-                            key.to_string(),
-                            (crate::hash::sha256_hex(src.as_bytes()), vec![]),
+                        let sha = crate::hash::sha256_hex(src.as_bytes());
+                        let mut st = self.state.lock().unwrap();
+                        st.bzl_file_stamps.insert(
+                            path.clone(),
+                            FileStamp::capture_with_sha256(&path, sha.clone()),
                         );
+                        st.bzl_deps.insert(key.to_string(), (sha, vec![]));
                         return Ok(exports);
                     }
                     // Re-evaluate failures through the Bzlmod Starlark context below so static
@@ -2077,6 +2213,131 @@ impl Rt {
         l.workspace = workspace;
         l.hidden = hidden;
         l.used.clear();
+        l.dirty = true;
+    }
+
+    /// Revalidates cached `.bzl` files, extension results, and fetched repositories against the
+    /// current filesystem/environment before reusing this `Rt` in a subsequent command.
+    pub(crate) fn revalidate_for_command(&self) -> RevalidateOutcome {
+        let (bzl_stamps, ext_entries, fetched_entries) = {
+            let st = self.state.lock().unwrap();
+            let bzl_stamps: Vec<(PathBuf, FileStamp)> = st
+                .bzl_file_stamps
+                .iter()
+                .map(|(p, s)| (p.clone(), s.clone()))
+                .collect();
+            let ext_entries: Vec<(ExtensionId, Vec<String>, Vec<String>)> = st
+                .ext_results
+                .iter()
+                .map(|(id, res)| {
+                    let unique = self
+                        .resolution
+                        .extension_unique_names
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_default();
+                    let generated = res
+                        .generated
+                        .iter()
+                        .map(|(n, _)| format!("{unique}+{n}"))
+                        .collect();
+                    (id.clone(), res.recorded_inputs.clone(), generated)
+                })
+                .collect();
+            let fetched_entries: Vec<(String, Vec<String>)> = st
+                .fetched
+                .iter()
+                .map(|c| {
+                    let inputs = st
+                        .fetched_recorded_inputs
+                        .get(c)
+                        .cloned()
+                        .unwrap_or_default();
+                    (c.clone(), inputs)
+                })
+                .collect();
+            (bzl_stamps, ext_entries, fetched_entries)
+        };
+
+        for (path, stamp) in &bzl_stamps {
+            if !stamp.matches(path) {
+                return RevalidateOutcome::MustReopen;
+            }
+        }
+
+        let lookup = |src: &str| self.try_repo_mapping_of(src);
+        let ext_dir = self.external_dir();
+        let mut stale_exts: Vec<ExtensionId> = Vec::new();
+        let mut stale_repos: HashSet<String> = HashSet::new();
+
+        for (id, inputs, generated) in &ext_entries {
+            if crate::lockfile::recorded_inputs_outdated_with_lookup(
+                inputs,
+                &self.opts.client_env,
+                &self.opts.workspace_root,
+                &ext_dir,
+                Some(&lookup),
+            )
+            .is_some()
+            {
+                stale_exts.push(id.clone());
+                stale_repos.extend(generated.iter().cloned());
+            }
+        }
+
+        for (canonical, inputs) in &fetched_entries {
+            if stale_repos.contains(canonical) {
+                continue;
+            }
+            if !self.repo_dir(canonical).exists()
+                || crate::lockfile::recorded_inputs_outdated_with_lookup(
+                    inputs,
+                    &self.opts.client_env,
+                    &self.opts.workspace_root,
+                    &ext_dir,
+                    Some(&lookup),
+                )
+                .is_some()
+            {
+                stale_repos.insert(canonical.clone());
+            }
+        }
+
+        if stale_exts.is_empty() && stale_repos.is_empty() {
+            return RevalidateOutcome::Unchanged;
+        }
+
+        // If any invalidated repository previously supplied a loaded `.bzl` file, reopen cleanly
+        // so `.bzl` caches, rule metadata, and transitive digests cannot go stale.
+        for canonical in &stale_repos {
+            let dir = self.repo_dir(canonical);
+            if bzl_stamps.iter().any(|(p, _)| p.starts_with(&dir)) {
+                return RevalidateOutcome::MustReopen;
+            }
+        }
+
+        {
+            let mut st = self.state.lock().unwrap();
+            for id in &stale_exts {
+                st.ext_results.remove(id);
+            }
+            for canonical in &stale_repos {
+                st.fetched.remove(canonical);
+                st.fetched_recorded_inputs.remove(canonical);
+                let _ = crate::fetch::remove_any(&self.repo_dir(canonical));
+                let _ = std::fs::remove_file(self.marker_path(canonical));
+            }
+        }
+        if !stale_exts.is_empty() {
+            let stale_keys: HashSet<String> = stale_exts
+                .iter()
+                .map(crate::lockfile::extension_key)
+                .collect();
+            let mut l = self.lock.lock().unwrap();
+            l.used.retain(|u| !stale_keys.contains(&u.key));
+            l.dirty = true;
+        }
+        RevalidateOutcome::PartialInvalidation
     }
 
     /// Computes the lockfiles (workspace, hidden) to write after the session, per

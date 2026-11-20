@@ -632,7 +632,7 @@ impl BuildObserver {
         });
         reporter.add_action_listener(actions.clone());
 
-        let started = Instant::now();
+        let started = crate::command_start_instant();
         let cpu_at_start = crate::sys::cpu_seconds();
         let sampler = profile_path
             .as_ref()
