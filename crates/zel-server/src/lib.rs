@@ -404,14 +404,13 @@ impl BlazeRuntime {
                 .find_map(|a| a.strip_prefix("--client_cwd="))
             {
                 let ws = self.dirs.workspace_dir.path_string();
-                let escapes = if raw_cwd.starts_with('/') {
-                    let norm = zel_vfs::PathFragment::create(raw_cwd);
-                    let ws_pf = zel_vfs::PathFragment::create(ws);
-                    !norm.starts_with(&ws_pf)
+                let norm = zel_vfs::PathFragment::create(raw_cwd);
+                let escapes = if norm.is_absolute() {
+                    !norm.starts_with(&self.dirs.workspace_dir)
                 } else {
                     let mut depth = 0i32;
                     let mut bad = false;
-                    for seg in raw_cwd.split('/') {
+                    for seg in norm.path_string().split('/') {
                         match seg {
                             "" | "." => {}
                             ".." => {

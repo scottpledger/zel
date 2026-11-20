@@ -146,30 +146,50 @@ impl PathFragment {
         }
     }
 
-    /// Creates a new normalized `PathFragment` from a raw string.
+    /// Creates a new normalized `PathFragment` from a raw string using host path semantics.
+    ///
+    /// On Windows (`OsPathPolicy::Windows`), both backslash (`\\server\share\...`) and
+    /// forward-slash (`//server/share/...`) UNC paths normalize to `//server/share/...` with
+    /// `drive_str_len == 2`, preserving `PathFragment::create(pf.path_string()) == pf`
+    /// idempotence (`PathFragment.java:133-144`) as well as forward-slash UNC paths from
+    /// `.bazelrc` and CLI options. On Unix (`UnixOsPathPolicy.java:62-92`), leading `//foo/bar`
+    /// collapses to `/foo/bar` (`drive_str_len == 1`).
     pub fn create(raw: &str) -> Self {
+        Self::create_internal(raw, cfg!(windows))
+    }
+
+    fn create_internal(raw: &str, allow_forward_slash_unc: bool) -> Self {
         if raw.is_empty() {
             return Self::empty();
         }
-        let unprefixed = if raw.starts_with(r"\\?\") || raw.starts_with(r"\??\") {
-            strip_windows_nt_prefix(raw)
-        } else {
-            std::borrow::Cow::Borrowed(raw)
-        };
-        let is_windows_unc = unprefixed.starts_with(r"\\") && !unprefixed.starts_with(r"\\\");
-        let mut replaced: String = unprefixed
+        let is_nt_unc = raw
+            .strip_prefix(r"\\?\")
+            .or_else(|| raw.strip_prefix(r"\??\"))
+            .or_else(|| raw.strip_prefix("//?/"))
+            .is_some_and(|rest| {
+                rest.len() >= 4
+                    && rest[..3].eq_ignore_ascii_case("UNC")
+                    && matches!(rest.as_bytes()[3], b'\\' | b'/')
+            });
+        let unprefixed =
+            if raw.starts_with(r"\\?\") || raw.starts_with(r"\??\") || raw.starts_with("//?/") {
+                strip_windows_nt_prefix(raw)
+            } else {
+                std::borrow::Cow::Borrowed(raw)
+            };
+        let has_backslash_unc_prefix =
+            unprefixed.starts_with(r"\\") && !unprefixed.starts_with(r"\\\");
+        let replaced: String = unprefixed
             .chars()
             .map(|c| if c == '\\' { '/' } else { c })
             .collect();
-        if let Some(rest) = replaced.strip_prefix("//?/") {
-            let rb = rest.as_bytes();
-            if rb.len() >= 4 && rest[..3].eq_ignore_ascii_case("UNC") && rb[3] == b'/' {
-                return Self::create(&format!(r"\\{}", &rest[4..]));
-            }
-            if rb.len() >= 2 && rb[0].is_ascii_alphabetic() && rb[1] == b':' {
-                replaced = rest.to_string();
-            }
-        }
+        let is_valid_unc_shape = replaced == "//"
+            || (replaced.starts_with("//") && !replaced.starts_with("///") && {
+                let first_seg = replaced[2..].split('/').next().unwrap_or("");
+                !first_seg.is_empty() && first_seg != "." && first_seg != ".."
+            });
+        let is_windows_unc = is_valid_unc_shape
+            && (allow_forward_slash_unc || has_backslash_unc_prefix || is_nt_unc);
         let bytes = replaced.as_bytes();
 
         let (prefix, drive_str_len, rest) = if is_windows_unc {
@@ -361,17 +381,17 @@ impl PathFragment {
         if other.is_empty() {
             return self.clone();
         }
-        if self.drive_str_len == 2 {
-            let tail = self.normalized[2..].trim_end_matches('/');
-            if tail.is_empty() {
-                return Self::create(&format!(r"\\{}", other.normalized));
-            }
-            return Self::create(&format!(r"\\{tail}/{}", other.normalized));
-        }
+        let allow_forward_slash_unc = cfg!(windows) || self.drive_str_len == 2;
         if self.normalized.ends_with('/') {
-            Self::create(&format!("{}{}", self.normalized, other.normalized))
+            Self::create_internal(
+                &format!("{}{}", self.normalized, other.normalized),
+                allow_forward_slash_unc,
+            )
         } else {
-            Self::create(&format!("{}/{}", self.normalized, other.normalized))
+            Self::create_internal(
+                &format!("{}/{}", self.normalized, other.normalized),
+                allow_forward_slash_unc,
+            )
         }
     }
 
@@ -453,7 +473,7 @@ impl PathFragment {
     /// On `OsPathPolicy::Unix`, `\` is a regular segment character and `c:/foo` is relative.
     pub fn create_for_os(raw: &str, policy: OsPathPolicy) -> Self {
         if policy == OsPathPolicy::Windows {
-            return Self::create(raw);
+            return Self::create_internal(raw, true);
         }
         if raw.is_empty() {
             return Self::empty();
@@ -1331,20 +1351,25 @@ pub fn unlink_path_for_write(path: &StdPath) -> bool {
     }
 }
 
-/// Strips Windows NT object (`\??\`) or extended-length (`\\?\`) prefixes returned by
-/// `std::fs::canonicalize` and `std::fs::read_link`, converting `\\?\UNC\server\share\...` and
-/// `\??\UNC\server\share\...` (case-insensitive `UNC\`) back to `\\server\share\...` while turning
-/// `\\?\C:\...` into `C:\...`.
+/// Strips Windows NT object (`\??\`) or extended-length (`\\?\`, `//?/`) prefixes returned by
+/// `std::fs::canonicalize` and `std::fs::read_link`, converting `\\?\UNC\server\share\...`,
+/// `\??\UNC\server\share\...`, and `//?/UNC/server/share/...` (case-insensitive `UNC`) back to a
+/// two-slash UNC prefix while turning `\\?\C:\...` into `C:\...`.
 pub fn strip_windows_nt_prefix(raw: &str) -> std::borrow::Cow<'_, str> {
     if let Some(rest) = raw
         .strip_prefix(r"\\?\")
         .or_else(|| raw.strip_prefix(r"\??\"))
+        .or_else(|| raw.strip_prefix("//?/"))
     {
         if rest.len() >= 4
             && rest[..3].eq_ignore_ascii_case("UNC")
             && matches!(rest.as_bytes()[3], b'\\' | b'/')
         {
-            let sep = rest.as_bytes()[3] as char;
+            let sep = if raw.starts_with("//?/") {
+                '/'
+            } else {
+                rest.as_bytes()[3] as char
+            };
             return std::borrow::Cow::Owned(format!("{sep}{sep}{}", &rest[4..]));
         }
         return std::borrow::Cow::Borrowed(rest);
@@ -2896,5 +2921,98 @@ mod tests {
             "/tmp/installbase",
             false,
         ));
+    }
+
+    #[test]
+    fn unc_path_fragment_reparse_idempotence_and_os_slash_policies() {
+        let expected_unc = "//server/share/ws/pkg";
+        for raw in [
+            r"\\server\share\ws\pkg",
+            r"\\?\UNC\server\share\ws\pkg",
+            r"\??\UNC\server\share\ws\pkg",
+            "//?/UNC/server/share/ws/pkg",
+            "//server/share/ws/pkg",
+            "//server/share/ws/./sub/../pkg/",
+        ] {
+            let pf = PathFragment::create_for_os(raw, OsPathPolicy::Windows);
+            assert!(pf.is_absolute(), "expected absolute UNC for {raw}");
+            assert_eq!(
+                pf.drive_str_length(),
+                2,
+                "expected UNC root len 2 for {raw}"
+            );
+            assert_eq!(pf.path_string(), expected_unc, "unexpected path for {raw}");
+            assert_eq!(
+                PathFragment::create_for_os(pf.path_string(), OsPathPolicy::Windows),
+                pf,
+                "reparse must be idempotent for {raw}"
+            );
+        }
+
+        let mut cursor = Some(PathFragment::create_for_os(
+            "//server/share/ws/pkg",
+            OsPathPolicy::Windows,
+        ));
+        let mut chain = Vec::new();
+        while let Some(cur) = cursor {
+            assert_eq!(
+                PathFragment::create_for_os(cur.path_string(), OsPathPolicy::Windows),
+                cur
+            );
+            chain.push(cur.path_string().to_string());
+            cursor = cur.parent_directory();
+        }
+        assert_eq!(
+            chain,
+            vec![
+                "//server/share/ws/pkg",
+                "//server/share/ws",
+                "//server/share",
+                "//server",
+                "//",
+            ]
+        );
+
+        let unc_root = PathFragment::create_for_os("//", OsPathPolicy::Windows);
+        assert_eq!(
+            unc_root
+                .get_relative_for_os("server/share", OsPathPolicy::Windows)
+                .get_relative_str("ws")
+                .path_string(),
+            "//server/share/ws"
+        );
+
+        // Three or more leading slashes and dot-prefixed segments are not UNC shares even on Windows.
+        let triple = PathFragment::create_for_os("///a//b/./c/", OsPathPolicy::Windows);
+        assert_eq!(triple.path_string(), "/a/b/c");
+        assert_eq!(triple.drive_str_length(), 1);
+        let dot_seg = PathFragment::create_for_os("//./a/b", OsPathPolicy::Windows);
+        assert_eq!(dot_seg.path_string(), "/a/b");
+        assert_eq!(dot_seg.drive_str_length(), 1);
+
+        // Unix policy always collapses leading `//+` to a single `/` (`UnixOsPathPolicy.java`).
+        let unix_double = PathFragment::create_for_os("//foo/bar", OsPathPolicy::Unix);
+        assert_eq!(unix_double.path_string(), "/foo/bar");
+        assert_eq!(unix_double.drive_str_length(), 1);
+        assert_eq!(
+            PathFragment::create_for_os(unix_double.path_string(), OsPathPolicy::Unix),
+            unix_double
+        );
+
+        #[cfg(windows)]
+        {
+            let host_unc = PathFragment::create("//server/share/ws/pkg");
+            assert_eq!(host_unc.path_string(), "//server/share/ws/pkg");
+            assert_eq!(host_unc.drive_str_length(), 2);
+            assert_eq!(PathFragment::create(host_unc.path_string()), host_unc);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let host_posix = PathFragment::create("//foo/bar");
+            assert_eq!(host_posix.path_string(), "/foo/bar");
+            assert_eq!(host_posix.drive_str_length(), 1);
+            assert_eq!(PathFragment::create(host_posix.path_string()), host_posix);
+        }
     }
 }

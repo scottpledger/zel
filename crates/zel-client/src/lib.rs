@@ -887,7 +887,11 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     {
         let real = |p: &str| {
             std::fs::canonicalize(p)
-                .map(|c| normalize_canonical_path(&c))
+                .map(|c| {
+                    PathFragment::create(&normalize_canonical_path(&c))
+                        .path_string()
+                        .to_string()
+                })
                 .unwrap_or_else(|_| p.to_string())
         };
         let cache = format!(
@@ -1682,6 +1686,32 @@ mod tests {
         )
         .unwrap();
         let unc_cwd = PathFragment::create(&unc);
-        assert_eq!(find_workspace_root_opt(&fs, &unc_cwd), Some(ws_root));
+        assert_eq!(
+            find_workspace_root_opt(&fs, &unc_cwd),
+            Some(ws_root.clone())
+        );
+
+        // Forward-slash UNC paths (from `.bazelrc` where `\` is an escape, `--output_base`,
+        // `--client_cwd`, or re-parsing `PathFragment::path_string()` on Windows) must stay on
+        // the `//fileserver/share/...` UNC share instead of collapsing to `/fileserver/share/...`.
+        let reparsed_ws =
+            PathFragment::create_for_os(ws_root.path_string(), zel_vfs::OsPathPolicy::Windows);
+        assert_eq!(reparsed_ws, ws_root);
+        let rc_cwd = PathFragment::create_for_os(
+            "//fileserver/share/team/ws/sub",
+            zel_vfs::OsPathPolicy::Windows,
+        );
+        assert_eq!(find_workspace_root_opt(&fs, &rc_cwd), Some(ws_root.clone()));
+        assert_eq!(rc_cwd.relative_to(&ws_root).unwrap().path_string(), "sub");
+
+        let rc_output_base =
+            PathFragment::create_for_os("//fileserver/share/ob", zel_vfs::OsPathPolicy::Windows);
+        assert_eq!(rc_output_base.drive_str_length(), 2);
+        let execroot = PathFragment::create_for_os(
+            rc_output_base.get_relative_str("execroot").path_string(),
+            zel_vfs::OsPathPolicy::Windows,
+        );
+        assert_eq!(execroot.path_string(), "//fileserver/share/ob/execroot");
+        assert_eq!(execroot.drive_str_length(), 2);
     }
 }
