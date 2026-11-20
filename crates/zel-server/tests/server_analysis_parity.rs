@@ -718,16 +718,26 @@ my_test(name = "my_sh_test", data = ["d.txt"])
     assert!(!bep_str.contains("secret_token"), "{bep_str}");
 
     // 5. workspace_status_command receives --client_env and honors SOURCE_DATE_EPOCH without
-    //    clobbering unchanged stable-status.txt.
+    //    clobbering unchanged stable-status.txt (including absolute paths containing spaces and
+    //    platform separators).
+    w.write(
+        "status dir/status.sh",
+        "#!/bin/sh\necho STABLE_FOO $MY_STATUS_VAR\n",
+    );
     let status_cmd = if cfg!(windows) {
         w.write(
-            "status.bat",
+            "status dir/status.bat",
             "@echo off\r\necho STABLE_FOO %MY_STATUS_VAR%\r\n",
         );
-        "status.bat".to_string()
+        w.ws.join("status dir")
+            .join("status.bat")
+            .display()
+            .to_string()
     } else {
-        let status_sh = w.ws.join("status.sh");
-        format!("\"{}\"", status_sh.to_string_lossy().replace('\\', "/"))
+        w.ws.join("status dir")
+            .join("status.sh")
+            .display()
+            .to_string()
     };
     let (code, _, err, _) = w.run(&[
         "build",
@@ -751,6 +761,38 @@ my_test(name = "my_sh_test", data = ["d.txt"])
         volatile.contains("BUILD_TIMESTAMP 1700000000"),
         "{volatile}"
     );
+
+    #[cfg(windows)]
+    {
+        let has_git_bash = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\msys64\usr\bin\bash.exe",
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).is_file());
+        if has_git_bash {
+            let win_sh_cmd =
+                w.ws.join("status dir")
+                    .join("status.sh")
+                    .display()
+                    .to_string();
+            let (code_sh, _, err_sh, _) = w.run(&[
+                "build",
+                "--stamp",
+                &format!("--workspace_status_command={win_sh_cmd}"),
+                "--client_env=MY_STATUS_VAR=from_win_sh",
+                "--client_env=SOURCE_DATE_EPOCH=1700000000",
+                "//pkg:g_a",
+            ]);
+            assert_eq!(code_sh, 0, "{err_sh}");
+            let stable_sh = std::fs::read_to_string(
+                w.root.join("ob/execroot/_main/bazel-out/stable-status.txt"),
+            )
+            .unwrap();
+            assert!(stable_sh.contains("STABLE_FOO from_win_sh"), "{stable_sh}");
+        }
+    }
 
     // 6. --query_file decodes ISO-8859-1 bytes cleanly.
     let qfile = w.root.join("latin1.q");
