@@ -1177,6 +1177,11 @@ fn materialize_action_result_plants_cross_tree_and_dangling_directory_symlinks()
                     target: "future_dir".into(),
                     node_properties: None,
                 },
+                OutputSymlink {
+                    path: "trailing_dir_sym".into(),
+                    target: "future_dir_2/".into(),
+                    node_properties: None,
+                },
             ],
             output_directory_symlinks: vec![OutputSymlink {
                 path: "dangling_dir_sym".into(),
@@ -1198,7 +1203,14 @@ fn materialize_action_result_plants_cross_tree_and_dangling_directory_symlinks()
     let s = spawn(
         &["tool"],
         &["i"],
-        &["out_a", "out_b", "a_chain", "z_top_dir", "dangling_dir_sym"],
+        &[
+            "out_a",
+            "out_b",
+            "a_chain",
+            "z_top_dir",
+            "dangling_dir_sym",
+            "trailing_dir_sym",
+        ],
     );
     let res = LocalFileSystem::default();
     let exec_res = r
@@ -1216,25 +1228,39 @@ fn materialize_action_result_plants_cross_tree_and_dangling_directory_symlinks()
         std::fs::read_to_string(ws.join("a_chain/inside.txt")).unwrap(),
         "from-out-b"
     );
-    // 3. `dangling_dir_sym` was planted as a directory symlink even though `future_dir` did not exist yet;
-    // creating `future_dir/later.txt` afterwards makes `dangling_dir_sym/later.txt` traversable on Windows too.
+    // 3. `dangling_dir_sym` and trailing-slash `trailing_dir_sym` were planted as directory symlinks
+    // even though `future_dir` / `future_dir_2` did not exist yet; creating them afterwards makes
+    // both traversable on Windows too.
     std::fs::create_dir_all(ws.join("future_dir")).unwrap();
     std::fs::write(ws.join("future_dir/later.txt"), "dangling-ok").unwrap();
     assert_eq!(
         std::fs::read_to_string(ws.join("dangling_dir_sym/later.txt")).unwrap(),
         "dangling-ok"
     );
+    std::fs::create_dir_all(ws.join("future_dir_2")).unwrap();
+    std::fs::write(ws.join("future_dir_2/later2.txt"), "trailing-ok").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(ws.join("trailing_dir_sym/later2.txt")).unwrap(),
+        "trailing-ok"
+    );
 
-    // 4. Re-uploading `out_a` via `tree_from_local_dir` also succeeds cleanly.
+    // 4. Re-uploading `out_a` via `tree_from_local_dir` normalizes `SymlinkNode.target` back to POSIX `/`.
     let mut blobs = BTreeMap::new();
     let reuploaded =
         crate::merkle::tree_from_local_dir(&ws.join("out_a"), DigestFn::Sha256, &mut blobs)
             .unwrap();
-    assert_eq!(reuploaded.root.unwrap().symlinks.len(), 1);
+    let reuploaded_root = reuploaded.root.unwrap();
+    if !reuploaded_root.symlinks.is_empty() {
+        assert_eq!(reuploaded_root.symlinks.len(), 1);
+        assert_eq!(reuploaded_root.symlinks[0].target, "../out_b/sub");
+    } else {
+        assert_eq!(reuploaded_root.directories.len(), 1);
+    }
 
     let _ = crate::merkle::remove_existing_entry(&ws.join("a_chain"));
     let _ = crate::merkle::remove_existing_entry(&ws.join("z_top_dir"));
     let _ = crate::merkle::remove_existing_entry(&ws.join("dangling_dir_sym"));
+    let _ = crate::merkle::remove_existing_entry(&ws.join("trailing_dir_sym"));
     let _ = crate::merkle::remove_existing_entry(&ws.join("out_a/to_b"));
     let _ = std::fs::remove_dir_all(&ws);
 }

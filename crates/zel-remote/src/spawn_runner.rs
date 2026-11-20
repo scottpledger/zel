@@ -919,7 +919,8 @@ impl RemoteSpawnRunner {
             if spawn.symlink_inputs.iter().any(|s| s.path_string() == rel) {
                 match std::fs::read_link(&full) {
                     Ok(target) => {
-                        out.push(MerkleInput::symlink(&rel, &target.to_string_lossy()));
+                        let norm_target = crate::merkle::normalize_read_link_target(&target);
+                        out.push(MerkleInput::symlink(&rel, &norm_target));
                         continue;
                     }
                     Err(_) => {
@@ -1710,7 +1711,7 @@ impl RemoteSpawnRunner {
                 let Ok(t_pb) = std::fs::read_link(&full) else {
                     continue;
                 };
-                let t_str = t_pb.to_string_lossy().into_owned();
+                let t_str = crate::merkle::normalize_read_link_target(&t_pb);
                 if crate::merkle::is_absolute_symlink_target(&t_pb) {
                     match std::fs::metadata(&full) {
                         Ok(t_md) if t_md.is_dir() => {
