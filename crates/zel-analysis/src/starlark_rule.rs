@@ -1415,3 +1415,237 @@ def _rule_impl(ctx):
         );
     }
 }
+
+#[cfg(test)]
+mod transition_attr_wrapping_tests {
+    use super::*;
+
+    struct ConfigRecordingResolver;
+
+    impl DepResolver for ConfigRecordingResolver {
+        fn configured_target(
+            &self,
+            label: &Label,
+            cfg: &BuildConfigurationKey,
+        ) -> Result<Arc<ConfiguredTarget>, String> {
+            let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), "leaf".into());
+            let art = Artifact::derived_in_root(
+                &cfg.mnemonic(),
+                ArtifactRoot::Bin,
+                PathFragment::create(&format!("{}.sh", label.name())),
+                label.clone(),
+            );
+            ct.default_info.files.push(art.clone());
+            ct.default_info.executable = Some(art);
+            Ok(Arc::new(ct))
+        }
+    }
+
+    fn make_starlark_transition(imp_src: &str, outputs: &[&str]) -> Value {
+        let mut ctx = EvalContext::default();
+        ctx.eval_str(imp_src).unwrap();
+        let imp = ctx.globals.get("_impl").unwrap().clone();
+        let mut f = BTreeMap::new();
+        f.insert("_transition".into(), Value::Bool(true));
+        f.insert("implementation".into(), imp);
+        f.insert("inputs".into(), mk_list(Vec::new()));
+        f.insert(
+            "outputs".into(),
+            mk_list(outputs.iter().map(|s| Value::String((*s).into())).collect()),
+        );
+        Value::Struct(Arc::new(StructValue::new(f)))
+    }
+
+    fn make_attr(name: &str, ty: AttrType) -> Attribute {
+        Attribute::new(name, ty)
+    }
+
+    #[test]
+    fn convert_rule_attrs_wraps_1to1_starlark_label_and_preserves_builtin_and_label_list() {
+        let t_1to1 = make_starlark_transition(
+            "def _impl(s, a):\n  return {'//command_line_option:compilation_mode': 'opt'}\n",
+            &["//command_line_option:compilation_mode"],
+        );
+        let t_split = make_starlark_transition(
+            "def _impl(s, a):\n  return {'k_opt': {'//command_line_option:compilation_mode': 'opt'}, 'k_dbg': {'//command_line_option:compilation_mode': 'dbg'}}\n",
+            &["//command_line_option:compilation_mode"],
+        );
+
+        let l1 = Label::parse_canonical("//:l1").unwrap();
+        let l2 = Label::parse_canonical("//:l2").unwrap();
+
+        let mut attrs = BTreeMap::new();
+        let mut a = make_attr("t1_set", AttrType::Label);
+        a.cfg_transition = Some(t_1to1.clone());
+        a.allow_single_file = true;
+        a.executable = true;
+        attrs.insert(a.name.clone(), a);
+
+        let mut a = make_attr("t1_unset", AttrType::Label);
+        a.cfg_transition = Some(t_1to1.clone());
+        a.allow_single_file = true;
+        a.executable = true;
+        attrs.insert(a.name.clone(), a);
+
+        let mut a = make_attr("t2_set", AttrType::Label);
+        a.cfg_transition = Some(t_split.clone());
+        attrs.insert(a.name.clone(), a);
+
+        let mut a = make_attr("t1_ll", AttrType::LabelList);
+        a.cfg_transition = Some(t_1to1);
+        attrs.insert(a.name.clone(), a);
+
+        let mut a = make_attr("t2_ll", AttrType::LabelList);
+        a.cfg_transition = Some(t_split);
+        attrs.insert(a.name.clone(), a);
+
+        let mut a = make_attr("exec_set", AttrType::Label);
+        a.cfg_exec = true;
+        a.allow_single_file = true;
+        a.executable = true;
+        attrs.insert(a.name.clone(), a);
+
+        let mut a = make_attr("exec_unset", AttrType::Label);
+        a.cfg_exec = true;
+        attrs.insert(a.name.clone(), a);
+
+        let a = make_attr("target_set", AttrType::Label);
+        attrs.insert(a.name.clone(), a);
+
+        let a = make_attr("target_unset", AttrType::Label);
+        attrs.insert(a.name.clone(), a);
+
+        let mut rule = RuleInstance {
+            label: Label::parse_canonical("//:probe").unwrap(),
+            rule_class: "probe".into(),
+            attrs: BTreeMap::new(),
+            srcs: Vec::new(),
+            deps: Vec::new(),
+            outs: Vec::new(),
+            tools: Vec::new(),
+            data: Vec::new(),
+            visibility: Vec::new(),
+            cmd: None,
+            executable: false,
+            testonly: false,
+            extra: zel_packages::RuleExtra::default(),
+        };
+        rule.extra
+            .attr_values
+            .insert("t1_set".into(), AttrValue::Label(Some(l1.clone())));
+        rule.extra
+            .attr_values
+            .insert("t2_set".into(), AttrValue::Label(Some(l1.clone())));
+        rule.extra.attr_values.insert(
+            "t1_ll".into(),
+            AttrValue::LabelList(vec![l1.clone(), l2.clone()]),
+        );
+        rule.extra.attr_values.insert(
+            "t2_ll".into(),
+            AttrValue::LabelList(vec![l1.clone(), l2.clone()]),
+        );
+        rule.extra
+            .attr_values
+            .insert("exec_set".into(), AttrValue::Label(Some(l1.clone())));
+        rule.extra
+            .attr_values
+            .insert("target_set".into(), AttrValue::Label(Some(l1)));
+
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        let inputs = AnalysisInputs::new(Arc::new(ConfigRecordingResolver));
+        let bundle = convert_rule_attrs(
+            &rule,
+            &attrs,
+            &cfg,
+            &inputs,
+            &PathFragment::empty(),
+            ArtifactRoot::Bin,
+            &|e| e,
+            None,
+        )
+        .unwrap();
+        assert!(bundle.attr_errors.is_empty(), "{:?}", bundle.attr_errors);
+
+        // 1:1 Starlark transition set: ctx.attr is [Target], ctx.split_attr is {None: Target},
+        // ctx.files is [File], ctx.file and ctx.executable are single File.
+        let t1_list = sequence(&bundle.attr_fields["t1_set"]).expect("t1_set must be a list");
+        assert_eq!(t1_list.len(), 1);
+        assert_eq!(
+            target_of(&t1_list[0])
+                .unwrap()
+                .configuration
+                .compilation_mode,
+            "opt"
+        );
+        let Value::Dict(t1_split) = &bundle.split_fields["t1_set"] else {
+            panic!("expected split_attr dict for t1_set");
+        };
+        let t1_split_items = t1_split.lock().unwrap().items();
+        assert_eq!(t1_split_items.len(), 1);
+        assert!(matches!(t1_split_items[0].0, Value::None));
+        assert!(target_of(&t1_split_items[0].1).is_some());
+        assert_eq!(sequence(&bundle.files_fields["t1_set"]).unwrap().len(), 1);
+        assert_eq!(
+            artifact_of(&bundle.file_fields["t1_set"])
+                .unwrap()
+                .exec_path
+                .path_string(),
+            "bazel-out/k8-opt/bin/l1.sh"
+        );
+        assert_eq!(
+            artifact_of(&bundle.exe_fields["t1_set"])
+                .unwrap()
+                .exec_path
+                .path_string(),
+            "bazel-out/k8-opt/bin/l1.sh"
+        );
+
+        // 1:1 Starlark transition unset: ctx.attr is [], ctx.split_attr is {},
+        // ctx.file and ctx.executable are None.
+        let t1_unset_list =
+            sequence(&bundle.attr_fields["t1_unset"]).expect("t1_unset must be a list");
+        assert!(t1_unset_list.is_empty());
+        let Value::Dict(t1_unset_split) = &bundle.split_fields["t1_unset"] else {
+            panic!("expected split_attr dict for t1_unset");
+        };
+        assert!(t1_unset_split.lock().unwrap().items().is_empty());
+        assert!(matches!(bundle.file_fields["t1_unset"], Value::None));
+        assert!(matches!(bundle.exe_fields["t1_unset"], Value::None));
+
+        // 1:2 split transition: 2-element flat list and 2 keyed split entries.
+        let t2_list = sequence(&bundle.attr_fields["t2_set"]).expect("t2_set must be a list");
+        assert_eq!(t2_list.len(), 2);
+        let Value::Dict(t2_split) = &bundle.split_fields["t2_set"] else {
+            panic!("expected split_attr dict for t2_set");
+        };
+        assert_eq!(t2_split.lock().unwrap().items().len(), 2);
+
+        // label_list with 1:1 transition: flat [Target, Target], NOT double-wrapped!
+        let t1_ll = sequence(&bundle.attr_fields["t1_ll"]).expect("t1_ll must be a list");
+        assert_eq!(t1_ll.len(), 2);
+        assert!(target_of(&t1_ll[0]).is_some());
+        assert!(target_of(&t1_ll[1]).is_some());
+
+        // label_list with 1:2 split: flat 4 targets, split_attr maps each key to a 2-element list.
+        let t2_ll = sequence(&bundle.attr_fields["t2_ll"]).expect("t2_ll must be a list");
+        assert_eq!(t2_ll.len(), 4);
+        assert!(t2_ll.iter().all(|v| target_of(v).is_some()));
+
+        // Builtin exec & target transitions: bare Target / None, absent from split_attr.
+        assert!(target_of(&bundle.attr_fields["exec_set"]).is_some());
+        assert!(
+            target_of(&bundle.attr_fields["exec_set"])
+                .unwrap()
+                .configuration
+                .is_exec
+        );
+        assert!(!bundle.split_fields.contains_key("exec_set"));
+        assert!(matches!(bundle.attr_fields["exec_unset"], Value::None));
+        assert!(!bundle.split_fields.contains_key("exec_unset"));
+
+        assert!(target_of(&bundle.attr_fields["target_set"]).is_some());
+        assert!(!bundle.split_fields.contains_key("target_set"));
+        assert!(matches!(bundle.attr_fields["target_unset"], Value::None));
+        assert!(!bundle.split_fields.contains_key("target_unset"));
+    }
+}

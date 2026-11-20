@@ -282,7 +282,7 @@ dep_rule = rule(
 )
 
 def _top_impl(ctx):
-    return [ctx.attr.dep[Info]]
+    return [ctx.attr.dep[0][Info]]
 top_rule = rule(implementation = _top_impl, attrs = {"dep": attr.label(cfg = my_tr)})
 "#,
     );
@@ -1153,7 +1153,7 @@ leaf = rule(
 )
 
 def _top_impl(ctx):
-    return [ctx.attr.dep[Info]]
+    return [ctx.attr.dep[0][Info]]
 top = rule(implementation = _top_impl, attrs = {"dep": attr.label(cfg = tr)})
 
 def _bfp_impl(ctx):

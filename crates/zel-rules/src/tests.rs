@@ -5590,7 +5590,7 @@ def _top_impl(ctx):
         "ss=" + _format_split(ctx.split_attr.ss),
         "ps=" + _format_split(ctx.split_attr.ps),
         "sp=" + _format_split(ctx.split_attr.sp),
-        "pp=" + ctx.attr.pp.files.to_list()[0].path,
+        "pp=" + ctx.attr.pp[0].files.to_list()[0].path,
     ]
     ctx.actions.write(out, "\n".join(lines))
     return [DefaultInfo(files = depset([out]))]
@@ -5773,9 +5773,9 @@ def _fmt_split(split_dict):
 def _consumer_impl(ctx):
     out = ctx.actions.declare_file("report.txt")
     lines = [
-        "pde=" + _fmt_dep(ctx.attr.pde),
-        "pce=" + _fmt_dep(ctx.attr.pce),
-        "cep=" + _fmt_dep(ctx.attr.cep),
+        "pde=" + _fmt_dep(ctx.attr.pde[0]),
+        "pce=" + _fmt_dep(ctx.attr.pce[0]),
+        "cep=" + _fmt_dep(ctx.attr.cep[0]),
         "sde=" + _fmt_split(ctx.split_attr.sde),
         "sce=" + _fmt_split(ctx.split_attr.sce),
     ]
@@ -6102,7 +6102,7 @@ def _my_test_impl(ctx):
             "has_test=" + str("test" in ctx.exec_groups),
             "rule_ep=" + str(ctx.exec_groups["test"].exec_platform),
             "merger=" + ctx.attr._lcov_merger[DepPlatInfo].plat,
-            "composed=" + ctx.attr._composed_tool[DepPlatInfo].plat + "|" + ctx.attr._composed_tool[DepPlatInfo].copt,
+            "composed=" + ctx.attr._composed_tool[0][DepPlatInfo].plat + "|" + ctx.attr._composed_tool[0][DepPlatInfo].copt,
         ]),
         is_executable = True,
     )
@@ -6367,7 +6367,7 @@ def _probe_aspect_impl(target, ctx):
         "rule_var=" + ctx.rule.var.get("CHILD_VAR", "missing") + "|" + ctx.rule.var.get("PARENT_VAR", "none"),
         "tool_default=" + ctx.attr._tool_default[ToolPlat].plat,
         "tool_eg=" + ctx.attr._tool_eg[ToolPlat].plat,
-        "tool_composed=" + ctx.attr._tool_composed[ToolPlat].plat + "|" + ctx.attr._tool_composed[ToolPlat].copt,
+        "tool_composed=" + ctx.attr._tool_composed[0][ToolPlat].plat + "|" + ctx.attr._tool_composed[0][ToolPlat].copt,
     ]
     text = "\n".join(lines)
     ctx.actions.write(out, text)
@@ -6637,5 +6637,350 @@ parent = rule(
     assert!(
         err.contains("Exec group name 'bad name' is not a valid name"),
         "expected invalid exec group name error, got: {err}"
+    );
+}
+
+#[test]
+fn nonsplit_starlark_transition_list_wrapping_matches_bazel_9_3_2() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r##"
+MyInfo = provider(fields = ["val"])
+AspectInfo = provider(fields = ["summary"])
+
+def _leaf_impl(ctx):
+    f = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(f, "#!/bin/sh\necho hi\n", is_executable = True)
+    return [
+        DefaultInfo(files = depset([f]), executable = f),
+        MyInfo(val = ctx.var.get("COMPILATION_MODE", "") + ":" + ctx.label.name),
+    ]
+
+leaf = rule(implementation = _leaf_impl, executable = True)
+
+def _t_1to1_impl(settings, attr):
+    return {"//command_line_option:compilation_mode": "opt"}
+
+t_1to1 = transition(
+    implementation = _t_1to1_impl,
+    inputs = [],
+    outputs = ["//command_line_option:compilation_mode"],
+)
+
+def _t_noop_impl(settings, attr):
+    return {}
+
+t_noop = transition(
+    implementation = _t_noop_impl,
+    inputs = [],
+    outputs = [],
+)
+
+def _t_1to2_impl(settings, attr):
+    return {
+        "k_opt": {"//command_line_option:compilation_mode": "opt"},
+        "k_dbg": {"//command_line_option:compilation_mode": "dbg"},
+    }
+
+t_1to2 = transition(
+    implementation = _t_1to2_impl,
+    inputs = [],
+    outputs = ["//command_line_option:compilation_mode"],
+)
+
+def _desc_inner(val):
+    t = type(val)
+    if t == "list":
+        return "list({})[{}]".format(len(val), ",".join([type(x) + ":" + str(getattr(x, "label", x)) for x in val]))
+    if t == "Target":
+        return "Target(" + str(val.label) + ":" + val[MyInfo].val + ")"
+    if t == "File":
+        return "File(" + val.path + ")"
+    return t + "(" + str(val) + ")"
+
+def _desc(val):
+    if type(val) == "dict":
+        keys = sorted(val.keys(), key = lambda x: "" if x == None else str(x))
+        return "dict{" + ",".join([str(k) + "=" + _desc_inner(val[k]) for k in keys]) + "}"
+    return _desc_inner(val)
+
+def _probe_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    lines = []
+    for n in [
+        "t1_set",
+        "t1_unset",
+        "t1_file_set",
+        "t1_file_unset",
+        "t1_exe_set",
+        "t1_exe_unset",
+        "tnoop_set",
+        "t1to2_set",
+        "t1to2_unset",
+        "t1_ll_set",
+        "t1_ll_unset",
+        "t1to2_ll_set",
+        "t1to2_ll_unset",
+        "exec_str_set",
+        "exec_str_unset",
+        "target_str_set",
+        "target_str_unset",
+        "cfg_exec_set",
+        "cfg_target_set",
+        "cfg_none_set",
+        "native_composed_set",
+        "starlark_composed_set",
+        "no_cfg_set",
+        "no_cfg_unset",
+    ]:
+        a = getattr(ctx.attr, n)
+        sp = _desc(getattr(ctx.split_attr, n)) if hasattr(ctx.split_attr, n) else "<absent>"
+        fls = str(len(getattr(ctx.files, n))) if hasattr(ctx.files, n) else "<absent>"
+        fl = _desc(getattr(ctx.file, n)) if hasattr(ctx.file, n) else "<absent>"
+        ex = _desc(getattr(ctx.executable, n)) if hasattr(ctx.executable, n) else "<absent>"
+        lines.append("{}|{}|{}|{}|{}|{}".format(n, _desc(a), sp, fls, fl, ex))
+    # Verify rules_go's exact indexing idiom `ctx.attr.dep[0][Provider]`:
+    lines.append("indexed=" + ctx.attr.t1_set[0][MyInfo].val)
+    ctx.actions.write(out, "\n".join(lines))
+    return [DefaultInfo(files = depset([out]))]
+
+probe = rule(
+    implementation = _probe_impl,
+    attrs = {
+        "t1_set": attr.label(cfg = t_1to1),
+        "t1_unset": attr.label(cfg = t_1to1),
+        "t1_file_set": attr.label(cfg = t_1to1, allow_single_file = True),
+        "t1_file_unset": attr.label(cfg = t_1to1, allow_single_file = True),
+        "t1_exe_set": attr.label(cfg = t_1to1, executable = True),
+        "t1_exe_unset": attr.label(cfg = t_1to1, executable = True),
+        "tnoop_set": attr.label(cfg = t_noop),
+        "t1to2_set": attr.label(cfg = t_1to2),
+        "t1to2_unset": attr.label(cfg = t_1to2),
+        "t1_ll_set": attr.label_list(cfg = t_1to1),
+        "t1_ll_unset": attr.label_list(cfg = t_1to1),
+        "t1to2_ll_set": attr.label_list(cfg = t_1to2),
+        "t1to2_ll_unset": attr.label_list(cfg = t_1to2),
+        "exec_str_set": attr.label(cfg = "exec", allow_single_file = True, executable = True),
+        "exec_str_unset": attr.label(cfg = "exec", allow_single_file = True, executable = True),
+        "target_str_set": attr.label(cfg = "target", allow_single_file = True, executable = True),
+        "target_str_unset": attr.label(cfg = "target", allow_single_file = True, executable = True),
+        "cfg_exec_set": attr.label(cfg = config.exec()),
+        "cfg_target_set": attr.label(cfg = config.target()),
+        "cfg_none_set": attr.label(cfg = config.none()),
+        "native_composed_set": attr.label(cfg = config.target().and_then(config.exec())),
+        "starlark_composed_set": attr.label(cfg = t_1to1.and_then(config.target())),
+        "no_cfg_set": attr.label(),
+        "no_cfg_unset": attr.label(),
+    },
+)
+
+def _incoming_impl(ctx):
+    out = ctx.actions.declare_file("incoming.txt")
+    lines = [
+        "dep_set|" + _desc(ctx.attr.dep_set) + "|" + str(hasattr(ctx.split_attr, "dep_set")),
+        "dep_unset|" + _desc(ctx.attr.dep_unset) + "|" + str(hasattr(ctx.split_attr, "dep_unset")),
+        "dep_t1|" + _desc(ctx.attr.dep_t1) + "|" + _desc(ctx.split_attr.dep_t1),
+    ]
+    ctx.actions.write(out, "\n".join(lines))
+    return [DefaultInfo(files = depset([out]))]
+
+incoming = rule(
+    implementation = _incoming_impl,
+    cfg = t_1to1,
+    attrs = {
+        "dep_set": attr.label(),
+        "dep_unset": attr.label(),
+        "dep_t1": attr.label(cfg = t_1to1),
+    },
+)
+
+def _asp_impl(target, ctx):
+    return [AspectInfo(summary = "{}|{}|{}".format(
+        _desc(ctx.rule.attr.t1_set),
+        _desc(ctx.rule.attr.t1_unset),
+        _desc(ctx.rule.attr.plain),
+    ))]
+
+my_aspect = aspect(implementation = _asp_impl)
+
+holder = rule(
+    implementation = lambda ctx: [],
+    attrs = {
+        "t1_set": attr.label(cfg = t_1to1),
+        "t1_unset": attr.label(cfg = t_1to1),
+        "plain": attr.label(),
+    },
+)
+
+def _consumer_impl(ctx):
+    out = ctx.actions.declare_file("aspect.txt")
+    ctx.actions.write(out, ctx.attr.dep[AspectInfo].summary)
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    attrs = {"dep": attr.label(aspects = [my_aspect])},
+)
+"##,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "leaf", "probe", "incoming", "holder", "consumer")
+leaf(name = "l1")
+leaf(name = "l2")
+probe(
+    name = "p",
+    t1_set = ":l1",
+    t1_file_set = ":l1",
+    t1_exe_set = ":l1",
+    tnoop_set = ":l1",
+    t1to2_set = ":l1",
+    t1_ll_set = [":l1", ":l2"],
+    t1to2_ll_set = [":l1", ":l2"],
+    exec_str_set = ":l1",
+    target_str_set = ":l1",
+    cfg_exec_set = ":l1",
+    cfg_target_set = ":l1",
+    cfg_none_set = ":l1",
+    native_composed_set = ":l1",
+    starlark_composed_set = ":l1",
+    no_cfg_set = ":l1",
+)
+incoming(name = "inc", dep_set = ":l1", dep_t1 = ":l1")
+holder(name = "h", t1_set = ":l1", plain = ":l1")
+consumer(name = "c", dep = ":h")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:p").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    let by_name: BTreeMap<&str, &str> = text
+        .lines()
+        .filter_map(|l| l.split_once('|').or_else(|| l.split_once('=')))
+        .collect();
+
+    assert_eq!(by_name["indexed"], "opt:l1");
+    assert_eq!(
+        by_name["t1_set"],
+        "list(1)[Target:@@//:l1]|dict{None=Target(@@//:l1:opt:l1)}|1|<absent>|<absent>"
+    );
+    assert_eq!(by_name["t1_unset"], "list(0)[]|dict{}|0|<absent>|<absent>");
+    assert_eq!(
+        by_name["t1_file_set"],
+        "list(1)[Target:@@//:l1]|dict{None=Target(@@//:l1:opt:l1)}|1|File(bazel-out/k8-opt/bin/l1.sh)|<absent>"
+    );
+    assert_eq!(
+        by_name["t1_file_unset"],
+        "list(0)[]|dict{}|0|NoneType(None)|<absent>"
+    );
+    assert_eq!(
+        by_name["t1_exe_set"],
+        "list(1)[Target:@@//:l1]|dict{None=Target(@@//:l1:opt:l1)}|1|<absent>|File(bazel-out/k8-opt/bin/l1.sh)"
+    );
+    assert_eq!(
+        by_name["t1_exe_unset"],
+        "list(0)[]|dict{}|0|<absent>|NoneType(None)"
+    );
+    assert_eq!(
+        by_name["tnoop_set"],
+        "list(1)[Target:@@//:l1]|dict{None=Target(@@//:l1:fastbuild:l1)}|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["t1to2_set"],
+        "list(2)[Target:@@//:l1,Target:@@//:l1]|dict{k_dbg=Target(@@//:l1:dbg:l1),k_opt=Target(@@//:l1:opt:l1)}|2|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["t1to2_unset"],
+        "list(0)[]|dict{}|0|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["t1_ll_set"],
+        "list(2)[Target:@@//:l1,Target:@@//:l2]|dict{None=list(2)[Target:@@//:l1,Target:@@//:l2]}|2|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["t1_ll_unset"],
+        "list(0)[]|dict{}|0|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["t1to2_ll_set"],
+        "list(4)[Target:@@//:l1,Target:@@//:l2,Target:@@//:l1,Target:@@//:l2]|dict{k_dbg=list(2)[Target:@@//:l1,Target:@@//:l2],k_opt=list(2)[Target:@@//:l1,Target:@@//:l2]}|4|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["t1to2_ll_unset"],
+        "list(0)[]|dict{}|0|<absent>|<absent>"
+    );
+    assert!(
+        by_name["exec_str_set"].starts_with("Target(@@//:l1:opt:l1)|<absent>|1|File("),
+        "{}",
+        by_name["exec_str_set"]
+    );
+    assert_eq!(
+        by_name["exec_str_unset"],
+        "NoneType(None)|<absent>|0|NoneType(None)|NoneType(None)"
+    );
+    assert_eq!(
+        by_name["target_str_set"],
+        "Target(@@//:l1:fastbuild:l1)|<absent>|1|File(bazel-out/k8-fastbuild/bin/l1.sh)|File(bazel-out/k8-fastbuild/bin/l1.sh)"
+    );
+    assert_eq!(
+        by_name["target_str_unset"],
+        "NoneType(None)|<absent>|0|NoneType(None)|NoneType(None)"
+    );
+    assert_eq!(
+        by_name["cfg_exec_set"],
+        "Target(@@//:l1:opt:l1)|<absent>|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["cfg_target_set"],
+        "Target(@@//:l1:fastbuild:l1)|<absent>|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["cfg_none_set"],
+        "Target(@@//:l1:fastbuild:l1)|<absent>|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["native_composed_set"],
+        "Target(@@//:l1:opt:l1)|<absent>|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["starlark_composed_set"],
+        "list(1)[Target:@@//:l1]|dict{None=Target(@@//:l1:opt:l1)}|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["no_cfg_set"],
+        "Target(@@//:l1:fastbuild:l1)|<absent>|1|<absent>|<absent>"
+    );
+    assert_eq!(
+        by_name["no_cfg_unset"],
+        "NoneType(None)|<absent>|0|<absent>|<absent>"
+    );
+
+    // Incoming rule transition does NOT list-wrap plain attributes, but still wraps
+    // attributes that themselves carry a Starlark outgoing transition.
+    let inc = ws.analyze("//:inc").unwrap();
+    let ActionKind::FileWrite { content, .. } = &inc.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let inc_text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        inc_text,
+        "dep_set|Target(@@//:l1:opt:l1)|False\ndep_unset|NoneType(None)|False\ndep_t1|list(1)[Target:@@//:l1]|dict{None=Target(@@//:l1:opt:l1)}"
+    );
+
+    // Aspect ctx.rule.attr sees the same list-wrapping on 1:1 Starlark transition attrs.
+    let c = ws.analyze("//:c").unwrap();
+    let ActionKind::FileWrite { content, .. } = &c.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let asp_text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        asp_text,
+        "list(1)[Target:@@//:l1]|list(0)[]|Target(@@//:l1:fastbuild:l1)"
     );
 }
