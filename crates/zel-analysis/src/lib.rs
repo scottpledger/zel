@@ -414,8 +414,7 @@ impl BuildConfigurationKey {
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "@@platforms//host:host".to_string());
         out.transition_baseline
-            .entry(KEY.to_string())
-            .or_insert_with(|| Some(render_list(&[host_platform.clone()])));
+            .insert(KEY.to_string(), Some(render_list(&[host_platform.clone()])));
         out.platforms = vec![exec_platform.to_string()];
         let new = render_list(&out.platforms);
         if out.transition_baseline[KEY].as_deref() == Some(new.as_str()) {
@@ -1871,6 +1870,10 @@ pub struct ConfiguredTarget {
     pub test_exec_group: Option<String>,
     /// Execution platform resolved for `test_exec_group` on a test target.
     pub test_execution_platform: Option<String>,
+    /// Resolved default execution platform label of this target (`ToolchainContext.executionPlatform`).
+    pub exec_platform: Option<String>,
+    /// Resolved named `exec_group` execution platform labels of this target.
+    pub exec_group_platforms: BTreeMap<String, String>,
 }
 
 /// Reason a configured target is incompatible with its target platform (`IncompatiblePlatformProvider`).
@@ -1932,6 +1935,8 @@ impl ConfiguredTarget {
             incompatible: None,
             test_exec_group: None,
             test_execution_platform: None,
+            exec_platform: None,
+            exec_group_platforms: BTreeMap::new(),
         }
     }
 

@@ -874,6 +874,37 @@ pub fn apply_transition_split(
     apply_transition_split_with_resolver(trans, cfg, attrs, None)
 }
 
+/// Execution-platform resolution context (`AttributeTransitionData` +
+/// `DependencyResolutionHelpers.getExecutionPlatformLabel`) used when evaluating `config.exec(...)`
+/// transitions (standalone or composed via `.and_then(...)`).
+#[derive(Clone, Copy)]
+pub struct ExecTransitionContext<'a> {
+    pub attr_name: &'a str,
+    pub default_exec_platform: Option<&'a str>,
+    pub exec_group_platforms: Option<&'a BTreeMap<String, String>>,
+}
+
+impl<'a> ExecTransitionContext<'a> {
+    pub fn resolve_exec_platform(
+        &self,
+        exec_group: Option<&str>,
+    ) -> Result<Option<&'a str>, String> {
+        match exec_group {
+            None => Ok(self.default_exec_platform),
+            Some(g) => match self.exec_group_platforms {
+                Some(groups) => match groups.get(g) {
+                    Some(p) => Ok(Some(p.as_str())),
+                    None => Err(format!(
+                        "Attr '{}' declares a transition for non-existent exec group '{g}'",
+                        self.attr_name
+                    )),
+                },
+                None => Ok(self.default_exec_platform),
+            },
+        }
+    }
+}
+
 fn compose_split_keys(key1: Option<&str>, key2: Option<String>) -> Option<String> {
     match (key1, key2) {
         (None, k) => k,
@@ -884,11 +915,29 @@ fn compose_split_keys(key1: Option<&str>, key2: Option<String>) -> Option<String
     }
 }
 
+fn is_exec_transition_step(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Struct(s)
+            if s.fields.get("_build_setting").and_then(|v| v.as_str()) == Some("exec")
+    )
+}
+
 pub fn apply_transition_split_with_resolver(
     trans: &Value,
     cfg: &BuildConfigurationKey,
     attrs: Option<&Value>,
     resolver: Option<&dyn crate::starlark_rule::DepResolver>,
+) -> Result<Vec<(Option<String>, BuildConfigurationKey)>, String> {
+    apply_transition_split_with_exec_ctx(trans, cfg, attrs, resolver, None)
+}
+
+pub fn apply_transition_split_with_exec_ctx(
+    trans: &Value,
+    cfg: &BuildConfigurationKey,
+    attrs: Option<&Value>,
+    resolver: Option<&dyn crate::starlark_rule::DepResolver>,
+    exec_ctx: Option<&ExecTransitionContext<'_>>,
 ) -> Result<Vec<(Option<String>, BuildConfigurationKey)>, String> {
     let Value::Struct(s) = trans else {
         return Err(format!(
@@ -898,11 +947,21 @@ pub fn apply_transition_split_with_resolver(
     };
     if let Some(Value::List(chain)) = s.fields.get("_composed_transitions") {
         let steps = chain.lock().unwrap().elements.clone();
+        if steps
+            .iter()
+            .filter(|step| is_exec_transition_step(step))
+            .count()
+            > 1
+        {
+            return Err("can't compose two exec transitions".to_string());
+        }
         let mut current: Vec<(Option<String>, BuildConfigurationKey)> = vec![(None, cfg.clone())];
         for step in &steps {
             let mut next = Vec::new();
             for (k0, c0) in current {
-                for (k1, c1) in apply_transition_split_with_resolver(step, &c0, attrs, resolver)? {
+                for (k1, c1) in
+                    apply_transition_split_with_exec_ctx(step, &c0, attrs, resolver, exec_ctx)?
+                {
                     next.push((compose_split_keys(k0.as_deref(), k1), c1));
                 }
             }
@@ -922,7 +981,16 @@ pub fn apply_transition_split_with_resolver(
             return Ok(vec![(None, cfg.clone())]);
         }
         Some("exec") => {
-            return Ok(vec![(None, cfg.to_exec())]);
+            let exec_group = s.fields.get("exec_group").and_then(|v| v.as_str());
+            let plat = match exec_ctx {
+                Some(ec) => ec.resolve_exec_platform(exec_group)?,
+                None => None,
+            };
+            let next_cfg = match plat {
+                Some(p) => cfg.to_exec_for(p),
+                None => cfg.to_exec(),
+            };
+            return Ok(vec![(None, next_cfg)]);
         }
         _ => {}
     }

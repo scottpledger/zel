@@ -74,25 +74,29 @@ fn attr_to_value(
     attrs_for_transition: Option<&Value>,
     hook: Option<&AspectHook>,
 ) -> Result<ConvertedAttr, String> {
+    let exec_ctx = crate::transition::ExecTransitionContext {
+        attr_name: &attr.name,
+        default_exec_platform: inputs.exec_platform.as_deref(),
+        exec_group_platforms: inputs
+            .has_exec_groups_context
+            .then_some(&inputs.exec_group_platforms),
+    };
     let cfgs: Vec<(Option<String>, BuildConfigurationKey)> = if attr.cfg_exec {
+        let plat = exec_ctx.resolve_exec_platform(attr.cfg_exec_group.as_deref())?;
         vec![(
             None,
-            match attr
-                .cfg_exec_group
-                .as_ref()
-                .and_then(|g| inputs.exec_group_platforms.get(g))
-                .or(inputs.exec_platform.as_ref())
-            {
+            match plat {
                 Some(p) => cfg.to_exec_for(p),
                 None => cfg.to_exec(),
             },
         )]
     } else if let Some(t) = &attr.cfg_transition {
-        crate::transition::apply_transition_split_with_resolver(
+        crate::transition::apply_transition_split_with_exec_ctx(
             t,
             cfg,
             attrs_for_transition,
             Some(inputs.resolver.as_ref()),
+            Some(&exec_ctx),
         )?
     } else {
         vec![(None, cfg.clone())]
@@ -1577,6 +1581,8 @@ fn finish_target(
     ct.test_exec_group = test_exec_group;
     ct.test_execution_platform = test_execution_platform;
     ct.warnings = rule_warnings;
+    ct.exec_platform = st.inputs.exec_platform.clone();
+    ct.exec_group_platforms = st.inputs.exec_group_platforms.clone();
     Ok(ct)
 }
 

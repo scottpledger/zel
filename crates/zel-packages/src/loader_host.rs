@@ -108,6 +108,22 @@ fn flatten_transition_chain(v: &Value) -> Vec<Value> {
     vec![v.clone()]
 }
 
+fn is_exec_transition_step(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Struct(s)
+            if s.fields.get("_build_setting").and_then(|v| v.as_str()) == Some("exec")
+    )
+}
+
+fn is_attr_only_transition_step(v: &Value) -> bool {
+    is_exec_transition_step(v)
+        || matches!(
+            v,
+            Value::Struct(s) if s.fields.contains_key("_analysis_test_transition")
+        )
+}
+
 fn validate_transition_option_key(
     key: &str,
     cctx: &ConvertCtx<'_>,
@@ -2818,6 +2834,30 @@ impl PackageLoader {
                 "cfg parameter is mandatory when executable=True is provided.",
             ));
         }
+        if let Some(Value::Struct(cs)) = kw.get("cfg") {
+            if let Some(Value::List(chain)) = cs.fields.get("_composed_transitions") {
+                let exec_count = chain
+                    .lock()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .filter(|step| is_exec_transition_step(step))
+                    .count();
+                if exec_count > 1 {
+                    let loc = cs
+                        .fields
+                        .get("location")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("<unknown>");
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "invalid composed transition for `cfg`: can't compose two exec transitions (composed at {loc})"
+                        ),
+                    ));
+                }
+            }
+        }
         if kw.get("allow_files").is_some_and(|v| !matches!(v, Value::None))
             && kw
                 .get("allow_single_file")
@@ -3034,7 +3074,22 @@ impl PackageLoader {
                     _ => {}
                 }
             }
-            Some(other) => a.cfg_transition = Some(other.clone()),
+            Some(other) => {
+                if let Value::Struct(cs) = other {
+                    if let Some(Value::List(chain)) = cs.fields.get("_composed_transitions") {
+                        if chain
+                            .lock()
+                            .unwrap()
+                            .elements
+                            .iter()
+                            .any(is_exec_transition_step)
+                        {
+                            a.tool_dep = Some(true);
+                        }
+                    }
+                }
+                a.cfg_transition = Some(other.clone());
+            }
         }
         if let Some(p) = s.fields.get("providers") {
             let items = zel_starlark::eval::builtins::value_to_sequence(p).unwrap_or_default();
@@ -3560,6 +3615,36 @@ impl PackageLoader {
             Some(Value::String(s)) => Some(s.clone()),
             Some(other) => return Err(herr(ctx, type_mismatch("name", other, "string", "rule"))),
         };
+        if let Some(cfg_v) = kw.get("cfg") {
+            if let Value::Struct(cs) = cfg_v {
+                if let Some(Value::List(chain)) = cs.fields.get("_composed_transitions") {
+                    let has_attr_only = chain
+                        .lock()
+                        .unwrap()
+                        .elements
+                        .iter()
+                        .any(is_attr_only_transition_step);
+                    if has_attr_only {
+                        let loc = cs
+                            .fields
+                            .get("location")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<unknown>");
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "invalid composed transition for `cfg`: it contains a native transition that can only be used as an attribute transition, such as the exec transition (composed at {loc})"
+                            ),
+                        ));
+                    }
+                } else if is_attr_only_transition_step(cfg_v) {
+                    return Err(herr(
+                        ctx,
+                        "`cfg` must be set to a transition object initialized by the transition() function.",
+                    ));
+                }
+            }
+        }
         let mut initializers: Vec<Value> = Vec::new();
         let mut parent_attrs: Vec<Attribute> = Vec::new();
         let mut parent_test = false;

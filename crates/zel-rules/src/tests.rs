@@ -5630,3 +5630,310 @@ top(name = "t", ss = ":l", ps = ":l", sp = ":l", pp = ":l")
         "{text}"
     );
 }
+
+#[test]
+fn composed_exec_transitions_use_resolved_default_and_exec_group_platforms() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+DepInfo = provider(fields = ["plat", "copts", "path", "matched"])
+
+def _tc_impl(ctx):
+    return [platform_common.ToolchainInfo(name = ctx.label.name)]
+
+my_tc = rule(implementation = _tc_impl)
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:copt": ["-DPATCH"]}
+
+patch = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _read_plat_patch_impl(settings, attr):
+    plats = settings["//command_line_option:platforms"]
+    first = str(plats[0]) if plats else "none"
+    return {"//command_line_option:copt": ["-DFROM=" + first]}
+
+read_plat_patch = transition(
+    implementation = _read_plat_patch_impl,
+    inputs = ["//command_line_option:platforms"],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _split_impl(settings, attr):
+    return {
+        "a": {"//command_line_option:copt": ["-DA"]},
+        "b": {"//command_line_option:copt": ["-DB"]},
+    }
+
+split_t = transition(
+    implementation = _split_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+
+patch_then_default_exec = patch.and_then(config.exec())
+patch_then_custom_exec = patch.and_then(config.exec(exec_group = "custom"))
+custom_exec_then_patch = config.exec(exec_group = "custom").and_then(read_plat_patch)
+split_then_default_exec = split_t.and_then(config.exec())
+split_then_custom_exec = split_t.and_then(config.exec(exec_group = "custom"))
+
+def _tool_leaf_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "ok")
+    return [
+        DefaultInfo(files = depset([out])),
+        DepInfo(
+            plat = str(ctx.fragments.platform.platform),
+            copts = ",".join(ctx.fragments.cpp.copts),
+            path = out.path,
+            matched = ctx.attr.matched,
+        ),
+    ]
+
+tool_leaf = rule(
+    implementation = _tool_leaf_impl,
+    fragments = ["platform", "cpp"],
+    attrs = {"matched": attr.string()},
+)
+
+def _fmt_dep(t):
+    info = t[DepInfo]
+    return "{}|{}|{}|{}".format(info.plat, info.matched, info.copts, info.path)
+
+def _fmt_split(split_dict):
+    parts = []
+    for k in sorted(split_dict.keys()):
+        parts.append(k + "=>" + _fmt_dep(split_dict[k]))
+    return ";".join(parts)
+
+def _consumer_impl(ctx):
+    out = ctx.actions.declare_file("report.txt")
+    lines = [
+        "pde=" + _fmt_dep(ctx.attr.pde),
+        "pce=" + _fmt_dep(ctx.attr.pce),
+        "cep=" + _fmt_dep(ctx.attr.cep),
+        "sde=" + _fmt_split(ctx.split_attr.sde),
+        "sce=" + _fmt_split(ctx.split_attr.sce),
+    ]
+    ctx.actions.write(out, "\n".join(lines))
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    toolchains = ["//:tt_default"],
+    exec_groups = {
+        "custom": exec_group(toolchains = ["//:tt_custom"]),
+    },
+    attrs = {
+        "pde": attr.label(cfg = patch_then_default_exec),
+        "pce": attr.label(cfg = patch_then_custom_exec),
+        "cep": attr.label(cfg = custom_exec_then_patch),
+        "sde": attr.label(cfg = split_then_default_exec),
+        "sce": attr.label(cfg = split_then_custom_exec),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "consumer", "my_tc", "tool_leaf")
+
+constraint_setting(name = "exec_kind")
+constraint_value(name = "is_default_exec", constraint_setting = ":exec_kind")
+constraint_value(name = "is_custom_exec", constraint_setting = ":exec_kind")
+
+platform(name = "default_exec_plat", constraint_values = [":is_default_exec"])
+platform(name = "custom_exec_plat", constraint_values = [":is_custom_exec"])
+
+config_setting(name = "on_default_exec", constraint_values = [":is_default_exec"])
+config_setting(name = "on_custom_exec", constraint_values = [":is_custom_exec"])
+
+toolchain_type(name = "tt_default")
+toolchain_type(name = "tt_custom")
+my_tc(name = "tc_default_impl")
+my_tc(name = "tc_custom_impl")
+toolchain(
+    name = "tc_default",
+    toolchain_type = ":tt_default",
+    toolchain = ":tc_default_impl",
+    exec_compatible_with = [":is_default_exec"],
+)
+toolchain(
+    name = "tc_custom",
+    toolchain_type = ":tt_custom",
+    toolchain = ":tc_custom_impl",
+    exec_compatible_with = [":is_custom_exec"],
+)
+
+tool_leaf(
+    name = "leaf",
+    matched = select({
+        ":on_default_exec": "default_exec",
+        ":on_custom_exec": "custom_exec",
+        "//conditions:default": "host_or_other",
+    }),
+)
+
+consumer(
+    name = "c",
+    pde = ":leaf",
+    pce = ":leaf",
+    cep = ":leaf",
+    sde = ":leaf",
+    sce = ":leaf",
+)
+"#,
+        ),
+    ]);
+
+    let mut acfg = AnalysisConfig::new();
+    acfg.toolchain_patterns = vec!["//:tc_default".to_string(), "//:tc_custom".to_string()];
+    acfg.execution_platform_patterns = vec![
+        "//:default_exec_plat".to_string(),
+        "//:custom_exec_plat".to_string(),
+    ];
+    let (r, cfg) = ws.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), acfg);
+    let ct = r
+        .analyze(&Label::parse_canonical("//:c").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 5, "{text}");
+
+    let exec_mnemonic = |plat: &str, copt: &str| -> String {
+        let mut expected = cfg.to_exec_for(plat);
+        let list = Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+            zel_starlark::StarlarkList::new(vec![Value::String(copt.to_string())]),
+        )));
+        zel_analysis::transition::set_setting(&mut expected, "//command_line_option:copt", &list)
+            .unwrap();
+        expected.mnemonic()
+    };
+
+    let m_pde = exec_mnemonic("//:default_exec_plat", "-DPATCH");
+    assert!(
+        m_pde.starts_with("default_exec_plat-opt-exec-ST-"),
+        "{m_pde}"
+    );
+    assert_eq!(
+        lines[0],
+        format!("pde=@@//:default_exec_plat|default_exec|-DPATCH|bazel-out/{m_pde}/bin/leaf.txt"),
+        "{text}"
+    );
+
+    let m_pce = exec_mnemonic("//:custom_exec_plat", "-DPATCH");
+    assert!(
+        m_pce.starts_with("custom_exec_plat-opt-exec-ST-"),
+        "{m_pce}"
+    );
+    assert_eq!(
+        lines[1],
+        format!("pce=@@//:custom_exec_plat|custom_exec|-DPATCH|bazel-out/{m_pce}/bin/leaf.txt"),
+        "{text}"
+    );
+
+    let m_cep = exec_mnemonic("//:custom_exec_plat", "-DFROM=//:custom_exec_plat");
+    assert_eq!(
+        lines[2],
+        format!(
+            "cep=@@//:custom_exec_plat|custom_exec|-DFROM=//:custom_exec_plat|bazel-out/{m_cep}/bin/leaf.txt"
+        ),
+        "{text}"
+    );
+
+    let m_sde_a = exec_mnemonic("//:default_exec_plat", "-DA");
+    let m_sde_b = exec_mnemonic("//:default_exec_plat", "-DB");
+    assert_eq!(
+        lines[3],
+        format!(
+            "sde=a=>@@//:default_exec_plat|default_exec|-DA|bazel-out/{m_sde_a}/bin/leaf.txt;b=>@@//:default_exec_plat|default_exec|-DB|bazel-out/{m_sde_b}/bin/leaf.txt"
+        ),
+        "{text}"
+    );
+
+    let m_sce_a = exec_mnemonic("//:custom_exec_plat", "-DA");
+    let m_sce_b = exec_mnemonic("//:custom_exec_plat", "-DB");
+    assert_eq!(
+        lines[4],
+        format!(
+            "sce=a=>@@//:custom_exec_plat|custom_exec|-DA|bazel-out/{m_sce_a}/bin/leaf.txt;b=>@@//:custom_exec_plat|custom_exec|-DB|bazel-out/{m_sce_b}/bin/leaf.txt"
+        ),
+        "{text}"
+    );
+
+    // Composing two exec transitions is rejected.
+    let two_exec_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _p(settings, attr):
+    return {}
+p = transition(implementation = _p, inputs = [], outputs = [])
+bad = config.exec().and_then(p).and_then(config.exec(exec_group = "g"))
+r = rule(implementation = lambda ctx: [], attrs = {"d": attr.label(cfg = bad)})
+"#,
+        ),
+        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"x\")\n"),
+    ]);
+    let err = two_exec_ws.analyze("//:x").unwrap_err();
+    assert!(
+        err.contains("can't compose two exec transitions"),
+        "expected two-exec error, got: {err}"
+    );
+
+    // Composing an exec transition into a rule `cfg` is rejected.
+    let rule_exec_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _p(settings, attr):
+    return {}
+p = transition(implementation = _p, inputs = [], outputs = [])
+r = rule(implementation = lambda ctx: [], cfg = p.and_then(config.exec()))
+"#,
+        ),
+        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"x\")\n"),
+    ]);
+    let err = rule_exec_ws.analyze("//:x").unwrap_err();
+    assert!(
+        err.contains(
+            "it contains a native transition that can only be used as an attribute transition"
+        ),
+        "expected rule-cfg exec error, got: {err}"
+    );
+
+    // Referencing a non-existent exec group in a composed transition fails analysis.
+    let bad_group_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _p(settings, attr):
+    return {}
+p = transition(implementation = _p, inputs = [], outputs = [])
+leaf = rule(implementation = lambda ctx: [])
+r = rule(
+    implementation = lambda ctx: [],
+    attrs = {"bad": attr.label(cfg = p.and_then(config.exec(exec_group = "missing")))},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"leaf\", \"r\")\nleaf(name = \"l\")\nr(name = \"x\", bad = \":l\")\n",
+        ),
+    ]);
+    let err = bad_group_ws.analyze("//:x").unwrap_err();
+    assert!(
+        err.contains("Attr 'bad' declares a transition for non-existent exec group 'missing'"),
+        "expected missing exec_group error, got: {err}"
+    );
+}

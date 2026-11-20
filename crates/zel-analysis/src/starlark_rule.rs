@@ -140,6 +140,9 @@ pub struct AnalysisInputs {
     pub exec_group_toolchains: BTreeMap<String, BTreeMap<String, Value>>,
     /// Exec group name → execution platform label.
     pub exec_group_platforms: BTreeMap<String, String>,
+    /// Whether `exec_group_platforms` represents the authoritative set of exec groups declared on
+    /// the target being analyzed (enables non-existent `exec_group` diagnostics).
+    pub has_exec_groups_context: bool,
     /// `--incompatible_allow_tags_propagation` (default true).
     pub allow_tags_propagation: bool,
     /// `--experimental_sibling_repository_layout` (default false).
@@ -158,6 +161,7 @@ impl AnalysisInputs {
             exec_platform: None,
             exec_group_toolchains: BTreeMap::new(),
             exec_group_platforms: BTreeMap::new(),
+            has_exec_groups_context: false,
             allow_tags_propagation: true,
             sibling_repository_layout: false,
         }

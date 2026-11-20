@@ -381,8 +381,22 @@ fn apply_aspect_path(
                     list.iter().any(|x| x == "*" || x == &a.name)
                 })
         });
-        let rule_bundle =
-            convert_rule_attrs(&rule, &rule_attrs, &cfg, inputs, &pkg_dir, out_root, &wrap, Some(&hook))?;
+        let mut base_inputs = inputs.clone();
+        if current_ct.exec_platform.is_some() {
+            base_inputs.exec_platform = current_ct.exec_platform.clone();
+            base_inputs.exec_group_platforms = current_ct.exec_group_platforms.clone();
+            base_inputs.has_exec_groups_context = true;
+        }
+        let rule_bundle = convert_rule_attrs(
+            &rule,
+            &rule_attrs,
+            &cfg,
+            &base_inputs,
+            &pkg_dir,
+            out_root,
+            &wrap,
+            Some(&hook),
+        )?;
 
         // 2. The main aspect's own attributes (implicit dependencies and parameters).
         let mut aspect_attr_map: BTreeMap<String, Attribute> = BTreeMap::new();
@@ -515,7 +529,7 @@ fn apply_aspect_path(
             base_toolchains: inputs.toolchains.clone(),
             base_exec_groups,
             base_exec_group_toolchains: inputs.exec_group_toolchains.clone(),
-            base_exec_group_platforms: inputs.exec_group_platforms.clone(),
+            base_exec_group_platforms: base_inputs.exec_group_platforms.clone(),
             split_attr: Value::None,
             in_subrule: std::sync::atomic::AtomicBool::new(false),
         });

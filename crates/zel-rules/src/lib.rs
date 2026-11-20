@@ -644,9 +644,12 @@ fn analyze_rule_inner(
         if let Some(t @ Value::Struct(ts)) = spec.kwargs.get("cfg") {
             if ts.fields.get("_build_setting").and_then(|v| v.as_str()) == Some("none")
                 && !ts.fields.contains_key("implementation")
+                && !ts.fields.contains_key("_composed_transitions")
             {
                 cfg = config.to_core_only();
-            } else if ts.fields.contains_key("implementation") {
+            } else if ts.fields.contains_key("implementation")
+                || ts.fields.contains_key("_composed_transitions")
+            {
                 let attrs = zel_analysis::starlark_rule::build_transition_attr_struct(
                     rule,
                     config,
@@ -677,6 +680,7 @@ fn analyze_rule_inner(
         inputs.allow_tags_propagation =
             cfg.bool_option("incompatible_allow_tags_propagation", true);
         inputs.exec_platform = Some(acfg.default_exec_platform());
+        inputs.has_exec_groups_context = true;
         if let Ok(Some(plat_ct)) = toolchain::target_platform(&cfg, &resolver, acfg) {
             let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
             toolchain::record_exec_platform_edge(rule, &cfg, &resolver, acfg);
