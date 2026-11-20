@@ -312,6 +312,10 @@ impl Rt {
 
     /// Resolves the extension that actually generated `canonical` by checking `<unique>+`
     /// candidates from longest prefix to shortest against evaluated extension results.
+    ///
+    /// Any candidate whose evaluation completed without generating `exported` is eliminated and
+    /// never used as fallback; fallback applies only to the longest candidate whose ownership
+    /// could not yet be ruled out (for example, while that extension is mid-evaluation).
     pub(crate) fn owning_extension_for_canonical<'a>(
         &self,
         canonical: &'a str,
@@ -319,43 +323,42 @@ impl Rt {
         let candidates = self
             .resolution
             .extension_candidates_for_canonical(canonical);
-        if candidates.is_empty() {
-            return None;
-        }
-        let mut saw_unevaluated = false;
-        for (id, exported) in &candidates {
+        let mut first_unevaluated: Option<(ExtensionId, &'a str)> = None;
+        for (id, exported) in candidates {
             let (cached_owns, evaluating, me) = {
                 let st = self.state.lock().unwrap();
                 (
                     st.ext_results
-                        .get(id)
+                        .get(&id)
                         .map(|r| r.generated.iter().any(|(n, _)| n == exported)),
-                    st.evaluating_exts.contains(id),
+                    st.evaluating_exts.contains(&id),
                     st.me.upgrade(),
                 )
             };
             match cached_owns {
-                Some(true) => return Some((id.clone(), *exported)),
+                Some(true) => return Some((id, exported)),
                 Some(false) => continue,
-                None if evaluating => return Some((id.clone(), *exported)),
+                None if evaluating => {
+                    if first_unevaluated.is_none() {
+                        first_unevaluated = Some((id, exported));
+                    }
+                }
                 None => {
                     if let Some(rt) = me {
-                        if let Ok(r) = rt.eval_extension(id) {
+                        if let Ok(r) = rt.eval_extension(&id) {
                             if r.generated.iter().any(|(n, _)| n == exported) {
-                                return Some((id.clone(), *exported));
+                                return Some((id, exported));
                             }
                             continue;
                         }
                     }
-                    saw_unevaluated = true;
+                    if first_unevaluated.is_none() {
+                        first_unevaluated = Some((id, exported));
+                    }
                 }
             }
         }
-        if saw_unevaluated {
-            candidates.into_iter().next()
-        } else {
-            None
-        }
+        first_unevaluated
     }
 
     /// Computes `repository_ctx.original_name` matching Bazel's `RepoDefinitionFunction`
@@ -4368,5 +4371,129 @@ inspect_repo(name = "via_use_repo_rule")
                 "err: {err}"
             );
         }
+    }
+
+    #[test]
+    fn owning_extension_never_falls_back_to_evaluated_non_owning_longer_prefix() {
+        let base = tmpdir("owning_ext_fallback");
+
+        // 1. Direct state test: longer `{unique}+` prefix is already evaluated without generating
+        //    `canonical`, while shorter `{unique}+` prefix is unevaluated (or mid-evaluation).
+        //    `owning_extension_for_canonical`, `original_name_for`, `repo_context`, and
+        //    `repo_mapping_of` must never fall back to the eliminated longer prefix.
+        let mut res = crate::resolve::Resolution::empty();
+        let short_id = ExtensionId {
+            bzl_file: "@@short_host+//:short.bzl".into(),
+            name: "_tool".into(),
+            isolation_key: None,
+        };
+        let long_id = ExtensionId {
+            bzl_file: "@@long_host+//:long.bzl".into(),
+            name: "_tool".into(),
+            isolation_key: Some((ModuleKey::root(), "iso_ext".into())),
+        };
+        res.extension_unique_names
+            .insert(short_id.clone(), "+_tool".into());
+        res.extension_unique_names
+            .insert(long_id.clone(), "+_tool+++iso_ext".into());
+        res.repo_overrides.insert(
+            short_id.clone(),
+            BTreeMap::from([("short_marker".into(), "short_target+".into())]),
+        );
+        res.repo_overrides.insert(
+            long_id.clone(),
+            BTreeMap::from([("long_marker".into(), "long_target+".into())]),
+        );
+
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob_state"),
+                workspace_root: base.join("ws_missing"),
+                ..Default::default()
+            },
+            Arc::new(res),
+        );
+        let dummy_spec = RepoSpec::new(
+            "@@short_host+//:short.bzl",
+            "r",
+            vec![("name".into(), AttrVal::Str("fallback_spec_name".into()))],
+        );
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.ext_results.insert(
+                long_id.clone(),
+                ExtensionResult {
+                    generated: vec![("unrelated".into(), dummy_spec.clone())],
+                    metadata: None,
+                    env_variables: BTreeMap::new(),
+                    recorded_file_inputs: BTreeMap::new(),
+                },
+            );
+            st.evaluating_exts.push(short_id.clone());
+        }
+
+        let canonical = "+_tool+++iso_ext+only_short";
+        assert_eq!(
+            rt.owning_extension_for_canonical(canonical),
+            Some((short_id.clone(), "++iso_ext+only_short"))
+        );
+        assert_eq!(
+            rt.original_name_for(canonical, &dummy_spec),
+            "++iso_ext+only_short"
+        );
+        assert_eq!(rt.repo_context(canonical), "short_host+");
+        let mapping = rt.repo_mapping_of(canonical);
+        assert_eq!(
+            mapping.get("short_marker").map(String::as_str),
+            Some("short_target+")
+        );
+        assert!(!mapping.contains_key("long_marker"));
+
+        // Same check when `short_id` is not in `evaluating_exts` and on-demand eval fails because
+        // `ws_missing` has no `.bzl` files: `long_id` is still permanently eliminated.
+        rt.state.lock().unwrap().evaluating_exts.clear();
+        assert_eq!(
+            rt.owning_extension_for_canonical(canonical),
+            Some((short_id.clone(), "++iso_ext+only_short"))
+        );
+
+        // 2. Reverse mid-evaluation case: `long_id` is mid-evaluation (`evaluating_exts`), while
+        //    `short_id` is already evaluated and confirmed to own `canonical`.
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.ext_results.remove(&long_id);
+            st.evaluating_exts.push(long_id.clone());
+            st.ext_results.insert(
+                short_id.clone(),
+                ExtensionResult {
+                    generated: vec![("++iso_ext+only_short".into(), dummy_spec.clone())],
+                    metadata: None,
+                    env_variables: BTreeMap::new(),
+                    recorded_file_inputs: BTreeMap::new(),
+                },
+            );
+        }
+        assert_eq!(
+            rt.owning_extension_for_canonical(canonical),
+            Some((short_id.clone(), "++iso_ext+only_short"))
+        );
+
+        // 3. Both candidates evaluated and neither generated `ghost`: returns `None`.
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.evaluating_exts.clear();
+            st.ext_results.insert(
+                long_id,
+                ExtensionResult {
+                    generated: vec![("unrelated".into(), dummy_spec)],
+                    metadata: None,
+                    env_variables: BTreeMap::new(),
+                    recorded_file_inputs: BTreeMap::new(),
+                },
+            );
+        }
+        let ghost = "+_tool+++iso_ext+ghost";
+        assert_eq!(rt.owning_extension_for_canonical(ghost), None);
+        assert!(rt.repo_mapping_of(ghost).is_empty());
     }
 }
