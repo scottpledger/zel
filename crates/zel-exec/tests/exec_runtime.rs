@@ -1101,6 +1101,7 @@ fn streamed_test_output_emits_live_chunks_before_child_exits_and_posts_progress(
         kill_delay_ms: Some(200),
         test_tmpdir: None,
         check_sharding_support: false,
+        test_runner_fail_fast: false,
     };
 
     let rt = runtime(
@@ -1236,6 +1237,7 @@ fn streamed_test_output_emits_full_trailers_after_setup_line_cleaning() {
         kill_delay_ms: Some(200),
         test_tmpdir: None,
         check_sharding_support: false,
+        test_runner_fail_fast: false,
     };
     let rep1 = Reporter::new();
     let streamed1 = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));

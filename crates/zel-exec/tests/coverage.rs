@@ -216,6 +216,7 @@ fn coverage_spec(d: &Path, script_body: &str, shards: u32) -> TestSpec {
         kill_delay_ms: None,
         test_tmpdir: None,
         check_sharding_support: false,
+        test_runner_fail_fast: false,
     }
 }
 

@@ -1261,9 +1261,7 @@ impl ParsedCommandOptions {
                 }
             }
             "test_filter" => {
-                if !raw_val.is_empty() {
-                    self.test_filter = Some(raw_val.to_string());
-                }
+                self.test_filter = Some(raw_val.to_string());
             }
             "spawn_strategy" => {
                 if let Some(s) = val.as_str() {
@@ -1623,5 +1621,18 @@ mod tests {
         assert!(!exp.contains_key("//a:y"));
         assert_eq!(p.get_pre_double_dash_residue(), vec!["a"]);
         assert_eq!(p.get_post_double_dash_residue(), &["b", "c"]);
+    }
+
+    #[test]
+    fn test_empty_test_filter_clears_earlier_filter_to_empty_some() {
+        let p = ParsedCommandOptions::parse_for_command(
+            "test",
+            &[
+                "--test_filter=Foo".to_string(),
+                "--test_filter=".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(p.test_filter.as_deref(), Some(""));
     }
 }

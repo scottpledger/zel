@@ -185,6 +185,35 @@ fn worker_max_instances_bounds_concurrency() {
 #[test]
 fn multiplex_worker_serves_concurrent_requests_from_one_process() {
     let env = setup("mux");
+
+    // Sanity check: a singleplex worker (`max_instances = 1`, no `supports-multiplex-workers`)
+    // serializes requests and therefore cannot satisfy an in-process 2-party rendezvous barrier.
+    let singleplex_runner = runner(
+        &env,
+        WorkerOptions {
+            max_instances: vec![("TestWorker".into(), 1)],
+            ..Default::default()
+        },
+    );
+    let seq_res = singleplex_runner
+        .exec(&worker_spawn(
+            &env,
+            "seq.out",
+            "seq",
+            &["--barrier=2", "--barrier_timeout_ms=60"],
+            &[],
+        ))
+        .unwrap();
+    assert_eq!(seq_res.status, SpawnStatus::NonZeroExit);
+    assert!(
+        String::from_utf8_lossy(&seq_res.stderr).contains("barrier timeout"),
+        "{}",
+        String::from_utf8_lossy(&seq_res.stderr)
+    );
+    singleplex_runner.pool.shutdown();
+
+    // Multiplex worker: all 4 requests must be simultaneously in flight inside the same worker
+    // process for the in-process 4-party barrier to release.
     let r = Arc::new(runner(&env, WorkerOptions::default()));
     let spawns: Vec<Spawn> = (0..4)
         .map(|i| {
@@ -192,27 +221,24 @@ fn multiplex_worker_serves_concurrent_requests_from_one_process() {
                 &env,
                 &format!("x{i}.out"),
                 "x",
-                &["--sleep_ms=200"],
+                &["--barrier=4"],
                 &[("supports-multiplex-workers", "1")],
             )
         })
         .collect();
-    let t = std::time::Instant::now();
     std::thread::scope(|sc| {
         for s in &spawns {
             let r = r.clone();
-            sc.spawn(move || assert!(r.exec(s).unwrap().is_ok()));
+            sc.spawn(move || {
+                let res = r.exec(s).unwrap();
+                assert!(res.is_ok(), "{}", String::from_utf8_lossy(&res.stderr));
+            });
         }
     });
     assert_eq!(
         r.pool.started.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "one multiplexed process"
-    );
-    assert!(
-        t.elapsed().as_millis() < 700,
-        "requests overlap: {:?}",
-        t.elapsed()
     );
     let pids: std::collections::BTreeSet<String> = (0..4)
         .map(|i| {
@@ -358,4 +384,72 @@ fn worker_no_tools_and_allowlist_enforcement() {
     let res = r.exec(&s_allowed).unwrap();
     assert_eq!(res.status, SpawnStatus::ExecutionFailed);
     assert!(String::from_utf8_lossy(&res.stderr).contains("because the action has no tools"));
+}
+
+#[test]
+fn multiplex_cancellable_worker_cancels_in_flight_request_and_reuses_worker() {
+    let env = setup("mux_cancel");
+    let opts = WorkerOptions {
+        multiplex: true,
+        cancellation: true,
+        ..Default::default()
+    };
+    let r = Arc::new(runner(&env, opts));
+    let info = &[
+        ("supports-multiplex-workers", "1"),
+        ("supports-worker-cancellation", "1"),
+    ];
+    let cancelled_spawn = worker_spawn(
+        &env,
+        "cancelled.out",
+        "drop_me",
+        &["--ready_file=cancelled.ready", "--sleep_ms=5000"],
+        info,
+    );
+    let sibling_spawn = worker_spawn(&env, "sibling.out", "keep_me", &["--sleep_ms=100"], info);
+
+    let cancel_flag = zel_sandbox::process_wrapper::CancelFlag::new();
+    let cancel_trigger = cancel_flag.clone();
+    let ready_path = env.exec_root.join("cancelled.ready");
+    std::thread::spawn(move || {
+        assert!(
+            wait_until(std::time::Duration::from_secs(10), || ready_path.exists()),
+            "worker never started cancelled request"
+        );
+        cancel_trigger.cancel();
+    });
+
+    std::thread::scope(|sc| {
+        let r1 = r.clone();
+        let s1 = &cancelled_spawn;
+        let cf = cancel_flag.clone();
+        let h1 = sc.spawn(move || {
+            let hooks = zel_sandbox::ExecHooks {
+                cancel: Some(cf),
+                ..Default::default()
+            };
+            r1.exec_with(s1, &hooks)
+        });
+        let r2 = r.clone();
+        let s2 = &sibling_spawn;
+        let h2 = sc.spawn(move || r2.exec(s2));
+
+        let err = h1.join().unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        let ok = h2.join().unwrap().unwrap();
+        assert!(ok.is_ok(), "{}", String::from_utf8_lossy(&ok.stderr));
+    });
+
+    assert!(
+        !env.exec_root.join("cancelled.out").exists(),
+        "cancelled request must not write output"
+    );
+    assert!(env.exec_root.join("sibling.out").exists());
+
+    // Subsequent request must reuse the same live worker process (`started == 1`).
+    let follow = worker_spawn(&env, "follow.out", "reused", &[], info);
+    let res = r.exec(&follow).unwrap();
+    assert!(res.is_ok(), "{}", String::from_utf8_lossy(&res.stderr));
+    assert_eq!(r.pool.started.load(std::sync::atomic::Ordering::SeqCst), 1);
+    r.pool.shutdown();
 }

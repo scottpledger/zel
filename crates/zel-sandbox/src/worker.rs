@@ -26,12 +26,12 @@ use crate::{
     cancelled_error, delete_tree, delete_trees_below, ExecHooks, ExecutedCommand,
     RunfilesTreeUpdater, Spawn, SpawnResult, SpawnStatus,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use zel_proto::wire;
@@ -1142,6 +1142,34 @@ impl WorkerFilesHash {
     }
 }
 
+/// In-process registry of cancelled persistent-worker request IDs, matching Bazel's
+/// `com.google.devtools.build.buildjar.javac.WorkerCancellationRegistry`.
+#[derive(Debug, Clone, Default)]
+pub struct WorkerCancellationRegistry {
+    cancelled_requests: Arc<Mutex<HashSet<i32>>>,
+}
+
+impl WorkerCancellationRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_request(&self, request_id: i32) {
+        self.cancelled_requests.lock().unwrap().insert(request_id);
+    }
+
+    pub fn check_if_request_is_cancelled(&self, request_id: i32) -> bool {
+        self.cancelled_requests
+            .lock()
+            .unwrap()
+            .contains(&request_id)
+    }
+
+    pub fn unregister_request(&self, request_id: i32) -> bool {
+        self.cancelled_requests.lock().unwrap().remove(&request_id)
+    }
+}
+
 /// A running worker process (`SingleplexWorker` / the process behind a `WorkerMultiplexer`).
 pub struct WorkerProcess {
     pub id: u64,
@@ -1160,6 +1188,10 @@ pub struct WorkerProcess {
     /// Multiplex: pending request id -> responder.
     #[allow(clippy::type_complexity)]
     pending: Arc<Mutex<HashMap<i32, Sender<Result<WorkResponse, String>>>>>,
+    /// Multiplex: receiver stashed when `exec_with_cancel` exits early on cancellation so
+    /// `drain_cancelled_response` can await the in-flight response without sending a duplicate request.
+    #[allow(clippy::type_complexity)]
+    cancelled_receivers: Mutex<HashMap<i32, Receiver<Result<WorkResponse, String>>>>,
     /// Marked true when the process or its reader thread has died/been destroyed.
     dead: Arc<AtomicBool>,
     /// Number of `WorkRequest`s this process has served (`WorkerMetrics.actions_executed`).
@@ -1272,6 +1304,7 @@ impl WorkerProcess {
             sandbox_initialized: Mutex::new(false),
             multiplex_tx: Mutex::new(None),
             pending: Arc::new(Mutex::new(HashMap::new())),
+            cancelled_receivers: Mutex::new(HashMap::new()),
             dead: Arc::new(AtomicBool::new(false)),
             actions_executed: AtomicU64::new(0),
         });
@@ -1431,6 +1464,10 @@ impl WorkerProcess {
             }
             loop {
                 if cancel.is_some_and(|c| c.is_cancelled()) {
+                    self.cancelled_receivers
+                        .lock()
+                        .unwrap()
+                        .insert(request.request_id, rx);
                     return Err("cancelled".to_string());
                 }
                 match rx.recv_timeout(Duration::from_millis(10)) {
@@ -1506,6 +1543,52 @@ impl WorkerProcess {
             }
         } else if let Some(io) = self.io.lock().unwrap().as_mut() {
             let _ = write_request(&mut io.stdin, &req, self.key.protocol);
+        }
+    }
+
+    /// Removes any pending multiplex responder/receiver for an abandoned request that will not be
+    /// drained (e.g. when the worker is about to be destroyed).
+    pub fn abandon_cancelled_request(&self, request_id: i32) {
+        self.pending.lock().unwrap().remove(&request_id);
+        self.cancelled_receivers.lock().unwrap().remove(&request_id);
+    }
+
+    /// Waits for the worker to finish replying to an already-dispatched cancelled request without
+    /// sending a duplicate `WorkRequest`.
+    pub fn drain_cancelled_response(&self, request_id: i32) -> Result<WorkResponse, String> {
+        if self.key.multiplex {
+            let Some(rx) = self.cancelled_receivers.lock().unwrap().remove(&request_id) else {
+                return Err("missing cancelled request receiver".to_string());
+            };
+            loop {
+                match rx.recv_timeout(Duration::from_millis(10)) {
+                    Ok(res) => return res,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if !self.is_alive() {
+                            self.pending.lock().unwrap().remove(&request_id);
+                            return Err(format!(
+                                "Worker process for {} has died",
+                                self.key.mnemonic
+                            ));
+                        }
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        return Err(format!("Worker process for {} has died", self.key.mnemonic));
+                    }
+                }
+            }
+        }
+        let mut guard = self.io.lock().unwrap();
+        let io = guard.as_mut().ok_or("worker not running")?;
+        match read_response(&mut io.stdout, self.key.protocol) {
+            Ok(Some(r)) => Ok(r),
+            Ok(None) => Err(format!(
+                "Worker process for {} died while draining cancelled response",
+                self.key.mnemonic
+            )),
+            Err(e) => Err(format!(
+                "worker process returned an unparseable WorkResponse: {e}"
+            )),
         }
     }
 
@@ -2486,31 +2569,27 @@ impl WorkerSpawnRunner {
 
         let resp = b.worker.exec_with_cancel(&request, hooks.cancel.as_ref());
         if hooks.is_cancelled() {
-            if key.sandboxed {
-                let can_cancel = opts.cancellation && key.cancellable;
+            let can_cancel = opts.cancellation && key.cancellable;
+            if can_cancel || key.sandboxed {
                 let pool = self.pool.clone();
                 let req_id = request.request_id;
                 let sbx_to_clean = proxy_sandbox_dir.take();
                 std::thread::spawn(move || {
                     if can_cancel {
                         b.worker.send_cancel(req_id);
-                    }
-                    // Drain response before returning worker to pool; destroy on failure.
-                    if b.worker.key.multiplex {
-                        let res = b.worker.exec_with_cancel(
-                            &WorkRequest {
-                                request_id: req_id,
-                                cancel: can_cancel,
-                                ..Default::default()
-                            },
-                            None,
-                        );
-                        if res.is_err() {
-                            pool.invalidate(b);
-                        } else {
+                        if b.worker.drain_cancelled_response(req_id).is_ok() {
                             pool.release(b);
+                        } else {
+                            pool.invalidate(b);
+                        }
+                    } else if b.worker.key.multiplex {
+                        if b.worker.drain_cancelled_response(req_id).is_ok() {
+                            pool.release(b);
+                        } else {
+                            pool.invalidate(b);
                         }
                     } else {
+                        b.worker.abandon_cancelled_request(req_id);
                         pool.invalidate(b);
                     }
                     if let Some(d) = sbx_to_clean {
@@ -2518,6 +2597,7 @@ impl WorkerSpawnRunner {
                     }
                 });
             } else {
+                b.worker.abandon_cancelled_request(request.request_id);
                 self.pool.invalidate(b);
             }
             return Err(cancelled_error());
@@ -2893,5 +2973,17 @@ mod tests {
             err.contains("Missing input metadata for: 'missing.jar'"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn worker_cancellation_registry_registers_checks_and_unregisters() {
+        let reg = WorkerCancellationRegistry::new();
+        assert!(!reg.check_if_request_is_cancelled(42));
+        reg.register_request(42);
+        assert!(reg.check_if_request_is_cancelled(42));
+        assert!(!reg.check_if_request_is_cancelled(7));
+        assert!(reg.unregister_request(42));
+        assert!(!reg.check_if_request_is_cancelled(42));
+        assert!(!reg.unregister_request(42));
     }
 }

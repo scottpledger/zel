@@ -107,6 +107,8 @@ pub struct TestSpec {
     pub test_tmpdir: Option<PathBuf>,
     /// `--[no]incompatible_check_sharding_support`
     pub check_sharding_support: bool,
+    /// `--[no]test_runner_fail_fast`: exports `TESTBRIDGE_TEST_RUNNER_FAIL_FAST=1`.
+    pub test_runner_fail_fast: bool,
 }
 
 /// The configuration-level environment layers of a test (`TestPolicy.computeTestEnvironment`).
@@ -504,12 +506,7 @@ pub fn synthesize_xml(
     duration_ms: u64,
     log: &str,
 ) -> String {
-    let esc = |t: &str| {
-        t.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-    };
+    let esc = crate::junit_runner::XmlEscapers::escape_attribute;
     let failed = exit_code != 0 || timed_out;
     let msg = if timed_out {
         "timed out".to_string()
@@ -517,11 +514,17 @@ pub fn synthesize_xml(
         format!("exited with error code {exit_code}")
     };
     let target_name = label.rsplit_once(':').map(|x| x.1).unwrap_or(label);
-    let secs = duration_ms / 1000;
+    let secs = if duration_ms % 1000 == 0 {
+        (duration_ms / 1000).to_string()
+    } else {
+        format!("{}", duration_ms as f64 / 1000.0)
+    };
     let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     x.push_str(&format!(
         "<testsuites>\n  <testsuite name=\"{0}\" tests=\"1\" failures=\"0\" errors=\"{1}\">\n    <testcase name=\"{0}\" classname=\"\" status=\"run\" duration=\"{2}\" time=\"{2}\">",
-        esc(target_name), if failed { 1 } else { 0 }, secs
+        esc(target_name),
+        if failed { 1 } else { 0 },
+        secs
     ));
     if failed {
         x.push_str(&format!("<error message=\"{}\"></error>", esc(&msg)));
@@ -529,7 +532,7 @@ pub fn synthesize_xml(
     let trimmed_log = log.strip_suffix('\n').unwrap_or(log);
     x.push_str(&format!(
         "</testcase>\n      <system-out>\nGenerated test.log (if the file is not UTF-8, then this may be unreadable):\n<![CDATA[{}]]>\n      </system-out>\n    </testsuite>\n</testsuites>\n",
-        trimmed_log.replace("]]>", "]]>]]&gt;<![CDATA[")
+        crate::junit_runner::XmlEscapers::sanitize_cdata(trimmed_log)
     ));
     x
 }
@@ -691,7 +694,11 @@ fn run_attempt(
 ) -> std::io::Result<AttemptResult> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir)?;
-    let env = build_test_env(spec, dir, shard, run, attempt);
+    let policy = TestPolicyConfig {
+        test_runner_fail_fast: spec.test_runner_fail_fast,
+        ..Default::default()
+    };
+    let env = build_test_env_with_policy(spec, dir, shard, run, attempt, &policy);
     // test-setup.sh `cd`s into $TEST_SRCDIR/$TEST_WORKSPACE itself relative to PWD, so run from
     // the exec root and give it relative script/test paths exactly like the spawn does.
     let rel_str = |p: &Path| {
@@ -737,9 +744,9 @@ fn run_attempt(
     }
     let rel_exec = |p: &Path| -> PathFragment {
         if let Ok(r) = p.strip_prefix(&spec.exec_root) {
-            PathFragment::create(r.to_str().unwrap())
+            PathFragment::create(&s(r))
         } else {
-            PathFragment::create(p.to_str().unwrap())
+            PathFragment::create(&s(p))
         }
     };
     let mut inputs: Vec<PathFragment> = exec
@@ -1848,6 +1855,7 @@ mod tests {
             kill_delay_ms: Some(200),
             test_tmpdir: None,
             check_sharding_support: false,
+            test_runner_fail_fast: false,
         }
     }
 
@@ -2117,6 +2125,37 @@ mod tests {
             TestStatus::Passed,
             "{}",
             String::from_utf8_lossy(&r2.attempts[0].log)
+        );
+    }
+
+    #[test]
+    fn synthesize_xml_encodes_duration_attributes_and_cdata_cleanly() {
+        let xml = synthesize_xml("//pkg:t'\"&\t", 2, false, 1500, "out]]>mid\x01end\n");
+        assert!(xml.contains("name=\"t&apos;&quot;&amp;&#x9;\""), "{xml}");
+        assert!(xml.contains("duration=\"1.5\" time=\"1.5\""), "{xml}");
+        assert!(
+            xml.contains("<![CDATA[out]]>]]<![CDATA[>mid\u{FFFD}end]]>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("]]&gt;"), "{xml}");
+        let parsed = crate::test_status::parse_test_xml(&xml).unwrap().unwrap();
+        assert_eq!(parsed.child[0].child[0].run_duration_millis, Some(1500));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_test_propagates_test_runner_fail_fast() {
+        let mut sp = setup(
+            "fail_fast_env",
+            "#!/bin/sh\n[ \"$TESTBRIDGE_TEST_RUNNER_FAIL_FAST\" = \"1\" ] || exit 1\n",
+        );
+        sp.test_runner_fail_fast = true;
+        let r = run_test(&sp).unwrap();
+        assert_eq!(
+            r.status,
+            TestStatus::Passed,
+            "{}",
+            String::from_utf8_lossy(&r.attempts[0].log)
         );
     }
 }

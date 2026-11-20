@@ -3622,6 +3622,9 @@ impl BlazeRuntime {
             if let Some(tf) = exec_phase::opt_last(&parsed, "test_filter") {
                 run_base.insert("TESTBRIDGE_TEST_ONLY".into(), tf);
             }
+            if exec_phase::opt_bool(&parsed, "test_runner_fail_fast", false) {
+                run_base.insert("TESTBRIDGE_TEST_RUNNER_FAIL_FAST".into(), "1".into());
+            }
             // `--test_env=K=V` / `--test_env=K` (inherit from the client environment).
             for ev in zel_util::action_env::parse_env_vars(exec_phase::opt_all(&parsed, "test_env"))
             {

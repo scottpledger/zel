@@ -1,28 +1,75 @@
 //! Reduced-classpath execution of `JavaCompileAction` (`--experimental_java_classpath=bazel`),
-//! ported from `JavaCompileAction.java` / `JavaCompileActionContext.java`.
-//!
-//! The first attempt passes only the *direct* jars plus the jars named in the `.jdeps` files of
-//! the direct dependencies (`getReducedClasspath`) together with
-//! `--reduce_classpath_mode BAZEL_REDUCED`; JavaBuilder then reports a compilation error that may
-//! be caused by the missing classpath entries by writing `requires_reduced_classpath_fallback`
-//! into the `.jdeps` output (without producing the jar). The action is then re-run with the full
-//! classpath and `BAZEL_FALLBACK`.
+//! ported from `JavaCompileAction.java` / `JavaCompileActionContext.java`, plus full
+//! `blaze_deps.Dependencies` (`.jdeps`) protobuf decoding and encoding.
 
 use std::collections::HashSet;
 use std::io;
 use zel_analysis::action::{render_param_file, ParamFileFormat};
 use zel_analysis::JavaCompileSpec;
 
-/// The parts of `deps.proto`'s `Dependencies` message that the executor needs.
-#[derive(Debug, Default, PartialEq, Eq)]
+/// `blaze_deps.Dependency.Kind` (`deps.proto`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DependencyKind {
+    #[default]
+    Explicit = 0,
+    Implicit = 1,
+    Unused = 2,
+    Incomplete = 3,
+}
+
+impl DependencyKind {
+    pub fn from_wire(v: u64) -> Result<Self, String> {
+        match v {
+            0 => Ok(Self::Explicit),
+            1 => Ok(Self::Implicit),
+            2 => Ok(Self::Unused),
+            3 => Ok(Self::Incomplete),
+            other => Err(format!("unknown Dependency.Kind {other}")),
+        }
+    }
+
+    /// Returns `true` for kinds retained in reduced classpaths (`EXPLICIT`, `IMPLICIT`,
+    /// `INCOMPLETE`) and `false` for `UNUSED`.
+    pub const fn is_used(self) -> bool {
+        !matches!(self, Self::Unused)
+    }
+}
+
+/// `blaze_deps.SourceLocation` (`deps.proto`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceLocation {
+    pub path: String,
+    pub line: Option<i32>,
+    pub column: Option<i32>,
+}
+
+/// `blaze_deps.Dependency` (`deps.proto`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dependency {
+    pub path: String,
+    pub kind: DependencyKind,
+    pub locations: Vec<SourceLocation>,
+}
+
+/// Parsed `blaze_deps.Dependencies` message (`.jdeps`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Jdeps {
-    /// `dependency[].path`
+    /// Full `dependency` list in wire order, including `UNUSED` entries.
+    pub dependencies: Vec<Dependency>,
+    /// Convenience list of `dependency[].path` restricted to used kinds
+    /// (`EXPLICIT`, `IMPLICIT`, `INCOMPLETE`).
     pub paths: Vec<String>,
-    /// `requires_reduced_classpath_fallback` (field 5)
+    /// `rule_label` (field 2).
+    pub rule_label: Option<String>,
+    /// `success` (field 3).
+    pub success: Option<bool>,
+    /// `contained_package` (field 4).
+    pub contained_packages: Vec<String>,
+    /// `requires_reduced_classpath_fallback` (field 5).
     pub requires_reduced_classpath_fallback: bool,
 }
 
-fn varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
+pub(crate) fn varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
     let mut v: u64 = 0;
     let mut shift = 0;
     loop {
@@ -39,9 +86,27 @@ fn varint(b: &[u8], i: &mut usize) -> Result<u64, String> {
     }
 }
 
-/// Walks the fields of a message, calling `f(field_number, wire_type, value)`; `value` is the
-/// varint for wire type 0 and the payload slice for wire type 2 (empty otherwise).
-fn fields<'a>(
+pub(crate) fn push_varint(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push(((v as u8) & 0x7f) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+pub(crate) fn push_bytes_field(out: &mut Vec<u8>, field: u32, payload: &[u8]) {
+    push_varint(out, u64::from((field << 3) | 2));
+    push_varint(out, payload.len() as u64);
+    out.extend_from_slice(payload);
+}
+
+pub(crate) fn push_varint_field(out: &mut Vec<u8>, field: u32, val: u64) {
+    push_varint(out, u64::from(field << 3));
+    push_varint(out, val);
+}
+
+/// Walks the fields of a message, calling `f(field_number, wire_type, value, payload)`.
+pub(crate) fn fields<'a>(
     b: &'a [u8],
     mut f: impl FnMut(u64, u64, u64, &'a [u8]) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -88,14 +153,50 @@ pub fn parse_jdeps(bytes: &[u8]) -> Result<Jdeps, String> {
         match (field, wire) {
             (1, 2) => {
                 let mut path = None;
-                fields(payload, |f, w, _, p| {
-                    if f == 1 && w == 2 {
-                        path = Some(String::from_utf8_lossy(p).into_owned());
+                let mut kind = DependencyKind::Explicit;
+                let mut locations = Vec::new();
+                fields(payload, |f, w, val, p| {
+                    match (f, w) {
+                        (1, 2) => path = Some(String::from_utf8_lossy(p).into_owned()),
+                        (2, 0) => kind = DependencyKind::from_wire(val)?,
+                        (3, 2) => {
+                            let mut loc = SourceLocation::default();
+                            let mut has_path = false;
+                            fields(p, |lf, lw, lv, lp| {
+                                match (lf, lw) {
+                                    (1, 2) => {
+                                        loc.path = String::from_utf8_lossy(lp).into_owned();
+                                        has_path = true;
+                                    }
+                                    (2, 0) => loc.line = Some(lv as i64 as i32),
+                                    (3, 0) => loc.column = Some(lv as i64 as i32),
+                                    _ => {}
+                                }
+                                Ok(())
+                            })?;
+                            if has_path {
+                                locations.push(loc);
+                            }
+                        }
+                        _ => {}
                     }
                     Ok(())
                 })?;
-                out.paths.push(path.ok_or("Dependency without path")?);
+                let path = path.ok_or("Dependency without path")?;
+                if kind.is_used() {
+                    out.paths.push(path.clone());
+                }
+                out.dependencies.push(Dependency {
+                    path,
+                    kind,
+                    locations,
+                });
             }
+            (2, 2) => out.rule_label = Some(String::from_utf8_lossy(payload).into_owned()),
+            (3, 0) => out.success = Some(v != 0),
+            (4, 2) => out
+                .contained_packages
+                .push(String::from_utf8_lossy(payload).into_owned()),
             (5, 0) => out.requires_reduced_classpath_fallback = v != 0,
             _ => {}
         }
@@ -104,23 +205,102 @@ pub fn parse_jdeps(bytes: &[u8]) -> Result<Jdeps, String> {
     Ok(out)
 }
 
+/// Encodes a [`Jdeps`] message to `blaze_deps.Dependencies` protobuf wire bytes.
+pub fn encode_jdeps(jdeps: &Jdeps) -> Vec<u8> {
+    let mut out = Vec::new();
+    for dep in &jdeps.dependencies {
+        let mut d = Vec::new();
+        push_bytes_field(&mut d, 1, dep.path.as_bytes());
+        push_varint_field(&mut d, 2, dep.kind as u64);
+        for loc in &dep.locations {
+            let mut l = Vec::new();
+            push_bytes_field(&mut l, 1, loc.path.as_bytes());
+            if let Some(line) = loc.line {
+                push_varint_field(&mut l, 2, line as i64 as u64);
+            }
+            if let Some(col) = loc.column {
+                push_varint_field(&mut l, 3, col as i64 as u64);
+            }
+            push_bytes_field(&mut d, 3, &l);
+        }
+        push_bytes_field(&mut out, 1, &d);
+    }
+    if let Some(label) = &jdeps.rule_label {
+        push_bytes_field(&mut out, 2, label.as_bytes());
+    }
+    if let Some(success) = jdeps.success {
+        push_varint_field(&mut out, 3, u64::from(success));
+    }
+    for pkg in &jdeps.contained_packages {
+        push_bytes_field(&mut out, 4, pkg.as_bytes());
+    }
+    if jdeps.requires_reduced_classpath_fallback {
+        push_varint_field(&mut out, 5, 1);
+    }
+    out
+}
+
+/// Normalizes a path string for `java.nio.file.Path`-equivalent equality checks (`\` -> `/`,
+/// collapsing duplicate `/` and `.` segments, and removing trailing `/` on non-root paths).
+pub fn normalize_jdeps_path(p: &str) -> String {
+    let unified = p.replace('\\', "/");
+    let leading_slash = unified.starts_with('/');
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in unified.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if let Some(&last) = segs.last() {
+                if last != ".." {
+                    segs.pop();
+                    continue;
+                }
+            }
+            if !leading_slash {
+                segs.push("..");
+            }
+        } else {
+            segs.push(seg);
+        }
+    }
+    if segs.is_empty() {
+        if leading_slash {
+            "/".to_string()
+        } else {
+            String::new()
+        }
+    } else if leading_slash {
+        format!("/{}", segs.join("/"))
+    } else {
+        segs.join("/")
+    }
+}
+
 /// `JavaCompileAction.getReducedClasspath`: the entries of the full classpath that are direct
-/// jars or are named by the `.jdeps` of a direct dependency, in classpath order.
+/// jars or are named (with a non-`UNUSED` kind) by the `.jdeps` of a direct dependency, in
+/// classpath order.
 pub fn reduced_classpath(
     spec: &JavaCompileSpec,
     read: &dyn Fn(&str) -> io::Result<Vec<u8>>,
 ) -> io::Result<Vec<String>> {
-    let mut direct: HashSet<String> = spec.direct_jars.iter().cloned().collect();
+    let mut direct: HashSet<String> = spec
+        .direct_jars
+        .iter()
+        .map(|p| normalize_jdeps_path(p))
+        .collect();
     for dep in &spec.dependency_artifacts {
         let bytes = read(dep)?;
         let jdeps = parse_jdeps(&bytes)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{dep}: {e}")))?;
-        direct.extend(jdeps.paths);
+        for p in &jdeps.paths {
+            direct.insert(normalize_jdeps_path(p));
+        }
     }
     Ok(spec
         .transitive_inputs
         .iter()
-        .filter(|p| direct.contains(*p))
+        .filter(|p| direct.contains(&normalize_jdeps_path(p)))
         .cloned()
         .collect())
 }
@@ -136,17 +316,15 @@ pub fn classpath_param_file(
         args.push("--classpath".into());
         args.extend(classpath.iter().cloned());
     }
+    let mode = if fallback {
+        "BAZEL_FALLBACK"
+    } else if spec.classpath_mode == "BAZEL_NO_FALLBACK" {
+        "NONE"
+    } else {
+        "BAZEL_REDUCED"
+    };
     args.push("--reduce_classpath_mode".into());
-    args.push(
-        if spec.classpath_mode == "BAZEL_NO_FALLBACK" {
-            "NONE"
-        } else if fallback {
-            "BAZEL_FALLBACK"
-        } else {
-            "BAZEL_REDUCED"
-        }
-        .into(),
-    );
+    args.push(mode.into());
     render_param_file(&args, ParamFileFormat::Multiline)
 }
 
@@ -192,18 +370,48 @@ mod tests {
     }
 
     #[test]
-    fn parses_jdeps_paths_and_fallback_flag() {
-        let mut b = dep("bazel-out/k8-fastbuild/bin/a/liba-hjar.jar", 0);
-        b.extend(dep("b/libb.jar", 1));
-        b.extend([0x12, 3, b'/', b'/', b'x']); // rule_label (ignored)
-        b.extend([0x18, 1]); // success
-        b.extend([0x28, 1]); // requires_reduced_classpath_fallback
-        let j = parse_jdeps(&b).unwrap();
-        assert_eq!(
-            j.paths,
-            vec!["bazel-out/k8-fastbuild/bin/a/liba-hjar.jar", "b/libb.jar"]
-        );
-        assert!(j.requires_reduced_classpath_fallback);
+    fn parses_and_encodes_full_jdeps_excluding_unused_from_paths() {
+        let original = Jdeps {
+            dependencies: vec![
+                Dependency {
+                    path: "bazel-out/k8-fastbuild/bin/a/liba-hjar.jar".into(),
+                    kind: DependencyKind::Explicit,
+                    locations: vec![SourceLocation {
+                        path: "pkg/A.java".into(),
+                        line: Some(12),
+                        column: Some(5),
+                    }],
+                },
+                Dependency {
+                    path: "b/libb.jar".into(),
+                    kind: DependencyKind::Implicit,
+                    locations: vec![],
+                },
+                Dependency {
+                    path: "u/unused.jar".into(),
+                    kind: DependencyKind::Unused,
+                    locations: vec![],
+                },
+                Dependency {
+                    path: "i/incomplete.jar".into(),
+                    kind: DependencyKind::Incomplete,
+                    locations: vec![],
+                },
+            ],
+            paths: vec![
+                "bazel-out/k8-fastbuild/bin/a/liba-hjar.jar".into(),
+                "b/libb.jar".into(),
+                "i/incomplete.jar".into(),
+            ],
+            rule_label: Some("//pkg:x".into()),
+            success: Some(true),
+            contained_packages: vec!["com.example".into()],
+            requires_reduced_classpath_fallback: true,
+        };
+        let encoded = encode_jdeps(&original);
+        let decoded = parse_jdeps(&encoded).unwrap();
+        assert_eq!(decoded, original);
+
         assert!(
             !parse_jdeps(&dep("x.jar", 0))
                 .unwrap()
@@ -231,14 +439,16 @@ mod tests {
     }
 
     #[test]
-    fn reduces_to_direct_jars_and_jdeps_of_direct_deps() {
-        let jd = dep("c.jar", 0);
+    fn reduces_to_direct_jars_and_used_jdeps_with_normalized_paths() {
+        let mut jd = dep("./c.jar/", 0); // EXPLICIT with `./` and trailing `/`
+        jd.extend(dep("b.jar", 2)); // UNUSED must be omitted!
+        jd.extend(dep("pkg//../d.jar", 3)); // INCOMPLETE with `//` and `..`
         let read = move |p: &str| -> io::Result<Vec<u8>> {
             assert_eq!(p, "a.jdeps");
             Ok(jd.clone())
         };
         let cp = reduced_classpath(&spec(), &read).unwrap();
-        assert_eq!(cp, vec!["a.jar", "c.jar"]);
+        assert_eq!(cp, vec!["a.jar", "c.jar", "d.jar"]);
         let missing = |_: &str| -> io::Result<Vec<u8>> {
             Err(io::Error::new(io::ErrorKind::NotFound, "gone"))
         };
@@ -281,6 +491,6 @@ mod tests {
                 "out/x.jar-2.params"
             ]
         );
-        assert_eq!(attempt_inputs(&s, &all, &s.transitive_inputs).len(), 8); // all but a.jdeps, plus params
+        assert_eq!(attempt_inputs(&s, &all, &s.transitive_inputs).len(), 8);
     }
 }
