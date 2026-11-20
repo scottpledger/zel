@@ -191,7 +191,7 @@ pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String
 fn fetch_url_ext(url: &str, timeout_secs: u64, cacheable: bool) -> Result<Option<Vec<u8>>, String> {
     // Local file:// registries are never cached so edits on disk take effect immediately.
     if url.starts_with("file://") {
-        return fetch_url_uncached(url, timeout_secs, &[], &std::collections::BTreeMap::new());
+        return fetch_url_uncached(url, timeout_secs, &RegistryAuthCtx::default());
     }
     let is_http = url.starts_with("http://") || url.starts_with("https://");
     let ctx = REGISTRY_AUTH.with(|c| c.borrow().clone());
@@ -212,7 +212,7 @@ fn fetch_url_ext(url: &str, timeout_secs: u64, cacheable: bool) -> Result<Option
             return res.clone();
         }
     }
-    let res = fetch_url_uncached(url, timeout_secs, &auth_hdrs, &ctx.client_env);
+    let res = fetch_url_uncached(url, timeout_secs, &ctx);
     if is_http {
         RECORDED_FETCHES
             .lock()
@@ -230,8 +230,7 @@ fn fetch_url_ext(url: &str, timeout_secs: u64, cacheable: bool) -> Result<Option
 fn fetch_url_uncached(
     url: &str,
     timeout_secs: u64,
-    auth_hdrs: &[(String, String)],
-    client_env: &std::collections::BTreeMap<String, String>,
+    ctx: &RegistryAuthCtx,
 ) -> Result<Option<Vec<u8>>, String> {
     if let Some(rest) = url.strip_prefix("file://") {
         {
@@ -253,7 +252,7 @@ fn fetch_url_uncached(
         };
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return fetch_http_with_retries(url, timeout_secs, auth_hdrs, client_env);
+        return fetch_http_with_retries(url, timeout_secs, ctx);
     }
     Err(format!("Unsupported registry URL scheme: {url}"))
 }
@@ -270,84 +269,125 @@ pub fn set_http_connector_attempts(n: u32) {
     );
 }
 
-/// One HTTP GET through `curl` (no TLS stack without external crates). `Err((retryable, msg))`.
+const REGISTRY_MAX_REDIRECTS: usize = 40;
+
+/// Hop-by-hop HTTP GET through single-hop `curl` invocations, re-evaluating `ProxyHelper`
+/// (`curl_proxy_args`) and per-URI credentials on every redirect hop (`HttpConnector.connect`).
 fn curl_once(
-    url: &str,
+    start_url: &str,
     connect_timeout_ms: u64,
     max_time: u64,
-    auth_hdrs: &[(String, String)],
-    client_env: &std::collections::BTreeMap<String, String>,
+    ctx: &RegistryAuthCtx,
 ) -> Result<Option<Vec<u8>>, (bool, String)> {
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args([
-        "-sS",
-        "-L",
-        "--max-redirs",
-        "40",
-        "--connect-timeout",
-        &format!("{:.3}", connect_timeout_ms as f64 / 1000.0),
-        "--max-time",
-        &max_time.to_string(),
-        "-w",
-        "\n%{http_code}",
-    ]);
-    for k in [
-        "http_proxy",
-        "HTTP_PROXY",
-        "https_proxy",
-        "HTTPS_PROXY",
-        "no_proxy",
-        "NO_PROXY",
-    ] {
-        if let Some(v) = client_env.get(k) {
-            cmd.env(k, v);
+    let mut current = crate::download::Url::parse(start_url).map_err(|e| (false, e))?;
+    let mut current_url_str = start_url.to_string();
+    let mut visited = vec![current.to_url_string()];
+    for _ in 0..=REGISTRY_MAX_REDIRECTS {
+        let helper_hdrs = crate::netrc::resolve_credential_helper_headers(
+            &current_url_str,
+            &ctx.helpers,
+            &ctx.client_env,
+        )
+        .map_err(|e| (false, e))?;
+        let auth_hdrs = if let Some(hdrs) = helper_hdrs {
+            hdrs
+        } else if let Some(ui_hdr) = current.basic_auth_header_for_userinfo() {
+            vec![ui_hdr]
+        } else {
+            crate::netrc::resolve_netrc_headers(&current_url_str, &ctx.client_env)
+        };
+        let clean_url = current.to_url_string_without_userinfo();
+        let (hdr_tmp, body_tmp) = crate::download::next_curl_temp_pair();
+        let mut cmd = std::process::Command::new("curl");
+        for k in crate::download::AMBIENT_PROXY_ENV_VARS {
+            cmd.env_remove(k);
         }
-    }
-    for (k, v) in auth_hdrs {
-        cmd.arg("-H").arg(format!("{k}: {v}"));
-    }
-    cmd.arg(url);
-    let out = crate::output_retry_etxtbsy(&mut cmd).map_err(|e| (false, e.to_string()))?;
-    if !out.status.success() {
-        // Mirror the Java connector: unknown host and certificate problems are permanent, everything else
-        // (refused, reset, timeout, ...) is an IOException that is retried.
-        return Err(match out.status.code() {
-            Some(7) => (true, "Connection refused".to_string()),
-            Some(6) => {
-                let host = url
-                    .split("://")
-                    .nth(1)
-                    .and_then(|r| r.split('/').next())
-                    .unwrap_or("");
-                (false, format!("Unknown host: {host}"))
+        cmd.args([
+            "-sS",
+            "--connect-timeout",
+            &format!("{:.3}", connect_timeout_ms as f64 / 1000.0),
+            "--max-time",
+            &max_time.to_string(),
+            "-A",
+            "bazel/9.3.2",
+        ]);
+        cmd.args(crate::download::curl_proxy_args(
+            &clean_url,
+            &ctx.client_env,
+        ));
+        cmd.arg("-D").arg(&hdr_tmp.0);
+        cmd.arg("-o").arg(&body_tmp.0);
+        for (k, v) in &auth_hdrs {
+            cmd.arg("-H").arg(format!("{k}: {v}"));
+        }
+        cmd.arg(&clean_url);
+        let out = crate::output_retry_etxtbsy(&mut cmd).map_err(|e| (false, e.to_string()))?;
+        let raw_hdrs = std::fs::read(&hdr_tmp.0).unwrap_or_default();
+        let mut blocks = crate::download::parse_curl_header_blocks(&raw_hdrs);
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(match out.status.code() {
+                Some(7) => (true, "Connection refused".to_string()),
+                Some(6) => (false, format!("Unknown host: {}", current.host)),
+                Some(5) => (false, format!("Unknown host: {stderr}")),
+                Some(28) => (true, "connect timed out".to_string()),
+                Some(51 | 58 | 60 | 77) => (false, format!("TLS error: {stderr}")),
+                Some(35) if stderr.to_ascii_lowercase().contains("certificate") => {
+                    (false, format!("TLS error: {stderr}"))
+                }
+                _ => {
+                    if let Some(last) = blocks.last() {
+                        if last.code >= 400 {
+                            let c = last.code;
+                            let retryable = c == 403
+                                || c == 408
+                                || c == 429
+                                || ((500..600).contains(&c) && c != 501 && c != 505);
+                            return Err((retryable, format!("HTTP status {c}")));
+                        }
+                    }
+                    (true, stderr)
+                }
+            });
+        }
+        let body = std::fs::read(&body_tmp.0).map_err(|e| (false, e.to_string()))?;
+        let Some(blk) = blocks.pop() else {
+            return Ok(Some(body));
+        };
+        let code = u32::from(blk.code);
+        if matches!(blk.code, 301 | 302 | 303 | 307 | 308) {
+            let loc = blk
+                .headers
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "location")
+                .map(|(_, v)| v.clone())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| (false, format!("Redirect {code} without Location header")))?;
+            let next = current.join(&loc).map_err(|e| (false, e))?;
+            if !matches!(next.scheme.as_str(), "http" | "https") {
+                return Err((false, format!("Bad Location: {loc}")));
             }
-            Some(28) => (true, "connect timed out".to_string()),
-            Some(35) | Some(51) | Some(58) | Some(60) | Some(77) => (
-                false,
-                format!("TLS error: {}", String::from_utf8_lossy(&out.stderr).trim()),
-            ),
-            _ => (
-                true,
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            ),
-        });
+            let next_str = next.to_url_string();
+            if visited.contains(&next_str) {
+                return Err((false, "Redirect loop detected".to_string()));
+            }
+            visited.push(next_str.clone());
+            current_url_str = next_str;
+            current = next;
+            continue;
+        }
+        return match code {
+            200 | 206 => Ok(Some(body)),
+            404 => Ok(None),
+            401 => Err((false, "GET returned 401 Unauthorized".to_string())),
+            // HttpConnector: 403, 408, 429 and 5xx other than 501/505 are retried; other 4xx (including 410) are permanent.
+            403 | 408 | 429 => Err((true, format!("HTTP status {code}"))),
+            c if c < 500 || c == 501 || c == 505 => Err((false, format!("HTTP status {c}"))),
+            c => Err((true, format!("HTTP status {c}"))),
+        };
     }
-    let body = out.stdout;
-    let nl = body.iter().rposition(|b| *b == b'\n').unwrap_or(0);
-    let code = String::from_utf8_lossy(&body[nl + 1..])
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(0);
-    let content = body[..nl].to_vec();
-    match code {
-        200 | 206 => Ok(Some(content)),
-        404 => Ok(None),
-        401 => Err((false, "GET returned 401 Unauthorized".to_string())),
-        // HttpConnector: 403, 408, 429 and 5xx other than 501/505 are retried; other 4xx (including 410) are permanent.
-        403 | 408 | 429 => Err((true, format!("HTTP status {code}"))),
-        c if c < 500 || c == 501 || c == 505 => Err((false, format!("HTTP status {c}"))),
-        c => Err((true, format!("HTTP status {c}"))),
-    }
+    Err((false, "Redirect loop detected".to_string()))
 }
 
 /// Port of `HttpConnector.connect`'s retry loop: up to `HTTP_ATTEMPTS` attempts, exponential backoff
@@ -356,14 +396,13 @@ fn curl_once(
 fn fetch_http_with_retries(
     url: &str,
     max_time: u64,
-    auth_hdrs: &[(String, String)],
-    client_env: &std::collections::BTreeMap<String, String>,
+    ctx: &RegistryAuthCtx,
 ) -> Result<Option<Vec<u8>>, String> {
     let attempts = HTTP_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
     let mut connect_ms: u64 = 1000;
     let mut retries: u32 = 0;
     loop {
-        match curl_once(url, connect_ms, max_time.max(20), auth_hdrs, client_env) {
+        match curl_once(url, connect_ms, max_time.max(20), ctx) {
             Ok(r) => return Ok(r),
             Err((retryable, msg)) => {
                 let base_url = if let Some(idx) = url.find("/modules/") {

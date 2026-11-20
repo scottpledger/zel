@@ -137,7 +137,7 @@ impl Url {
 
     /// Resolve a (possibly relative) redirect location against this URL.
     pub fn join(&self, loc: &str) -> Result<Url, String> {
-        let mut u = if loc.contains("://") {
+        let mut u = if has_uri_scheme(loc) {
             Url::parse(loc)?
         } else if let Some(rest) = loc.strip_prefix("//") {
             Url::parse(&format!("{}://{}", self.scheme, rest))?
@@ -164,6 +164,15 @@ impl Url {
         }
         Ok(u)
     }
+}
+
+fn has_uri_scheme(s: &str) -> bool {
+    let Some((scheme, _)) = s.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
 fn default_port(scheme: &str) -> Option<u16> {
@@ -1406,11 +1415,7 @@ impl Downloader {
                 fs::read(&p)
                     .map_err(|e| fe(format!("{} ({})", p.display(), java_io_reason(&e)), false))
             }
-            "http" => self.http_get(&parsed, url, req, attempt),
-            "https" => {
-                let headers = self.headers_for(url, req, &parsed)?;
-                self.curl_get(&parsed.to_url_string_without_userinfo(), &headers, attempt)
-            }
+            "http" | "https" => self.http_or_https_get(&parsed, url, req, attempt),
             other => Err(fe(
                 format!("Unsupported URL scheme '{}' in {}", other, url),
                 false,
@@ -1422,7 +1427,8 @@ impl Downloader {
         &self,
         url: &str,
         headers: &[(String, String)],
-        tmp: &Path,
+        hdr_tmp: &Path,
+        body_tmp: &Path,
         attempt: u32,
     ) -> Command {
         let connect_secs = self.connect_timeout_for(attempt).as_secs_f64().max(0.1);
@@ -1434,25 +1440,13 @@ impl Downloader {
         let mut cmd = Command::new(&self.curl_binary);
         // Strip ambient server-process proxy variables so `curl` strictly obeys `self.client_env`
         // (`ProxyHelper` in Bazel only consults `clientEnv`, never daemon process env).
-        for k in [
-            "http_proxy",
-            "HTTP_PROXY",
-            "https_proxy",
-            "HTTPS_PROXY",
-            "all_proxy",
-            "ALL_PROXY",
-            "no_proxy",
-            "NO_PROXY",
-        ] {
+        for k in AMBIENT_PROXY_ENV_VARS {
             cmd.env_remove(k);
         }
-        cmd.args([
-            "-fsSL",
-            "--connect-timeout",
-            &connect_str,
-            "--max-redirs",
-            &self.max_redirects.to_string(),
-        ]);
+        // Single-hop invocation (no `-L`, no `-f`): `http_or_https_get` drives redirects
+        // hop-by-hop like `HttpConnector.connect` so each hop re-evaluates `ProxyHelper` and
+        // per-URI credentials/headers.
+        cmd.args(["-sS", "--connect-timeout", &connect_str]);
         let speed_secs = self.timeout.as_secs();
         if speed_secs > 0 {
             cmd.args([
@@ -1469,7 +1463,8 @@ impl Downloader {
             cmd.args(["-A", "bazel/9.3.2"]);
         }
         cmd.args(curl_proxy_args(url, &self.client_env));
-        cmd.arg("-o").arg(tmp);
+        cmd.arg("-D").arg(hdr_tmp);
+        cmd.arg("-o").arg(body_tmp);
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
         }
@@ -1477,24 +1472,27 @@ impl Downloader {
         cmd
     }
 
-    fn curl_get(
+    fn curl_single_hop(
         &self,
-        url: &str,
+        url: &Url,
         headers: &[(String, String)],
         attempt: u32,
-    ) -> Result<Vec<u8>, FetchError> {
-        let tmp = std::env::temp_dir().join(format!(
-            "zel-curl-{}-{}",
-            std::process::id(),
-            next_counter()
-        ));
-        let mut cmd = self.build_curl_command(url, headers, &tmp, attempt);
+    ) -> Result<SingleHopResponse, FetchError> {
+        for (k, v) in headers {
+            if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+                return Err(fe("Invalid header containing newline", false));
+            }
+        }
+        let clean_url = url.to_url_string_without_userinfo();
+        let (hdr_tmp, body_tmp) = next_curl_temp_pair();
+        let mut cmd =
+            self.build_curl_command(&clean_url, headers, &hdr_tmp.0, &body_tmp.0, attempt);
         let out = crate::output_retry_etxtbsy(&mut cmd).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 fe(
                     format!(
                         "Cannot download {}: the system '{}' binary is required for https URLs but was not found",
-                        url, self.curl_binary
+                        clean_url, self.curl_binary
                     ),
                     false,
                 )
@@ -1502,37 +1500,238 @@ impl Downloader {
                 fe(format!("Failed to run {}: {}", self.curl_binary, e), false)
             }
         })?;
+        let raw_hdrs = fs::read(&hdr_tmp.0).unwrap_or_default();
+        let mut blocks = parse_curl_header_blocks(&raw_hdrs);
         if !out.status.success() {
-            let _ = fs::remove_file(&tmp);
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let code = out.status.code().unwrap_or(-1);
             if code == 6 {
-                // `UnknownHostException` (retried by `DownloadManager`).
-                let host = url
-                    .split("://")
-                    .nth(1)
-                    .and_then(|r| r.split(['/', ':']).next())
-                    .unwrap_or("");
-                return Err(fe(format!("Unknown host: {host}"), false));
+                return Err(fe(format!("Unknown host: {}", url.host), false));
+            }
+            if code == 5 {
+                return Err(fe(format!("Unknown host: {stderr}"), false));
             }
             if code == 7 {
                 return Err(fe("Connection refused".to_string(), true));
             }
-            let unrecoverable_5xx = stderr.contains("error: 501") || stderr.contains("error: 505");
-            let retryable = (!unrecoverable_5xx && stderr.contains("error: 5"))
-                || stderr.contains("error: 403")
-                || stderr.contains("error: 408")
-                || stderr.contains("error: 429")
-                || matches!(code, 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56);
-            return Err(fe(format!("GET {} failed: {}", url, stderr), retryable));
+            if matches!(code, 51 | 58 | 60 | 77)
+                || (code == 35 && stderr.to_ascii_lowercase().contains("certificate"))
+            {
+                return Err(fe(format!("TLS error: {stderr}"), false));
+            }
+            if let Some(last) = blocks.last() {
+                if last.code >= 400 {
+                    let pcode = last.code;
+                    let retryable = pcode == 403
+                        || pcode == 408
+                        || pcode == 429
+                        || ((500..600).contains(&pcode) && pcode != 501 && pcode != 505);
+                    return Err(fe(
+                        format!("GET {} failed: {}", clean_url, stderr),
+                        retryable,
+                    ));
+                }
+            }
+            let retryable = matches!(code, 18 | 28 | 35 | 52 | 55 | 56);
+            return Err(fe(
+                format!("GET {} failed: {}", clean_url, stderr),
+                retryable,
+            ));
         }
-        let data =
-            fs::read(&tmp).map_err(|e| fe(format!("Failed to read curl output: {}", e), false));
-        let _ = fs::remove_file(&tmp);
-        data
+        let body = fs::read(&body_tmp.0)
+            .map_err(|e| fe(format!("Failed to read curl output: {}", e), false))?;
+        // When `curl` tunnels through an HTTP `CONNECT` proxy (or receives `100 Continue`),
+        // `-D` records each HTTP status block in order; the final block is the origin response.
+        let (code, reason, resp_headers) = match blocks.pop() {
+            Some(blk) => (blk.code, blk.reason, blk.headers),
+            None => (200, "OK".to_string(), Vec::new()),
+        };
+        Ok(SingleHopResponse {
+            code,
+            reason,
+            headers: resp_headers,
+            body,
+        })
     }
 
-    fn http_get(
+    fn http_single_hop(
+        &self,
+        url: &Url,
+        headers: &[(String, String)],
+        attempt: u32,
+    ) -> Result<SingleHopResponse, FetchError> {
+        let proxy = resolve_http_proxy(&url.host, &self.client_env);
+        if proxy.as_ref().is_some_and(|px| px.scheme != "http") {
+            return self.curl_single_hop(url, headers, attempt);
+        }
+        let connect_timeout = self.connect_timeout_for(attempt);
+        let (connect_host, connect_port, request_target, proxy_auth) = match &proxy {
+            Some(px) => (
+                px.host.clone(),
+                px.port.unwrap_or(80),
+                url.to_url_string_without_userinfo(),
+                px.userinfo.as_ref().and_then(|ui| {
+                    ui.contains(':')
+                        .then(|| format!("Basic {}", base64_encode(percent_decode(ui).as_bytes())))
+                }),
+            ),
+            None => (
+                url.host.clone(),
+                url.port.unwrap_or(80),
+                url.path_and_query.clone(),
+                None,
+            ),
+        };
+        let addr_str = format!("{}:{}", connect_host, connect_port);
+        let addrs: Vec<_> = addr_str
+            .to_socket_addrs()
+            .map_err(|_| fe(format!("Unknown host: {}", connect_host), false))?
+            .collect();
+        let mut stream = None;
+        let mut last = String::from("no addresses");
+        for a in addrs {
+            match TcpStream::connect_timeout(&a, connect_timeout) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => {
+                    last = if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                        "Connection refused".to_string()
+                    } else {
+                        format!("{}: {}", addr_str, e)
+                    }
+                }
+            }
+        }
+        let stream = stream.ok_or_else(|| fe(last, true))?;
+        let _ = stream.set_read_timeout(Some(self.timeout));
+        let _ = stream.set_write_timeout(Some(self.timeout));
+        let mut w = stream.try_clone().map_err(|e| fe(e.to_string(), true))?;
+        let mut reqs = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\n",
+            request_target,
+            url.host_header()
+        );
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        {
+            reqs.push_str("User-Agent: bazel/9.3.2\r\n");
+        }
+        reqs.push_str("Accept: */*\r\nConnection: close\r\n");
+        if let Some(pa) = proxy_auth {
+            reqs.push_str(&format!("Proxy-Authorization: {}\r\n", pa));
+        }
+        for (k, v) in headers {
+            if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
+                return Err(fe("Invalid header containing newline", false));
+            }
+            reqs.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        reqs.push_str("\r\n");
+        w.write_all(reqs.as_bytes())
+            .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
+        let mut r = BufReader::new(stream);
+        let mut line = String::new();
+        r.read_line(&mut line)
+            .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
+        let status_line = line.trim_end().to_string();
+        let mut it = status_line.splitn(3, ' ');
+        let version = it.next().unwrap_or("");
+        if !version.starts_with("HTTP/") {
+            return Err(fe(
+                format!("Invalid HTTP response from {}: '{}'", addr_str, status_line),
+                true,
+            ));
+        }
+        let code: u16 = it
+            .next()
+            .and_then(|c| c.parse().ok())
+            .ok_or_else(|| fe(format!("Invalid HTTP status line: '{}'", status_line), true))?;
+        let reason = it.next().unwrap_or("").to_string();
+        let mut hdrs: Vec<(String, String)> = Vec::new();
+        loop {
+            line.clear();
+            let n = r
+                .read_line(&mut line)
+                .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
+            if n == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+            if let Some((k, v)) = line.split_once(':') {
+                hdrs.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+            }
+        }
+        if code != 200 && code != 206 {
+            return Ok(SingleHopResponse {
+                code,
+                reason,
+                headers: hdrs,
+                body: Vec::new(),
+            });
+        }
+        let get = |k: &str| {
+            hdrs.iter()
+                .rev()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
+        let chunked = get("transfer-encoding")
+            .map(|v| v.to_ascii_lowercase().contains("chunked"))
+            .unwrap_or(false);
+        let mut body = Vec::new();
+        if chunked {
+            loop {
+                line.clear();
+                r.read_line(&mut line)
+                    .map_err(|e| fe(format!("Error reading chunk: {}", e), true))?;
+                let size_s = line.trim().split(';').next().unwrap_or("").to_string();
+                let size = usize::from_str_radix(&size_s, 16)
+                    .map_err(|_| fe(format!("Invalid chunk size '{}'", size_s), true))?;
+                if size == 0 {
+                    break;
+                }
+                let start_idx = body.len();
+                body.resize(start_idx + size, 0);
+                r.read_exact(&mut body[start_idx..])
+                    .map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
+                let mut crlf = [0u8; 2];
+                r.read_exact(&mut crlf)
+                    .map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
+            }
+        } else if let Some(cl) = get("content-length") {
+            let n: usize = cl
+                .parse()
+                .map_err(|_| fe(format!("Invalid Content-Length '{}'", cl), false))?;
+            let mut got = Vec::new();
+            r.take(n as u64)
+                .read_to_end(&mut got)
+                .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
+            if got.len() != n {
+                return Err(fe(
+                    format!(
+                        "Download size mismatch: Content-Length was {} but got {} bytes",
+                        n,
+                        got.len()
+                    ),
+                    true,
+                ));
+            }
+            body = got;
+        } else {
+            r.read_to_end(&mut body)
+                .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
+        }
+        Ok(SingleHopResponse {
+            code,
+            reason,
+            headers: hdrs,
+            body,
+        })
+    }
+
+    fn http_or_https_get(
         &self,
         start: &Url,
         orig_url: &str,
@@ -1540,196 +1739,72 @@ impl Downloader {
         attempt: u32,
     ) -> Result<Vec<u8>, FetchError> {
         let mut url = start.clone();
+        let mut effective_orig_url = start.clone();
         let mut current_url_str = orig_url.to_string();
         let mut visited: Vec<String> = vec![start.to_url_string()];
-        let connect_timeout = self.connect_timeout_for(attempt);
         for _ in 0..=self.max_redirects {
-            let headers = self.headers_for(&current_url_str, req, &url)?;
-            let proxy = resolve_http_proxy(&url.host, &self.client_env);
-            let (connect_host, connect_port, request_target, proxy_auth) = match &proxy {
-                Some(px) => (
-                    px.host.clone(),
-                    px.port.unwrap_or(80),
-                    url.to_url_string_without_userinfo(),
-                    px.userinfo.as_ref().and_then(|ui| {
-                        ui.contains(':').then(|| {
-                            format!("Basic {}", base64_encode(percent_decode(ui).as_bytes()))
-                        })
-                    }),
-                ),
-                None => (
-                    url.host.clone(),
-                    url.port.unwrap_or(80),
-                    url.path_and_query.clone(),
-                    None,
-                ),
-            };
-            let addr_str = format!("{}:{}", connect_host, connect_port);
-            let addrs: Vec<_> = addr_str
-                .to_socket_addrs()
-                .map_err(|_| fe(format!("Unknown host: {}", connect_host), false))?
-                .collect();
-            let mut stream = None;
-            let mut last = String::from("no addresses");
-            for a in addrs {
-                match TcpStream::connect_timeout(&a, connect_timeout) {
-                    Ok(s) => {
-                        stream = Some(s);
-                        break;
-                    }
-                    Err(e) => {
-                        last = if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                            "Connection refused".to_string()
-                        } else {
-                            format!("{}: {}", addr_str, e)
-                        }
-                    }
-                }
-            }
-            let stream = stream.ok_or_else(|| fe(last, true))?;
-            let _ = stream.set_read_timeout(Some(self.timeout));
-            let _ = stream.set_write_timeout(Some(self.timeout));
-            let mut w = stream.try_clone().map_err(|e| fe(e.to_string(), true))?;
-            let mut reqs = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\n",
-                request_target,
-                url.host_header()
-            );
-            if !headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            let mut headers = self.headers_for(&current_url_str, req, &url)?;
+            if is_compressed_extension(url.path())
+                || is_compressed_extension(effective_orig_url.path())
             {
-                reqs.push_str("User-Agent: bazel/9.3.2\r\n");
+                headers.retain(|(k, _)| !k.eq_ignore_ascii_case("accept-encoding"));
             }
-            reqs.push_str("Accept: */*\r\nConnection: close\r\n");
-            if let Some(pa) = proxy_auth {
-                reqs.push_str(&format!("Proxy-Authorization: {}\r\n", pa));
-            }
-            for (k, v) in &headers {
-                if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
-                    return Err(fe("Invalid header containing newline", false));
+            let resp = match url.scheme.as_str() {
+                "http" => self.http_single_hop(&url, &headers, attempt)?,
+                "https" => self.curl_single_hop(&url, &headers, attempt)?,
+                other => {
+                    return Err(fe(
+                        format!("Unsupported URL scheme '{}' in {}", other, current_url_str),
+                        false,
+                    ))
                 }
-                reqs.push_str(&format!("{}: {}\r\n", k, v));
-            }
-            reqs.push_str("\r\n");
-            w.write_all(reqs.as_bytes())
-                .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
-            let mut r = BufReader::new(stream);
-            let mut line = String::new();
-            r.read_line(&mut line)
-                .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
-            let status_line = line.trim_end().to_string();
-            let mut it = status_line.splitn(3, ' ');
-            let version = it.next().unwrap_or("");
-            if !version.starts_with("HTTP/") {
-                return Err(fe(
-                    format!("Invalid HTTP response from {}: '{}'", addr_str, status_line),
-                    true,
-                ));
-            }
-            let code: u16 = it
-                .next()
-                .and_then(|c| c.parse().ok())
-                .ok_or_else(|| fe(format!("Invalid HTTP status line: '{}'", status_line), true))?;
-            let reason = it.next().unwrap_or("").to_string();
-            let mut hdrs: Vec<(String, String)> = Vec::new();
-            loop {
-                line.clear();
-                let n = r
-                    .read_line(&mut line)
-                    .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
-                if n == 0 || line == "\r\n" || line == "\n" {
-                    break;
-                }
-                if let Some((k, v)) = line.split_once(':') {
-                    hdrs.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
-                }
-            }
+            };
             let get = |k: &str| {
-                hdrs.iter()
+                resp.headers
+                    .iter()
                     .rev()
                     .find(|(n, _)| n == k)
                     .map(|(_, v)| v.clone())
             };
-            if matches!(code, 301 | 302 | 303 | 307 | 308) {
-                let loc = get("location").ok_or_else(|| {
-                    fe(format!("Redirect {} without Location header", code), false)
+            if matches!(resp.code, 301 | 302 | 303 | 307 | 308) {
+                let loc = get("location").filter(|s| !s.is_empty()).ok_or_else(|| {
+                    fe(
+                        format!("Redirect {} without Location header", resp.code),
+                        false,
+                    )
                 })?;
                 let next = url.join(&loc).map_err(|e| fe(e, false))?;
-                let next_str = next.to_url_string();
-                match next.scheme.as_str() {
-                    "http" => {}
-                    "https" => {
-                        let next_headers = self.headers_for(&next_str, req, &next)?;
-                        return self.curl_get(
-                            &next.to_url_string_without_userinfo(),
-                            &next_headers,
-                            attempt,
-                        );
-                    }
-                    s => return Err(fe(format!("Redirect to unsupported scheme '{}'", s), false)),
+                if !matches!(next.scheme.as_str(), "http" | "https") {
+                    return Err(fe(
+                        format!("Redirect to unsupported scheme '{}'", next.scheme),
+                        false,
+                    ));
                 }
+                let next_str = next.to_url_string();
                 if visited.contains(&next_str) {
                     return Err(fe("Redirect loop detected", false));
                 }
                 visited.push(next_str.clone());
+                if resp.code == 301 {
+                    effective_orig_url = next.clone();
+                }
                 current_url_str = next_str;
                 url = next;
                 continue;
             }
-            if code != 200 {
-                let retryable = code == 403
-                    || code == 408
-                    || code == 429
-                    || ((500..600).contains(&code) && code != 501 && code != 505);
-                return Err(fe(format!("GET returned {} {}", code, reason), retryable));
+            if resp.code != 200 && resp.code != 206 {
+                let retryable = resp.code == 403
+                    || resp.code == 408
+                    || resp.code == 429
+                    || ((500..600).contains(&resp.code) && resp.code != 501 && resp.code != 505);
+                let msg = if resp.reason.is_empty() {
+                    format!("GET returned {}", resp.code)
+                } else {
+                    format!("GET returned {} {}", resp.code, resp.reason)
+                };
+                return Err(fe(msg, retryable));
             }
-            let chunked = get("transfer-encoding")
-                .map(|v| v.to_ascii_lowercase().contains("chunked"))
-                .unwrap_or(false);
-            let mut body = Vec::new();
-            if chunked {
-                loop {
-                    line.clear();
-                    r.read_line(&mut line)
-                        .map_err(|e| fe(format!("Error reading chunk: {}", e), true))?;
-                    let size_s = line.trim().split(';').next().unwrap_or("").to_string();
-                    let size = usize::from_str_radix(&size_s, 16)
-                        .map_err(|_| fe(format!("Invalid chunk size '{}'", size_s), true))?;
-                    if size == 0 {
-                        break;
-                    }
-                    let start = body.len();
-                    body.resize(start + size, 0);
-                    r.read_exact(&mut body[start..])
-                        .map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
-                    let mut crlf = [0u8; 2];
-                    r.read_exact(&mut crlf)
-                        .map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
-                }
-            } else if let Some(cl) = get("content-length") {
-                let n: usize = cl
-                    .parse()
-                    .map_err(|_| fe(format!("Invalid Content-Length '{}'", cl), false))?;
-                let mut got = Vec::new();
-                r.take(n as u64)
-                    .read_to_end(&mut got)
-                    .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
-                if got.len() != n {
-                    return Err(fe(
-                        format!(
-                            "Download size mismatch: Content-Length was {} but got {} bytes",
-                            n,
-                            got.len()
-                        ),
-                        true,
-                    ));
-                }
-                body = got;
-            } else {
-                r.read_to_end(&mut body)
-                    .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
-            }
+            let mut body = resp.body;
             let is_gzip_ce = get("content-encoding").is_some_and(|v| {
                 v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip")
             });
@@ -1737,6 +1812,7 @@ impl Downloader {
                 .map(|u| u.path().to_string())
                 .unwrap_or_default();
             let skip_gunzip = is_gz_extension(&orig_path)
+                || is_gz_extension(effective_orig_url.path())
                 || is_gz_extension(url.path())
                 || is_gz_extension(&req.archive_type);
             if is_gzip_ce && !skip_gunzip {
@@ -1756,6 +1832,111 @@ impl Downloader {
     }
 }
 
+struct SingleHopResponse {
+    code: u16,
+    reason: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+pub(crate) const AMBIENT_PROXY_ENV_VARS: [&str; 8] = [
+    "http_proxy",
+    "HTTP_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+    "no_proxy",
+    "NO_PROXY",
+];
+
+pub(crate) struct TempFileGuard(pub PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+pub(crate) fn next_curl_temp_pair() -> (TempFileGuard, TempFileGuard) {
+    let pid = std::process::id();
+    let id = next_counter();
+    let dir = std::env::temp_dir();
+    (
+        TempFileGuard(dir.join(format!("zel-curl-hdr-{pid}-{id}"))),
+        TempFileGuard(dir.join(format!("zel-curl-out-{pid}-{id}"))),
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ParsedHeaderBlock {
+    pub code: u16,
+    pub reason: String,
+    pub headers: Vec<(String, String)>,
+}
+
+fn parse_http_status_line(line: &str) -> Option<(u16, String)> {
+    let mut it = line.splitn(3, ' ');
+    let proto = it.next()?;
+    if !proto.starts_with("HTTP/") {
+        return None;
+    }
+    let code: u16 = it.next()?.parse().ok()?;
+    if !(100..=999).contains(&code) {
+        return None;
+    }
+    let reason = it.next().unwrap_or("").trim().to_string();
+    Some((code, reason))
+}
+
+pub(crate) fn parse_curl_header_blocks(raw: &[u8]) -> Vec<ParsedHeaderBlock> {
+    let text = String::from_utf8_lossy(raw);
+    let mut blocks: Vec<ParsedHeaderBlock> = Vec::new();
+    let mut current: Option<ParsedHeaderBlock> = None;
+    let mut at_block_boundary = true;
+    for raw_line in text.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() {
+            if let Some(blk) = current.take() {
+                blocks.push(blk);
+            }
+            at_block_boundary = true;
+            continue;
+        }
+        if at_block_boundary || current.is_none() {
+            if let Some((code, reason)) = parse_http_status_line(line) {
+                current = Some(ParsedHeaderBlock {
+                    code,
+                    reason,
+                    headers: Vec::new(),
+                });
+                at_block_boundary = false;
+                continue;
+            }
+        }
+        if let Some(blk) = current.as_mut() {
+            if let Some((k, v)) = line.split_once(':') {
+                blk.headers
+                    .push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
+            }
+        }
+    }
+    if let Some(blk) = current {
+        blocks.push(blk);
+    }
+    blocks
+}
+
+fn is_compressed_extension(path: &str) -> bool {
+    let Some((_, ext)) = path.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "bz2" | "gz" | "jar" | "tgz" | "war" | "xz" | "zip"
+    )
+}
+
 fn is_gz_extension(path_or_type: &str) -> bool {
     let ext = match path_or_type.rsplit_once('.') {
         Some((_, e)) => e,
@@ -1765,7 +1946,7 @@ fn is_gz_extension(path_or_type: &str) -> bool {
 }
 
 fn select_proxy_env(scheme: &str, client_env: &BTreeMap<String, String>) -> Option<String> {
-    if scheme == "https" {
+    if scheme.eq_ignore_ascii_case("https") {
         client_env
             .get("https_proxy")
             .or_else(|| client_env.get("HTTPS_PROXY"))
@@ -1788,7 +1969,11 @@ fn host_bypassed_by_no_proxy(host: &str, client_env: &BTreeMap<String, String>) 
     };
     let h = host.to_ascii_lowercase();
     for raw in np.split(',') {
-        let pat = raw.trim().to_ascii_lowercase();
+        let trimmed = raw.trim().to_ascii_lowercase();
+        let pat = trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(&trimmed);
         if pat.is_empty() {
             continue;
         }
@@ -1796,7 +1981,7 @@ fn host_bypassed_by_no_proxy(host: &str, client_env: &BTreeMap<String, String>) 
             return true;
         }
         if let Some(suf) = pat.strip_prefix('.') {
-            if h.ends_with(&format!(".{suf}")) {
+            if !suf.is_empty() && h.ends_with(&format!(".{suf}")) {
                 return true;
             }
         } else if h == pat || h.ends_with(&format!(".{pat}")) {
@@ -1806,43 +1991,34 @@ fn host_bypassed_by_no_proxy(host: &str, client_env: &BTreeMap<String, String>) 
     false
 }
 
-fn curl_proxy_args(url: &str, client_env: &BTreeMap<String, String>) -> Vec<String> {
-    let host = Url::parse(url).map(|u| u.host).unwrap_or_default();
-    if !host.is_empty() && host_bypassed_by_no_proxy(&host, client_env) {
+/// Computes single-hop `curl` proxy flags for `url` using Bazel `ProxyHelper.createProxyIfNeeded`
+/// semantics. Because `curl` is invoked without `-L` and redirects are driven hop-by-hop in Rust,
+/// each hop evaluates `no_proxy` and scheme-specific proxy selection (`http_proxy` vs
+/// `https_proxy`) exclusively for that hop's target URL.
+pub(crate) fn curl_proxy_args(url: &str, client_env: &BTreeMap<String, String>) -> Vec<String> {
+    let Ok(parsed) = Url::parse(url) else {
+        return vec!["--noproxy".to_string(), "*".to_string()];
+    };
+    if !parsed.host.is_empty() && host_bypassed_by_no_proxy(&parsed.host, client_env) {
         return vec!["--noproxy".to_string(), "*".to_string()];
     }
-    let Some(proxy) = select_proxy_env("https", client_env) else {
+    let Some(proxy) = select_proxy_env(&parsed.scheme, client_env) else {
         return vec!["--noproxy".to_string(), "*".to_string()];
     };
     if proxy.is_empty() {
         return vec!["--noproxy".to_string(), "*".to_string()];
     }
-    let mut args = vec!["--proxy".to_string(), proxy];
-    if let Some(np) = client_env
-        .get("no_proxy")
-        .filter(|s| !s.is_empty())
-        .or_else(|| client_env.get("NO_PROXY").filter(|s| !s.is_empty()))
-    {
-        let filtered: Vec<&str> = np
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| {
-                if entry.is_empty() {
-                    return false;
-                }
-                if let Some(suf) = entry.strip_prefix('.') {
-                    !host.eq_ignore_ascii_case(suf)
-                } else {
-                    true
-                }
-            })
-            .collect();
-        if !filtered.is_empty() {
-            args.push("--noproxy".to_string());
-            args.push(filtered.join(","));
-        }
-    }
-    args
+    let proxy_arg = if let Some(rest) = proxy.strip_prefix("socks://") {
+        format!("socks5://{rest}")
+    } else {
+        proxy
+    };
+    vec![
+        "--proxy".to_string(),
+        proxy_arg,
+        "--noproxy".to_string(),
+        String::new(),
+    ]
 }
 
 fn resolve_http_proxy(host: &str, client_env: &BTreeMap<String, String>) -> Option<Url> {
@@ -1853,21 +2029,36 @@ fn resolve_http_proxy(host: &str, client_env: &BTreeMap<String, String>) -> Opti
     if raw.is_empty() {
         return None;
     }
-    let normalized = if raw.contains("://") {
+    let normalized = if let Some(rest) = raw.strip_prefix("socks://") {
+        format!("socks5://{rest}")
+    } else if raw.contains("://") {
         raw
     } else {
         format!("http://{raw}")
     };
-    Url::parse(&normalized)
-        .ok()
-        .filter(|u| !u.host.is_empty() && (u.scheme == "http" || u.scheme == "https"))
+    Url::parse(&normalized).ok().filter(|u| {
+        !u.host.is_empty()
+            && matches!(
+                u.scheme.as_str(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            )
+    })
 }
 
 impl Url {
-    fn to_url_string_without_userinfo(&self) -> String {
+    pub(crate) fn to_url_string_without_userinfo(&self) -> String {
         let mut u = self.clone();
         u.userinfo = None;
         u.to_url_string()
+    }
+
+    pub(crate) fn basic_auth_header_for_userinfo(&self) -> Option<(String, String)> {
+        self.userinfo.as_ref().map(|ui| {
+            (
+                "Authorization".to_string(),
+                format!("Basic {}", base64_encode(percent_decode(ui).as_bytes())),
+            )
+        })
     }
 }
 
@@ -3230,6 +3421,7 @@ mod tests {
         let cmd = dl.build_curl_command(
             "https://bcr.bazel.build/modules/foo/1.0/MODULE.bazel",
             &[],
+            &d.join("tmp.hdr"),
             &d.join("tmp.out"),
             0,
         );
@@ -3237,6 +3429,12 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
+        assert!(
+            !args
+                .iter()
+                .any(|a| a == "-L" || a == "-fsSL" || a == "--max-redirs"),
+            "curl must be single-hop without -L: {args:?}"
+        );
         let noproxy_vals: Vec<&str> = args
             .windows(2)
             .filter_map(|w| (w[0] == "--noproxy").then_some(w[1].as_str()))
@@ -3295,7 +3493,7 @@ mod tests {
                 "--proxy",
                 "http://corp-proxy.internal:8080",
                 "--noproxy",
-                "localhost"
+                ""
             ]
         );
 
@@ -3362,6 +3560,517 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn parse_curl_header_blocks_handles_connect_tunnel_and_interim_blocks() {
+        // HTTP CONNECT tunnel (`200 Connection established`) followed by HTTP/2 `302` redirect:
+        // must select the origin's `302` block without mixing proxy headers into origin headers.
+        let raw = concat!(
+            "HTTP/1.1 200 Connection established\r\n",
+            "Proxy-Agent: corp-gateway\r\n",
+            "Location: https://wrong-from-proxy.invalid/\r\n",
+            "\r\n",
+            "HTTP/2 302 \r\n",
+            "location: https://sub.bypass.test:8443/pkg.tgz?sig=a:b\r\n",
+            "x-origin: yes\r\n",
+            "\r\n",
+        );
+        let blocks = parse_curl_header_blocks(raw.as_bytes());
+        assert_eq!(blocks.len(), 2);
+        let last = blocks.last().unwrap();
+        assert_eq!(last.code, 302);
+        assert_eq!(last.reason, "");
+        assert_eq!(
+            last.headers,
+            vec![
+                (
+                    "location".to_string(),
+                    "https://sub.bypass.test:8443/pkg.tgz?sig=a:b".to_string()
+                ),
+                ("x-origin".to_string(), "yes".to_string()),
+            ]
+        );
+
+        // Proxy auth challenge (`407`) -> `200 Connection established` -> `100 Continue` -> `200 OK`.
+        let multi = concat!(
+            "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic\r\n\r\n",
+            "HTTP/1.1 200 Connection established\r\n\r\n",
+            "HTTP/1.1 100 Continue\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n",
+        );
+        let mblocks = parse_curl_header_blocks(multi.as_bytes());
+        assert_eq!(mblocks.len(), 4);
+        assert_eq!(mblocks.last().unwrap().code, 200);
+        assert_eq!(mblocks.last().unwrap().reason, "OK");
+
+        // Relative `Location` with a URL inside its query string must stay relative on the same
+        // origin rather than misparsing `/auth?next=https` as a URI scheme.
+        let base = Url::parse("https://origin.example:8443/dir/start").unwrap();
+        let joined = base
+            .join("/auth/step?next=https://other.example/landing#frag")
+            .unwrap();
+        assert_eq!(joined.scheme, "https");
+        assert_eq!(joined.host, "origin.example");
+        assert_eq!(joined.port, Some(8443));
+        assert_eq!(
+            joined.path_and_query,
+            "/auth/step?next=https://other.example/landing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curl_hop_by_hop_redirects_reevaluate_proxy_no_proxy_scheme_and_auth() {
+        if !net_ok() {
+            return;
+        }
+        // Check that real `curl` is available in PATH.
+        if Command::new("curl").arg("--version").output().is_err() {
+            return;
+        }
+        let d = tmpdir("curl-hop-redirects");
+
+        // Install a thin wrapper around real `curl` that records each single-hop invocation's
+        // `--proxy` / `--noproxy` / target URL, rewrites `https://<host>:<port>/...` to
+        // `http://<host>:<port>/...` so local loopback `TcpListener` servers can serve without TLS
+        // certs, and adds `--resolve <host>:<port>:127.0.0.1` when `--noproxy *` is active so
+        // synthetic test hostnames connect directly to `127.0.0.1`. All `--proxy`, `--noproxy`,
+        // `-D`, `-o`, and `-H` flags built by `Downloader::build_curl_command` are executed by the
+        // real system `curl` binary!
+        let wrapper = d.join("curl-loopback-wrapper.sh");
+        let hop_log = d.join("hops.log");
+        let real_curl = {
+            let out = Command::new("sh")
+                .args(["-c", "command -v curl"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+hop_log='{hop_log}'
+real_curl='{real_curl}'
+proxy_val='<none>'
+noproxy_val='<unset>'
+last_idx=$#
+i=0
+while [ $i -lt $# ]; do
+  i=$((i + 1))
+  eval "arg=\${{$i}}"
+  if [ "$arg" = "--proxy" ]; then
+    j=$((i + 1))
+    eval "proxy_val=\${{$j}}"
+  elif [ "$arg" = "--noproxy" ]; then
+    j=$((i + 1))
+    eval "noproxy_val=\${{$j}}"
+  fi
+done
+eval "orig_url=\${{$last_idx}}"
+printf 'url=%s|proxy=%s|noproxy=%s\n' "$orig_url" "$proxy_val" "$noproxy_val" >> "$hop_log"
+
+rewritten_url=$(printf '%s' "$orig_url" | sed 's|^https://|http://|')
+hostport=$(printf '%s' "$rewritten_url" | sed -e 's|^http://||' -e 's|/.*$||')
+
+# Rebuild "$@" replacing only the final URL argument (and adding --resolve for direct hops).
+idx=0
+for a in "$@"; do
+  idx=$((idx + 1))
+  if [ $idx -eq 1 ]; then
+    set --
+  fi
+  if [ $idx -eq $last_idx ]; then
+    if [ "$noproxy_val" = "*" ]; then
+      case "$hostport" in
+        *:*) set -- "$@" --resolve "${{hostport}}:127.0.0.1" ;;
+      esac
+    fi
+    set -- "$@" "$rewritten_url"
+  else
+    set -- "$@" "$a"
+  fi
+done
+exec "$real_curl" "$@"
+"#,
+            hop_log = hop_log.display(),
+            real_curl = real_curl,
+        );
+        fs::write(&wrapper, script).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // -------------------------------------------------------------------
+        // 1. Bypassed `no_proxy` host -> redirects to proxied external host:
+        //    Hop 1 (`internal.corp`) must use `--noproxy *` (direct).
+        //    Hop 2 (`external.cdn.test`) must use `--proxy ... --noproxy ""`!
+        // -------------------------------------------------------------------
+        let (proxy_a_port, seen_proxy_a) = serve(1, |path, _| {
+            assert!(
+                path.starts_with("http://external.cdn.test:"),
+                "proxy should receive external hop, got {path}"
+            );
+            ok(b"payload-via-proxy-on-second-hop")
+        });
+        let ext_url = "https://external.cdn.test:18443/archive.tar.gz".to_string();
+        let ext_url_clone = ext_url.clone();
+        let (direct_internal_port, seen_internal) = serve(1, move |path, _| {
+            assert_eq!(path, "/initial.tar.gz");
+            format!("HTTP/1.1 302 Found\r\nLocation: {ext_url_clone}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let mut env_a = BTreeMap::new();
+        env_a.insert(
+            "https_proxy".to_string(),
+            format!("http://127.0.0.1:{proxy_a_port}"),
+        );
+        env_a.insert(
+            "no_proxy".to_string(),
+            "internal.corp,localhost".to_string(),
+        );
+        let dl_a = Downloader {
+            curl_binary: wrapper.to_string_lossy().into_owned(),
+            client_env: env_a,
+            ..quick()
+        };
+        let start_a = format!("https://internal.corp:{direct_internal_port}/initial.tar.gz");
+        let out_a = d.join("out-a.bin");
+        dl_a.download(&req(vec![start_a.clone()], out_a.clone()))
+            .unwrap();
+        assert_eq!(
+            fs::read(&out_a).unwrap(),
+            b"payload-via-proxy-on-second-hop"
+        );
+        assert_eq!(seen_internal.lock().unwrap().len(), 1);
+        assert_eq!(seen_proxy_a.lock().unwrap().len(), 1);
+        let hops_a = fs::read_to_string(&hop_log).unwrap();
+        let lines_a: Vec<&str> = hops_a.lines().collect();
+        assert_eq!(
+            lines_a,
+            vec![
+                format!("url={start_a}|proxy=<none>|noproxy=*"),
+                format!("url={ext_url}|proxy=http://127.0.0.1:{proxy_a_port}|noproxy="),
+            ]
+        );
+
+        // -------------------------------------------------------------------
+        // 2. Proxied apex host (`bypass.test`) -> redirects to leading-dot
+        //    `no_proxy` subdomain (`sub.bypass.test` with `no_proxy=.bypass.test`):
+        //    Hop 1 (`bypass.test`) must go THROUGH `--proxy`.
+        //    Hop 2 (`sub.bypass.test`) must BYPASS the proxy (`--noproxy *`)!
+        // -------------------------------------------------------------------
+        let _ = fs::remove_file(&hop_log);
+        let (direct_sub_port, seen_direct_sub) = serve(1, |path, _| {
+            assert_eq!(path, "/sub-only.bin");
+            ok(b"payload-direct-from-subdomain")
+        });
+        let sub_url = format!("https://sub.bypass.test:{direct_sub_port}/sub-only.bin");
+        let sub_url_clone = sub_url.clone();
+        let (proxy_b_port, seen_proxy_b) = serve(1, move |path, _| {
+            assert!(
+                path.starts_with("http://bypass.test:"),
+                "only apex host should hit proxy, got {path}"
+            );
+            format!("HTTP/1.1 302 Found\r\nLocation: {sub_url_clone}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let mut env_b = BTreeMap::new();
+        env_b.insert(
+            "https_proxy".to_string(),
+            format!("http://127.0.0.1:{proxy_b_port}"),
+        );
+        env_b.insert("no_proxy".to_string(), ".bypass.test".to_string());
+        let dl_b = Downloader {
+            curl_binary: wrapper.to_string_lossy().into_owned(),
+            client_env: env_b,
+            ..quick()
+        };
+        let start_b = "https://bypass.test:19443/apex.bin".to_string();
+        let out_b = d.join("out-b.bin");
+        dl_b.download(&req(vec![start_b.clone()], out_b.clone()))
+            .unwrap();
+        assert_eq!(fs::read(&out_b).unwrap(), b"payload-direct-from-subdomain");
+        assert_eq!(seen_proxy_b.lock().unwrap().len(), 1);
+        assert_eq!(seen_direct_sub.lock().unwrap().len(), 1);
+        let hops_b = fs::read_to_string(&hop_log).unwrap();
+        let lines_b: Vec<&str> = hops_b.lines().collect();
+        assert_eq!(
+            lines_b,
+            vec![
+                format!("url={start_b}|proxy=http://127.0.0.1:{proxy_b_port}|noproxy="),
+                format!("url={sub_url}|proxy=<none>|noproxy=*"),
+            ]
+        );
+
+        // -------------------------------------------------------------------
+        // 3. Cross-scheme `http://` -> `https://` -> `https://` (`no_proxy`)
+        //    re-evaluates `http_proxy` on hop 1, `https_proxy` on hop 2, and
+        //    `no_proxy` on hop 3, while isolating per-host `req.auth` headers!
+        // -------------------------------------------------------------------
+        let _ = fs::remove_file(&hop_log);
+        let (direct_final_port, seen_final) = serve(1, |_, raw_req| {
+            assert!(
+                !raw_req.to_ascii_lowercase().contains("authorization:"),
+                "auth from earlier hops must never leak to third host: {raw_req}"
+            );
+            ok(b"three-hop-cross-scheme-ok")
+        });
+        let hop3_url = format!("https://direct.local:{direct_final_port}/final.bin");
+        let hop3_clone = hop3_url.clone();
+        let (https_proxy_c_port, seen_https_proxy_c) = serve(1, move |_, raw_req| {
+            assert!(
+                raw_req.contains("Authorization: Bearer hop2-secret"),
+                "hop 2 must receive its own auth header: {raw_req}"
+            );
+            assert!(
+                !raw_req.contains("hop1-secret"),
+                "hop 1 auth must not leak to hop 2: {raw_req}"
+            );
+            format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: {hop3_clone}\r\nContent-Length: 0\r\n\r\n").into_bytes()
+        });
+        let hop2_url = "https://secure.remote:20443/step2".to_string();
+        let hop2_clone = hop2_url.clone();
+        let (http_proxy_c_port, seen_http_proxy_c) = serve(1, move |_, raw_req| {
+            assert!(
+                raw_req.contains("Authorization: Bearer hop1-secret"),
+                "hop 1 must receive its own auth header: {raw_req}"
+            );
+            format!("HTTP/1.1 302 Found\r\nLocation: {hop2_clone}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let mut env_c = BTreeMap::new();
+        env_c.insert(
+            "http_proxy".to_string(),
+            format!("http://127.0.0.1:{http_proxy_c_port}"),
+        );
+        env_c.insert(
+            "https_proxy".to_string(),
+            format!("http://127.0.0.1:{https_proxy_c_port}"),
+        );
+        env_c.insert("no_proxy".to_string(), "direct.local".to_string());
+        let dl_c = Downloader {
+            curl_binary: wrapper.to_string_lossy().into_owned(),
+            client_env: env_c,
+            ..quick()
+        };
+        let hop1_url = "http://plain.remote:8080/step1".to_string();
+        let mut req_c = req(vec![hop1_url.clone()], d.join("out-c.bin"));
+        req_c.auth.insert(
+            hop1_url,
+            BTreeMap::from([
+                ("type".to_string(), "pattern".to_string()),
+                ("pattern".to_string(), "Bearer <password>".to_string()),
+                ("password".to_string(), "hop1-secret".to_string()),
+            ]),
+        );
+        req_c.auth.insert(
+            hop2_url.clone(),
+            BTreeMap::from([
+                ("type".to_string(), "pattern".to_string()),
+                ("pattern".to_string(), "Bearer <password>".to_string()),
+                ("password".to_string(), "hop2-secret".to_string()),
+            ]),
+        );
+        dl_c.download(&req_c).unwrap();
+        assert_eq!(
+            fs::read(d.join("out-c.bin")).unwrap(),
+            b"three-hop-cross-scheme-ok"
+        );
+        assert_eq!(seen_http_proxy_c.lock().unwrap().len(), 1);
+        assert_eq!(seen_https_proxy_c.lock().unwrap().len(), 1);
+        assert_eq!(seen_final.lock().unwrap().len(), 1);
+        let hops_c = fs::read_to_string(&hop_log).unwrap();
+        let lines_c: Vec<&str> = hops_c.lines().collect();
+        assert_eq!(
+            lines_c,
+            vec![
+                format!("url={hop2_url}|proxy=http://127.0.0.1:{https_proxy_c_port}|noproxy="),
+                format!("url={hop3_url}|proxy=<none>|noproxy=*"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn curl_single_hop_handles_connect_headers_4xx_5xx_mirror_fallback_and_max_redirects() {
+        let d = tmpdir("curl-errors-and-limits");
+        let fake_curl = d.join("stateful-curl.sh");
+        let counter_file = d.join("count.txt");
+        // Stateful fake curl that writes realistic `-D` header blocks (including multi-block
+        // `HTTP/1.1 200 Connection established` tunnels) and `-o` bodies based on URL path.
+        let script = format!(
+            r#"#!/bin/sh
+set -eu
+cnt_file='{cnt}'
+hdr=''
+out=''
+url=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -D) hdr="$2"; shift 2 ;;
+    -o) out="$2"; shift 2 ;;
+    --connect-timeout|--speed-time|--speed-limit|-A|--proxy|--noproxy|-H) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+n=0
+if [ -f "$cnt_file" ]; then n=$(cat "$cnt_file"); fi
+n=$((n + 1))
+printf '%s' "$n" > "$cnt_file"
+
+case "$url" in
+  https://connect-redir.test/start)
+    printf 'HTTP/1.1 200 Connection established\r\nProxy-Agent: test\r\n\r\nHTTP/1.1 301 Moved Permanently\r\nLocation: /landed\r\n\r\n' > "$hdr"
+    : > "$out"
+    ;;
+  https://connect-redir.test/landed)
+    printf 'HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 200 \r\ncontent-length: 11\r\n\r\n' > "$hdr"
+    printf 'tunnel-good' > "$out"
+    ;;
+  https://missing.test/404)
+    printf 'HTTP/1.1 404 Not Found\r\n\r\n' > "$hdr"
+    printf 'not found' > "$out"
+    ;;
+  https://mirror.test/ok)
+    printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+    printf 'from-mirror' > "$out"
+    ;;
+  https://flaky.test/503)
+    if [ "$n" -eq 1 ]; then
+      printf 'HTTP/1.1 503 Service Unavailable\r\n\r\n' > "$hdr"
+      : > "$out"
+    else
+      printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+      printf 'recovered-503' > "$out"
+    fi
+    ;;
+  https://perm.test/501)
+    printf 'HTTP/1.1 501 Not Implemented\r\n\r\n' > "$hdr"
+    : > "$out"
+    ;;
+  https://empty-loc.test/302)
+    printf 'HTTP/1.1 302 Found\r\nLocation: \r\n\r\n' > "$hdr"
+    : > "$out"
+    ;;
+  https://chain.test/hop*)
+    printf 'HTTP/1.1 302 Found\r\nLocation: /hop-%s\r\n\r\n' "$n" > "$hdr"
+    : > "$out"
+    ;;
+  *)
+    printf 'HTTP/1.1 500 Unexpected\r\n\r\n' > "$hdr"
+    : > "$out"
+    ;;
+esac
+"#,
+            cnt = counter_file.display(),
+        );
+        fs::write(&fake_curl, script).unwrap();
+        fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let base_dl = Downloader {
+            curl_binary: fake_curl.to_string_lossy().into_owned(),
+            retries: 2,
+            ..quick()
+        };
+
+        // 1. Multi-block CONNECT + relative 301 redirect -> HTTP/2 200 OK.
+        let _ = fs::remove_file(&counter_file);
+        base_dl
+            .download(&req(
+                vec!["https://connect-redir.test/start".to_string()],
+                d.join("tunnel.bin"),
+            ))
+            .unwrap();
+        assert_eq!(fs::read(d.join("tunnel.bin")).unwrap(), b"tunnel-good");
+        assert_eq!(fs::read_to_string(&counter_file).unwrap(), "2");
+
+        // 2. 404 Not Found on primary HTTPS URL is unrecoverable (no retries) and falls back to mirror!
+        let _ = fs::remove_file(&counter_file);
+        let _ = take_warnings();
+        base_dl
+            .download(&req(
+                vec![
+                    "https://missing.test/404".to_string(),
+                    "https://mirror.test/ok".to_string(),
+                ],
+                d.join("mirror.bin"),
+            ))
+            .unwrap();
+        assert_eq!(fs::read(d.join("mirror.bin")).unwrap(), b"from-mirror");
+        assert_eq!(
+            fs::read_to_string(&counter_file).unwrap(),
+            "2",
+            "404 must not retry before falling back to mirror"
+        );
+        let warnings = take_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("java.io.FileNotFoundException GET returned 404 Not Found")),
+            "warnings: {warnings:?}"
+        );
+
+        // 3. 503 Service Unavailable IS retried and recovers on second attempt.
+        let _ = fs::remove_file(&counter_file);
+        base_dl
+            .download(&req(
+                vec!["https://flaky.test/503".to_string()],
+                d.join("503.bin"),
+            ))
+            .unwrap();
+        assert_eq!(fs::read(d.join("503.bin")).unwrap(), b"recovered-503");
+        assert_eq!(fs::read_to_string(&counter_file).unwrap(), "2");
+
+        // 4. 501 Not Implemented is permanent (not retried).
+        let _ = fs::remove_file(&counter_file);
+        let err_501 = base_dl
+            .download(&req(
+                vec!["https://perm.test/501".to_string()],
+                d.join("501.bin"),
+            ))
+            .unwrap_err();
+        assert!(err_501.contains("501"), "{err_501}");
+        assert_eq!(
+            fs::read_to_string(&counter_file).unwrap(),
+            "1",
+            "501 must not be retried"
+        );
+
+        // 5. Empty `Location:` header on 302 fails cleanly without retrying.
+        let _ = fs::remove_file(&counter_file);
+        let err_loc = base_dl
+            .download(&req(
+                vec!["https://empty-loc.test/302".to_string()],
+                d.join("loc.bin"),
+            ))
+            .unwrap_err();
+        assert!(
+            err_loc.contains("Redirect 302 without Location header"),
+            "{err_loc}"
+        );
+        assert_eq!(fs::read_to_string(&counter_file).unwrap(), "1");
+
+        // 6. `max_redirects` limit is enforced on HTTPS redirect chains without retrying.
+        let _ = fs::remove_file(&counter_file);
+        let dl_cap = Downloader {
+            max_redirects: 2,
+            ..base_dl
+        };
+        let err_cap = dl_cap
+            .download(&req(
+                vec!["https://chain.test/hop0".to_string()],
+                d.join("cap.bin"),
+            ))
+            .unwrap_err();
+        assert!(
+            err_cap.contains("Too many redirects (more than 2)"),
+            "{err_cap}"
+        );
+        assert_eq!(
+            fs::read_to_string(&counter_file).unwrap(),
+            "3",
+            "max_redirects=2 must stop after initial hop + 2 redirects"
+        );
+    }
 }
 
 thread_local! {
@@ -3397,7 +4106,10 @@ fn record_warning(url: &str, msg: &str) {
         "java.net.ConnectException"
     } else if msg.starts_with("Checksum was")
         || msg.starts_with("Redirect loop")
+        || msg.starts_with("Too many redirects")
+        || msg.starts_with("Redirect ")
         || msg.starts_with("Unknown host")
+        || msg.starts_with("TLS error:")
     {
         unrecoverable
     } else if msg.ends_with("(No such file or directory)")
