@@ -121,15 +121,24 @@ impl RepoContentsCache {
             fs::write(&cache_recorded_inputs, predeclared_input_hash)?;
         }
 
-        // Symlink fetched_repo_dir to cache_repo_dir
+        // Link fetched_repo_dir to the canonical cache_repo_dir so relative, non-canonical, or
+        // Windows forward-slash/drive-relative paths (e.g. `/tmp/...`) never produce dangling
+        // symlinks or NTFS reparse points.
+        let link_target =
+            crate::canonical_no_unc(&cache_repo_dir).unwrap_or_else(|_| cache_repo_dir.clone());
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(&cache_repo_dir, fetched_repo_dir)?;
+            std::os::unix::fs::symlink(&link_target, fetched_repo_dir)?;
         }
         #[cfg(windows)]
         {
-            if let Err(e) = std::os::windows::fs::symlink_dir(&cache_repo_dir, fetched_repo_dir) {
-                copy_dir_recursive(&cache_repo_dir, fetched_repo_dir).map_err(|_| e)?;
+            let linked =
+                zel_vfs::create_directory_junction_or_symlink(&link_target, fetched_repo_dir)
+                    .is_ok()
+                    && fetched_repo_dir.exists();
+            if !linked {
+                let _ = crate::fetch::remove_any(fetched_repo_dir);
+                copy_dir_recursive(&cache_repo_dir, fetched_repo_dir)?;
             }
         }
         #[cfg(not(any(unix, windows)))]
@@ -267,15 +276,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 fn remove_dir_all(path: &Path) -> io::Result<()> {
-    if path.is_symlink() {
-        fs::remove_file(path)
-    } else if path.is_dir() {
-        fs::remove_dir_all(path)
-    } else if path.exists() {
-        fs::remove_file(path)
-    } else {
-        Ok(())
-    }
+    crate::fetch::remove_any(path)
 }
 
 mod filetime {
@@ -326,5 +327,52 @@ mod tests {
         assert!(new_dir.exists(), "newest duplicate must be retained");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn move_to_cache_creates_resolving_link_for_non_canonical_cache_path() {
+        let base = std::env::temp_dir().join(format!(
+            "zel-rcc-link-{}-{}",
+            std::process::id(),
+            generate_uuid()
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let cache_dir = base.join("cache_dir");
+        let ext_dir = base.join("ob").join("external");
+        let fetched_dir = ext_dir.join("platforms");
+        let marker = ext_dir.join("@platforms.marker");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&fetched_dir).unwrap();
+        fs::write(fetched_dir.join("BUILD"), "# platforms\n").unwrap();
+        fs::write(&marker, "hash123\n").unwrap();
+
+        // Use a non-canonical path containing `..` (and on Windows also forward slashes)
+        // to verify `move_to_cache` canonicalizes the link target instead of writing a
+        // broken/dangling symlink.
+        let non_canonical_cache = base.join("ob").join("..").join("cache_dir");
+        let cache = RepoContentsCache::new(&non_canonical_cache);
+        let cand = cache
+            .move_to_cache(&fetched_dir, &marker, "hash123")
+            .unwrap();
+
+        assert!(
+            fetched_dir.exists(),
+            "linked repo dir must exist and resolve after move_to_cache"
+        );
+        assert_eq!(
+            fs::read_to_string(fetched_dir.join("BUILD")).unwrap(),
+            "# platforms\n"
+        );
+        assert!(cand.contents_dir.exists());
+
+        // Removing the linked repo dir must leave the cached contents intact.
+        remove_dir_all(&fetched_dir).unwrap();
+        assert!(!fetched_dir.exists());
+        assert_eq!(
+            fs::read_to_string(cand.contents_dir.join("BUILD")).unwrap(),
+            "# platforms\n"
+        );
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

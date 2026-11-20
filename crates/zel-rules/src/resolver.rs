@@ -901,6 +901,22 @@ impl TargetResolver {
         self.stack.lock().unwrap().pop();
         self.stack_cfg.lock().unwrap().pop();
         let ct = Arc::new(r?);
+        let actual_k = key(&ct.label, &ct.configuration);
+        if actual_k != k {
+            // Incoming rule-level transitions (e.g. `process_wrapper` in `rules_rust`) change
+            // `ct.configuration` relative to the lookup key `k`. Link `k <-> actual_k` in both
+            // directions so `reachable_keys` reaches `actual_k` when this target is a dependency
+            // (reached via `k`) and reaches its child deps (recorded under `k`) when it is a root.
+            let mut deps = self.all_deps.lock().unwrap();
+            let fwd = deps.entry(k.clone()).or_default();
+            if !fwd.contains(&actual_k) {
+                fwd.push(actual_k.clone());
+            }
+            let rev = deps.entry(actual_k).or_default();
+            if !rev.contains(&k) {
+                rev.push(k.clone());
+            }
+        }
         self.cache.lock().unwrap().insert(k, ct.clone());
         self.order.lock().unwrap().push(ct.clone());
         Ok(ct)
@@ -1179,9 +1195,17 @@ impl TargetResolver {
                 if let Some(e) = other.edges.lock().unwrap().get(k) {
                     edges.insert(k.clone(), e.clone());
                 }
-                if let Some(d) = other.all_deps.lock().unwrap().get(k) {
+                let actual_k = key(&ct.label, &ct.configuration);
+                let other_all_deps = other.all_deps.lock().unwrap();
+                if let Some(d) = other_all_deps.get(k) {
                     all_deps.insert(k.clone(), d.clone());
                 }
+                if actual_k != *k {
+                    if let Some(d) = other_all_deps.get(&actual_k) {
+                        all_deps.insert(actual_k, d.clone());
+                    }
+                }
+                drop(other_all_deps);
                 if let Some(p) = other.pkg_sets.lock().unwrap().get(k) {
                     pkg_sets.insert(k.clone(), p.clone());
                 }
@@ -1192,8 +1216,11 @@ impl TargetResolver {
     pub fn clear_exec(&self) {
         let mut cache = self.cache.lock().unwrap();
         cache.retain(|_, ct| ct.configuration.core_only);
-        let kept_keys: std::collections::HashSet<(String, String)> =
+        let mut kept_keys: std::collections::HashSet<(String, String)> =
             cache.keys().cloned().collect();
+        for ct in cache.values() {
+            kept_keys.insert(key(&ct.label, &ct.configuration));
+        }
         drop(cache);
         self.order
             .lock()
@@ -1219,8 +1246,11 @@ impl TargetResolver {
             (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
                 || ct.configuration.core_only
         });
-        let kept_keys: std::collections::HashSet<(String, String)> =
+        let mut kept_keys: std::collections::HashSet<(String, String)> =
             cache.keys().cloned().collect();
+        for ct in cache.values() {
+            kept_keys.insert(key(&ct.label, &ct.configuration));
+        }
         drop(cache);
         self.order.lock().unwrap().retain(|ct| {
             (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")

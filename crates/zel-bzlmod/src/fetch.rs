@@ -2345,6 +2345,10 @@ fn is_safe_for_repo_contents_cache(repo_dir: &Path, workspace: &Path) -> bool {
 }
 
 pub fn remove_any(p: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if zel_vfs::is_junction_or_symlink(p) {
+        return zel_vfs::remove_junction_or_symlink(p);
+    }
     match p.symlink_metadata() {
         Ok(m) if m.file_type().is_symlink() => {
             #[cfg(windows)]

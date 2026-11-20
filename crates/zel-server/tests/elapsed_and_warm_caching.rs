@@ -1080,3 +1080,147 @@ fn no_module_workspace_is_incremental_and_aquery_skyframe_state_works() {
     let r3 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
     assert!(!Arc::ptr_eq(&r2, &r3));
 }
+
+#[test]
+fn toolchain_tool_with_incoming_transition_is_reachable_and_built_cold_and_warm() {
+    let w = Ws::new("tc-transition-reachability");
+    w.write(
+        "defs.bzl",
+        r#"
+ToolFlagInfo = provider(fields = ["val"])
+
+def _flag_impl(ctx):
+    return [ToolFlagInfo(val = ctx.build_setting_value)]
+
+string_flag = rule(
+    implementation = _flag_impl,
+    build_setting = config.string(flag = True),
+)
+
+def _leaf_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".leaf")
+    ctx.actions.write(
+        output = out,
+        content = "leaf=" + ctx.attr._flag[ToolFlagInfo].val + "\n",
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+leaf_rule = rule(
+    implementation = _leaf_impl,
+    attrs = {"_flag": attr.label(default = "//:tool_flag")},
+)
+
+def _tool_transition_impl(settings, attr):
+    return {"//:tool_flag": "transitioned"}
+
+_tool_transition = transition(
+    implementation = _tool_transition_impl,
+    inputs = [],
+    outputs = ["//:tool_flag"],
+)
+
+def _tool_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".tmpl")
+    leaf_file = ctx.attr.leaf[DefaultInfo].files.to_list()[0]
+    ctx.actions.expand_template(
+        template = leaf_file,
+        output = out,
+        substitutions = {"leaf=": "tool(" + ctx.attr._flag[ToolFlagInfo].val + "):"},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+tool_with_transition = rule(
+    implementation = _tool_impl,
+    cfg = _tool_transition,
+    attrs = {
+        "leaf": attr.label(mandatory = True),
+        "_flag": attr.label(default = "//:tool_flag"),
+    },
+)
+
+MyTcInfo = provider(fields = ["tool_file"])
+
+def _tc_impl(ctx):
+    tool_file = ctx.attr.tool[DefaultInfo].files.to_list()[0]
+    return [platform_common.ToolchainInfo(info = MyTcInfo(tool_file = tool_file))]
+
+my_tc = rule(
+    implementation = _tc_impl,
+    attrs = {
+        "tool": attr.label(cfg = "exec", mandatory = True),
+    },
+)
+
+def _consumer_impl(ctx):
+    tc = ctx.toolchains["//:tc_type"]
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    ctx.actions.expand_template(
+        template = tc.info.tool_file,
+        output = out,
+        substitutions = {"transitioned": "BUILT_OK"},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    toolchains = ["//:tc_type"],
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        r#"
+load(
+    "//:defs.bzl",
+    "string_flag",
+    "leaf_rule",
+    "tool_with_transition",
+    "my_tc",
+    "consumer",
+)
+
+string_flag(name = "tool_flag", build_setting_default = "default")
+toolchain_type(name = "tc_type")
+leaf_rule(name = "tool_leaf")
+tool_with_transition(name = "process_wrapper_like", leaf = ":tool_leaf")
+my_tc(name = "tc_impl", tool = ":process_wrapper_like")
+toolchain(
+    name = "tc",
+    toolchain_type = ":tc_type",
+    toolchain = ":tc_impl",
+)
+consumer(name = "app")
+"#,
+    );
+
+    // Cold build: the toolchain's incoming-transitioned tool AND its transitive leaf dependency
+    // must both be in `reachable_targets` and execute before `//:app`'s ExpandTemplate action.
+    let (code1, _, err1) = w.run(&["build", "--extra_toolchains=//:tc", "//:app"]);
+    assert_eq!(code1, 0, "cold build failed:\n{err1}");
+    let out_path = PathBuf::from(
+        w.rt.dirs
+            .bazel_bin(zel_analysis::build_options::auto_host_cpu(), "fastbuild")
+            .path_string(),
+    )
+    .join("app.out");
+    assert_eq!(
+        std::fs::read_to_string(&out_path).unwrap(),
+        "tool(BUILT_OK):BUILT_OK\n"
+    );
+    let r1 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+
+    // Warm build: reuses TargetResolver and still succeeds cleanly.
+    let (code2, _, err2) = w.run(&["build", "--extra_toolchains=//:tc", "//:app"]);
+    assert_eq!(code2, 0, "warm build failed:\n{err2}");
+    let r2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(Arc::ptr_eq(&r1, &r2));
+
+    // Also build the incoming-transitioned target directly as a root so `actual_k -> k`
+    // reachability to its child dep (`//:tool_leaf`) is exercised too.
+    let (code3, _, err3) = w.run(&[
+        "build",
+        "--extra_toolchains=//:tc",
+        "//:process_wrapper_like",
+    ]);
+    assert_eq!(code3, 0, "direct root build failed:\n{err3}");
+}
