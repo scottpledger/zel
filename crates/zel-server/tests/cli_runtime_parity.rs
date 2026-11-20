@@ -1111,22 +1111,33 @@ def get_repo_root(apparent_repo_name):
 
 def _probe_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".txt")
-    ctx.actions.write(
-        output = out,
-        content = "|".join([
-            ctx.attr.load_val,
-            get_canonical_repo_name("my_shell"),
-            get_repo_root("my_shell"),
-            get_canonical_repo_name(""),
-            get_repo_root(""),
-            get_repo_root("w"),
-        ]),
+    ctx.actions.run_shell(
+        inputs = [ctx.file.ext_src],
+        outputs = [out],
+        command = "test -f \"$1\" && printf '%s' \"$2\" > \"$3\"",
+        arguments = [
+            ctx.file.ext_src.path,
+            "|".join([
+                str(ctx.configuration.is_sibling_repository_layout()),
+                ctx.file.ext_src.path,
+                ctx.attr.load_val,
+                get_canonical_repo_name("my_shell"),
+                get_repo_root("my_shell"),
+                get_canonical_repo_name(""),
+                get_repo_root(""),
+                get_repo_root("w"),
+            ]),
+            out.path,
+        ],
     )
     return [DefaultInfo(files = depset([out]))]
 
 probe_rule = rule(
     implementation = _probe_impl,
-    attrs = {"load_val": attr.string()},
+    attrs = {
+        "load_val": attr.string(),
+        "ext_src": attr.label(allow_single_file = True, mandatory = True),
+    },
 )
 "#,
     );
@@ -1138,22 +1149,24 @@ load("//:blazel_utils.bzl", "get_canonical_repo_name", "get_repo_root", "probe_r
 probe_rule(
     name = "probe",
     load_val = get_canonical_repo_name("my_shell") + ":" + get_repo_root("my_shell") + ":" + get_repo_root(""),
+    ext_src = "@bazel_tools//tools/genrule:genrule-setup.sh",
 )
 "#,
     );
 
-    // 1. Default layout: external/<canonical>, empty for main repo.
+    // 1. Default layout: external/<canonical>, empty for main repo, is_sibling_repository_layout() == False.
     let b1 = w.run(&["build", "//p:probe"]);
     assert_eq!(b1.code, 0, "{}", b1.err);
     let out_path = w.ws.join("bazel-bin/p/probe.txt");
     let content1 = std::fs::read_to_string(&out_path).unwrap();
     assert_eq!(
         content1,
-        "rules_shell+:external/rules_shell+:|rules_shell+|external/rules_shell+|||"
+        "False|external/bazel_tools/tools/genrule/genrule-setup.sh|rules_shell+:external/rules_shell+:|rules_shell+|external/rules_shell+|||"
     );
 
     // 2. Toggle --experimental_sibling_repository_layout on the SAME daemon instance:
-    //    must re-evaluate both package loading and rule analysis to ../<canonical>, with no
+    //    must re-evaluate package loading, configuration.is_sibling_repository_layout(),
+    //    external source artifact exec paths, and sibling repo links to ../<canonical>, with no
     //    bogus deprecation warning.
     let b2 = w.run(&[
         "build",
@@ -1169,7 +1182,7 @@ probe_rule(
     let content2 = std::fs::read_to_string(&out_path).unwrap();
     assert_eq!(
         content2,
-        "rules_shell+:../rules_shell+:|rules_shell+|../rules_shell+|||"
+        "True|../bazel_tools/tools/genrule/genrule-setup.sh|rules_shell+:../rules_shell+:|rules_shell+|../rules_shell+|||"
     );
 
     // 3. `cquery --output=starlark` respects --experimental_sibling_repository_layout too.

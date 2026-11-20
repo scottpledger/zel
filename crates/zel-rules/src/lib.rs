@@ -94,8 +94,16 @@ pub fn analyze_target_with(
     resolver: Arc<dyn DepResolver>,
     acfg: &AnalysisConfig,
 ) -> Result<ConfiguredTarget, String> {
+    let sibling_layout = acfg.sibling_repository_layout
+        || resolver
+            .package_loader()
+            .is_some_and(|l| l.config().sibling_repository_layout);
     match target {
-        Target::InputFile { label } => Ok(resolver::source_file_target(label, config)),
+        Target::InputFile { label } => Ok(resolver::source_file_target_with_layout(
+            label,
+            config,
+            sibling_layout,
+        )),
         Target::OutputFile {
             label,
             generating_rule,
@@ -105,8 +113,9 @@ pub fn analyze_target_with(
                 .package_identifier()
                 .package_fragment()
                 .get_relative_str(label.name());
-            // Generated files of external repositories live below `external/<repo>/`.
-            if !label.package_identifier().repository().is_main() {
+            // Generated files of external repositories live below `external/<repo>/` unless
+            // `--experimental_sibling_repository_layout` is enabled.
+            if !sibling_layout && !label.package_identifier().repository().is_main() {
                 rel = zel_vfs::PathFragment::create(&format!(
                     "external/{}/{}",
                     label.package_identifier().repository().name(),

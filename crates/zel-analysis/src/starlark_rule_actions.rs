@@ -111,7 +111,10 @@ fn host_method(
         }
         "configuration" => match method {
             "is_tool_configuration" => Ok(Value::Bool(st.cfg.is_exec)),
-            "is_sibling_repository_layout" => Ok(Value::Bool(false)),
+            "is_sibling_repository_layout" => {
+                check_kwargs("is_sibling_repository_layout", pos, kw, &[])?;
+                Ok(Value::Bool(st.inputs.sibling_repository_layout))
+            }
             // `--stamp` defaults to false for `bazel build`.
             "stamp_binaries" => Ok(Value::Bool(
                 st.cfg
@@ -716,9 +719,13 @@ fn declare_ext(
             ));
         }
     } else if uplevel || !{
-        // Outputs next to a sibling of an external-repository target carry `external/<repo>/`.
-        let repo_prefix = format!("external/{}/", st.label.package_identifier().repository().name());
-        let rel = fs.strip_prefix(repo_prefix.as_str()).unwrap_or(&fs);
+        let rel = if st.inputs.sibling_repository_layout {
+            fs.as_str()
+        } else {
+            // Outputs next to a sibling of an external-repository target carry `external/<repo>/`.
+            let repo_prefix = format!("external/{}/", st.label.package_identifier().repository().name());
+            fs.strip_prefix(repo_prefix.as_str()).unwrap_or(&fs)
+        };
         starts_with_dir(rel, &pkg)
     } {
         return err(format!(

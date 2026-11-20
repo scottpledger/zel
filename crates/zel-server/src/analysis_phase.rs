@@ -1251,9 +1251,12 @@ impl BlazeRuntime {
                             if !bt_dir.join("tools/genrule/genrule-setup.sh").exists() {
                                 let _ = zel_bazel_tools::materialize(&bt_dir);
                             }
-                            let _ = zel_exec::layout::plant_external_repo_links(
+                            let _ = zel_exec::layout::plant_external_repo_links_with_layout(
                                 &std::path::PathBuf::from(execroot.path_string()),
                                 &std::path::PathBuf::from(self.dirs.output_base.path_string()),
+                                parsed
+                                    .get_bool("experimental_sibling_repository_layout")
+                                    .unwrap_or(false),
                             );
                             let top_level: HashSet<String> =
                                 early_cts.iter().map(|c| c.label.canonical_form()).collect();

@@ -1582,12 +1582,21 @@ impl DepResolver for TargetResolver {
 }
 
 /// Source-file configured target.
+#[allow(dead_code)]
 pub(crate) fn source_file_target(label: &Label, cfg: &BuildConfigurationKey) -> ConfiguredTarget {
+    source_file_target_with_layout(label, cfg, false)
+}
+
+pub(crate) fn source_file_target_with_layout(
+    label: &Label,
+    cfg: &BuildConfigurationKey,
+    sibling_repository_layout: bool,
+) -> ConfiguredTarget {
     let rel = label
         .package_identifier()
         .package_fragment()
         .get_relative_str(label.name());
-    let art = Artifact::source(rel, label.clone());
+    let art = Artifact::source_with_layout(rel, label.clone(), sibling_repository_layout);
     let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), "source file".to_string());
     ct.default_info = DefaultInfo {
         files: vec![art.clone()],

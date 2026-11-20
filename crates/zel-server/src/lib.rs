@@ -2044,9 +2044,12 @@ impl BlazeRuntime {
         if !bt_dir.join("tools/genrule/genrule-setup.sh").exists() {
             let _ = zel_bazel_tools::materialize(&bt_dir);
         }
-        if let Err(e) = zel_exec::layout::plant_external_repo_links(
+        if let Err(e) = zel_exec::layout::plant_external_repo_links_with_layout(
             &std::path::PathBuf::from(execroot.path_string()),
             &std::path::PathBuf::from(self.dirs.output_base.path_string()),
+            parsed
+                .get_bool("experimental_sibling_repository_layout")
+                .unwrap_or(false),
         ) {
             writeln_bytes(
                 stderr,

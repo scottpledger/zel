@@ -235,7 +235,13 @@ fn attr_to_value_in(
         Ok(ct)
     };
     let out_art = |l: &Label| {
-        Artifact::derived_in_root(&cfg.mnemonic(), out_root, pkg_relative(l, pkg_dir), rule.label.clone())
+        Artifact::derived_in_root_with_layout(
+            &cfg.mnemonic(),
+            out_root,
+            pkg_relative(l, pkg_dir),
+            rule.label.clone(),
+            inputs.sibling_repository_layout,
+        )
     };
     Ok(match av {
         AttrValue::Int(i) => ConvertedAttr { value: Value::Int(BigInt::from_i64(*i)), deps: vec![], split: None },
@@ -757,21 +763,23 @@ pub fn analyze_starlark_rule(
     // Implicit outputs (`rule(outputs = {...})`).
     for (key, tmpl) in &rc.implicit_outputs {
         let fname = expand_output_template(tmpl, rule);
-        let a = Artifact::derived_in_root(
+        let a = Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             out_root,
             pkg_dir.get_relative_str(&fname),
             label.clone(),
+            inputs.sibling_repository_layout,
         );
         outputs_fields.insert(key.clone(), file_value(&a));
         predeclared.push(a);
     }
     let default_executable = if rc.is_executable || rc.is_test {
-        Some(Artifact::derived_in_root(
+        Some(Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             out_root,
             pkg_dir.get_relative_str(label.name()),
             label.clone(),
+            inputs.sibling_repository_layout,
         ))
     } else {
         None
@@ -1275,11 +1283,12 @@ fn finish_target(
     let mut runfiles_support = None;
     if is_exec_or_test && !default_runfiles.is_empty() && build_manifests {
         let exe = executable.clone().ok_or("executable must not be null")?;
-        let manifest = Artifact::derived_in_root(
+        let manifest = Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             if st.output_to_genfiles { ArtifactRoot::Genfiles } else { ArtifactRoot::Bin },
             PathFragment::create(&format!("{}.runfiles_manifest", exe.root_relative_path)),
             label.clone(),
+            st.inputs.sibling_repository_layout,
         );
         let mut a = Action::new(
             label.clone(),
@@ -1295,11 +1304,12 @@ fn finish_target(
         st.register(a).map_err(|e| e.0)?;
         // `RunfilesSupport.createRepoMappingManifestAction`: <executable>.repo_mapping in bin.
         let repo_mapping = st.repo_mapping_for(&default_runfiles);
-        let rm_artifact = Artifact::derived_in_root(
+        let rm_artifact = Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             if st.output_to_genfiles { ArtifactRoot::Genfiles } else { ArtifactRoot::Bin },
             PathFragment::create(&format!("{}.repo_mapping", exe.root_relative_path)),
             label.clone(),
+            st.inputs.sibling_repository_layout,
         );
         let mut rma = Action::new(
             label.clone(),

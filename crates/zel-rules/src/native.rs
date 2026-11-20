@@ -101,14 +101,23 @@ impl Nctx<'_> {
             .collect()
     }
 
+    pub fn sibling_layout(&self) -> bool {
+        self.acfg.sibling_repository_layout
+            || self
+                .resolver
+                .package_loader()
+                .is_some_and(|l| l.config().sibling_repository_layout)
+    }
+
     pub fn out_artifact(&self, l: &Label) -> Artifact {
-        Artifact::derived_in_root(
+        Artifact::derived_in_root_with_layout(
             &self.cfg.mnemonic(),
             ArtifactRoot::Bin,
             l.package_identifier()
                 .package_fragment()
                 .get_relative_str(l.name()),
             self.rule.label.clone(),
+            self.sibling_layout(),
         )
     }
 
@@ -751,10 +760,18 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
     .map_err(|e| n.attr_err(cmd_attr, &e))?;
 
     // 2. Make variables.
+    let sibling_layout = n.sibling_layout();
     let bin_dir = format!("bazel-out/{}/bin", n.cfg.mnemonic());
     let pkg = label.package_identifier().package_fragment().clone();
-    // Targets of external repositories output below `<bin>/external/<repo>/`.
-    let repo_bin_dir = if label.package_identifier().repository().is_main() {
+    // Targets of external repositories output below `<bin>/external/<repo>/` unless
+    // `--experimental_sibling_repository_layout` places them under `bazel-out/<repo>/<cfg>/bin/`.
+    let repo_bin_dir = if sibling_layout {
+        Artifact::bin_dir_for_repo(
+            &n.cfg.mnemonic(),
+            label.package_identifier().repository(),
+            true,
+        )
+    } else if label.package_identifier().repository().is_main() {
         bin_dir.clone()
     } else {
         format!(
@@ -826,8 +843,17 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
         }
     }
     let command = expand_make_variables(&located, &lookup).map_err(|e| n.attr_err(cmd_attr, &e))?;
-    // Genrule environment setup (`tools/genrule/genrule-setup.sh`): `source external/bazel_tools/tools/genrule/genrule-setup.sh; ...`
-    let command = format!("source external/bazel_tools/tools/genrule/genrule-setup.sh; {command}");
+    let setup_label = Label::parse_canonical("@bazel_tools//tools/genrule:genrule-setup.sh")
+        .unwrap_or_else(|_| {
+            Label::parse_canonical("@@bazel_tools//tools/genrule:genrule-setup.sh").unwrap()
+        });
+    let setup_art = Artifact::source_with_layout(
+        zel_vfs::PathFragment::create("tools/genrule/genrule-setup.sh"),
+        setup_label.clone(),
+        sibling_layout,
+    );
+    // Genrule environment setup (`GenRuleBase.java`): `source <$genrule_setup execPath>; ...`
+    let command = format!("source {}; {command}", setup_art.exec_path);
 
     let message = n.string("message")?;
     let mut exec_info = BTreeMap::new();
@@ -885,19 +911,11 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
         action.progress_message = Some(format!("{message} {label}"));
     }
     action.execution_requirements = exec_info;
-    let setup_label = Label::parse_canonical("@bazel_tools//tools/genrule:genrule-setup.sh")
-        .unwrap_or_else(|_| {
-            Label::parse_canonical("@@bazel_tools//tools/genrule:genrule-setup.sh").unwrap()
-        });
     if let Ok(setup_ct) = n.resolver.configured_target(&setup_label, n.cfg) {
         let _ = n
             .resolver
             .check_dependency(n.rule, "$genrule_setup", &setup_ct);
     }
-    let setup_art = Artifact::source(
-        zel_vfs::PathFragment::create("external/bazel_tools/tools/genrule/genrule-setup.sh"),
-        setup_label,
-    );
     let mut inputs = resolved_srcs.clone();
     inputs.push(setup_art);
     inputs.extend(dedup(tool_inputs.clone()));

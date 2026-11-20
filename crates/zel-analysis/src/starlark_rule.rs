@@ -351,10 +351,18 @@ impl CtxState {
     }
 
     fn bin_dir(&self) -> String {
-        format!("bazel-out/{}/bin", self.cfg.mnemonic())
+        Artifact::bin_dir_for_repo(
+            &self.cfg.mnemonic(),
+            self.label.package_identifier().repository(),
+            self.inputs.sibling_repository_layout,
+        )
     }
     fn genfiles_dir(&self) -> String {
-        format!("bazel-out/{}/bin", self.cfg.mnemonic())
+        Artifact::bin_dir_for_repo(
+            &self.cfg.mnemonic(),
+            self.label.package_identifier().repository(),
+            self.inputs.sibling_repository_layout,
+        )
     }
     fn root(&self) -> ArtifactRoot {
         if self.output_to_genfiles && !self.in_subrule.load(std::sync::atomic::Ordering::Relaxed) {
@@ -364,7 +372,13 @@ impl CtxState {
         }
     }
     fn derived(&self, rel: PathFragment) -> Artifact {
-        Artifact::derived_in_root(&self.cfg.mnemonic(), self.root(), rel, self.label.clone())
+        Artifact::derived_in_root_with_layout(
+            &self.cfg.mnemonic(),
+            self.root(),
+            rel,
+            self.label.clone(),
+            self.inputs.sibling_repository_layout,
+        )
     }
     fn check_mutable(&self, what: &str) -> Result<(), StarlarkError> {
         if *self.frozen.lock().unwrap() {
@@ -729,6 +743,152 @@ mod java_native_tests {
         assert_eq!(
             utf8_env_for_inputs(&cfg_auto_eg, &inputs_auto_eg, false)["LC_CTYPE"],
             "en_US.UTF-8"
+        );
+    }
+
+    #[test]
+    fn configuration_is_sibling_repository_layout_and_output_roots_track_flag() {
+        use zel_packages::rule_class::{RuleClass, StarlarkRuleSpec};
+        use zel_packages::RuleExtra;
+        use zel_starlark::EvalContext;
+
+        let mut ectx = EvalContext::new(PathFragment::empty(), None);
+        ectx.globals
+            .insert("Label".into(), Value::BuiltinFunction("host:Label".into()));
+        ectx.eval_str(
+            r#"
+def _impl(ctx):
+    out = ctx.actions.declare_file("out.txt")
+    ext_lbl = Label("@@ext//pkg:hdr.h")
+    ctx.actions.write(
+        output = out,
+        content = "|".join([
+            str(ctx.configuration.is_sibling_repository_layout()),
+            ext_lbl.workspace_root,
+            ctx.label.workspace_root,
+            ctx.bin_dir.path,
+            ctx.genfiles_dir.path,
+            out.path,
+            out.root.path,
+            out.short_path,
+        ]),
+    )
+    return []
+
+def _bad_kwargs_impl(ctx):
+    ctx.configuration.is_sibling_repository_layout(True)
+    return []
+"#,
+        )
+        .unwrap();
+        let impl_fn = ectx.globals.get("_impl").cloned().unwrap();
+        let bad_fn = ectx.globals.get("_bad_kwargs_impl").cloned().unwrap();
+
+        let make_rule = |label_str: &str, func: Value| -> RuleInstance {
+            let rc = Arc::new(RuleClass {
+                name: "probe".into(),
+                attrs: BTreeMap::new(),
+                attr_order: vec!["name".into()],
+                implicit: BTreeMap::new(),
+                is_test: false,
+                is_executable: false,
+                open: false,
+                implicit_outputs: Vec::new(),
+                outputs_fn: None,
+                is_starlark: true,
+                build_setting: false,
+                starlark: Some(Arc::new(StarlarkRuleSpec {
+                    implementation: func,
+                    kwargs: BTreeMap::new(),
+                    defined_in: "//:defs.bzl".into(),
+                    definition_digest: String::new(),
+                    definition_stack: Vec::new(),
+                    initializers: Vec::new(),
+                    build_setting_flag: false,
+                })),
+            });
+            RuleInstance {
+                label: Label::parse_canonical(label_str).unwrap(),
+                rule_class: "probe".into(),
+                attrs: BTreeMap::new(),
+                srcs: Vec::new(),
+                deps: Vec::new(),
+                outs: Vec::new(),
+                tools: Vec::new(),
+                data: Vec::new(),
+                visibility: Vec::new(),
+                cmd: None,
+                executable: false,
+                testonly: false,
+                extra: RuleExtra {
+                    rule_class: Some(rc),
+                    ..Default::default()
+                },
+            }
+        };
+
+        let resolver: Arc<dyn DepResolver> = Arc::new(MapPlatformResolver {
+            platforms: BTreeMap::new(),
+        });
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+        let run_case = |label_str: &str, sibling: bool| -> String {
+            let rule = make_rule(label_str, impl_fn.clone());
+            let mut inputs = AnalysisInputs::new(resolver.clone());
+            inputs.sibling_repository_layout = sibling;
+            let ct = analyze_starlark_rule(&rule, &cfg, inputs).unwrap();
+            let crate::ActionKind::FileWrite {
+                content: crate::FileContent::Literal(body),
+                ..
+            } = &ct.typed_actions[0].kind
+            else {
+                panic!("expected literal FileWrite action");
+            };
+            body.clone()
+        };
+
+        assert_eq!(
+            run_case("//pkg:main_t", false),
+            "False|external/ext||bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin/pkg/out.txt|bazel-out/k8-fastbuild/bin|pkg/out.txt"
+        );
+        assert_eq!(
+            run_case("//pkg:main_t", true),
+            "True|../ext||bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin/pkg/out.txt|bazel-out/k8-fastbuild/bin|pkg/out.txt"
+        );
+        assert_eq!(
+            run_case("@@ext//pkg:ext_t", false),
+            "False|external/ext|external/ext|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin/external/ext/pkg/out.txt|bazel-out/k8-fastbuild/bin|../ext/pkg/out.txt"
+        );
+        assert_eq!(
+            run_case("@@ext//pkg:ext_t", true),
+            "True|../ext|../ext|bazel-out/ext/k8-fastbuild/bin|bazel-out/ext/k8-fastbuild/bin|bazel-out/ext/k8-fastbuild/bin/pkg/out.txt|bazel-out/ext/k8-fastbuild/bin|../ext/pkg/out.txt"
+        );
+
+        let ext_src_default = Artifact::source_with_layout(
+            PathFragment::create("pkg/hdr.h"),
+            Label::parse_canonical("@@ext//pkg:hdr.h").unwrap(),
+            false,
+        );
+        assert_eq!(
+            ext_src_default.exec_path.path_string(),
+            "external/ext/pkg/hdr.h"
+        );
+        assert_eq!(ext_src_default.short_path(), "../ext/pkg/hdr.h");
+
+        let ext_src_sibling = Artifact::source_with_layout(
+            PathFragment::create("pkg/hdr.h"),
+            Label::parse_canonical("@@ext//pkg:hdr.h").unwrap(),
+            true,
+        );
+        assert_eq!(ext_src_sibling.exec_path.path_string(), "../ext/pkg/hdr.h");
+        assert_eq!(ext_src_sibling.short_path(), "../ext/pkg/hdr.h");
+
+        let bad_rule = make_rule("//pkg:bad", bad_fn);
+        let err =
+            analyze_starlark_rule(&bad_rule, &cfg, AnalysisInputs::new(resolver)).unwrap_err();
+        assert!(
+            err.contains("is_sibling_repository_layout"),
+            "unexpected error: {err}"
         );
     }
 }
