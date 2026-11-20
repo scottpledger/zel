@@ -319,6 +319,9 @@ impl GetCredentialsResponse {
 
 /// Parses an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.frac](Z|+HH:MM|-HH:MM)`) into Unix epoch seconds.
 pub fn parse_rfc3339_epoch_secs(s: &str) -> Result<i64, String> {
+    if !s.is_ascii() {
+        return Err(format!("invalid RFC 3339 timestamp '{s}'"));
+    }
     let t_pos = s
         .find(['T', 't'])
         .ok_or_else(|| format!("invalid RFC 3339 timestamp '{s}'"))?;
@@ -419,14 +422,22 @@ pub fn parse_rfc3339_epoch_secs(s: &str) -> Result<i64, String> {
     Ok(utc_secs)
 }
 
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
 fn percent_decode_str(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(hi), Some(lo)) = (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                out.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
@@ -464,7 +475,7 @@ pub fn extract_uri_host(uri: &str) -> String {
 /// optional fractional seconds) into `SystemTime`.
 pub fn parse_rfc3339(s: &str) -> Result<SystemTime, String> {
     let s = s.trim();
-    if s.len() < 20 {
+    if s.len() < 20 || !s.is_ascii() {
         return Err(format!("invalid RFC-3339 timestamp: '{s}'"));
     }
     let b = s.as_bytes();
@@ -2297,5 +2308,21 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn extract_uri_host_and_rfc3339_handle_multibyte_utf8_without_panicking() {
+        assert_eq!(extract_uri_host("https://%é/cas"), "%é");
+        assert_eq!(extract_uri_host("https://%日/cas"), "%日");
+        assert_eq!(extract_uri_host("https://%🦀/cas"), "%🦀");
+        assert_eq!(extract_uri_host("https://host%/cas"), "host%");
+        assert_eq!(extract_uri_host("https://host%a/cas"), "host%a");
+        assert_eq!(extract_uri_host("https://host%zz/cas"), "host%zz");
+        assert_eq!(
+            extract_uri_host("https://CAF%C3%A9.EXAMPLE:443/cas"),
+            "café.example"
+        );
+        assert!(parse_rfc3339("2026-01-10T12:00:0éZ").is_err());
+        assert!(parse_rfc3339("2026-01-10T12:00:00+日0").is_err());
     }
 }

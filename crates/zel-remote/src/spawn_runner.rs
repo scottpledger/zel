@@ -874,7 +874,7 @@ impl RemoteSpawnRunner {
         spawn: &Spawn,
         execroot: &Path,
         scrub_rule: Option<&CompiledScrubRule>,
-    ) -> Result<Vec<MerkleInput>, Vec<String>> {
+    ) -> Result<Vec<MerkleInput>, ActionBuildError> {
         let lazy = self.lazy.lock().unwrap();
         let mut out = Vec::new();
         let mut missing = Vec::new();
@@ -929,7 +929,12 @@ impl RemoteSpawnRunner {
                 }
             }
             match std::fs::metadata(&full) {
-                Ok(md) if md.is_dir() => expand_dir(&full, &rel, &mut out, &lazy, scrub_rule),
+                Ok(md) if md.is_dir() => {
+                    let mut ancestors = crate::merkle::AncestorDirs::for_root(&full)
+                        .map_err(ActionBuildError::Io)?;
+                    expand_dir(&full, &rel, &mut out, &lazy, scrub_rule, &mut ancestors)
+                        .map_err(ActionBuildError::Io)?;
+                }
                 Ok(md) => {
                     #[cfg(unix)]
                     let exec = {
@@ -961,17 +966,21 @@ impl RemoteSpawnRunner {
         if missing.is_empty() {
             Ok(out)
         } else {
-            Err(missing)
+            Err(ActionBuildError::MissingInputs(missing))
         }
     }
 
-    fn build_action(&self, spawn: &Spawn, execroot: &Path) -> Result<RemoteAction, Vec<String>> {
+    fn build_action(
+        &self,
+        spawn: &Spawn,
+        execroot: &Path,
+    ) -> Result<RemoteAction, ActionBuildError> {
         let scrub_rule = self.scrubber.match_spawn(spawn);
         let inputs = self.collect_inputs(spawn, execroot, scrub_rule)?;
         let tree = self
             .merkle
             .build(&inputs)
-            .map_err(|e| vec![e.to_string()])?;
+            .map_err(|e| ActionBuildError::MissingInputs(vec![e.to_string()]))?;
         let trees = tree_outputs(spawn);
         let out_dir_set: std::collections::BTreeSet<String> = spawn
             .output_dirs
@@ -1922,10 +1931,11 @@ impl RemoteSpawnRunner {
         }
         let ra = match self.build_action(spawn, &root) {
             Ok(ra) => ra,
-            Err(_missing) => {
+            Err(ActionBuildError::MissingInputs(_missing)) => {
                 // Let the local runner produce the canonical missing-inputs diagnostics.
                 return self.run_local(spawn, execroot, fs, None, mode);
             }
+            Err(ActionBuildError::Io(e)) => return Err(e),
         };
         let will_exec_remotely = mode.allow_remote_exec
             && self.exec_remotely_enabled()
@@ -2285,15 +2295,21 @@ impl RemoteSpawnRunner {
     }
 }
 
+enum ActionBuildError {
+    MissingInputs(Vec<String>),
+    Io(io::Error),
+}
+
 fn expand_dir(
     full: &Path,
     rel: &str,
     out: &mut Vec<MerkleInput>,
     lazy: &HashMap<String, RemoteOutput>,
     scrub_rule: Option<&CompiledScrubRule>,
-) {
+    ancestors: &mut crate::merkle::AncestorDirs,
+) -> io::Result<()> {
     let Ok(rd) = std::fs::read_dir(full) else {
-        return;
+        return Ok(());
     };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
@@ -2311,7 +2327,12 @@ fn expand_dir(
             continue;
         }
         match std::fs::metadata(&p) {
-            Ok(md) if md.is_dir() => expand_dir(&p, &child_rel, out, lazy, scrub_rule),
+            Ok(md) if md.is_dir() => {
+                let id = ancestors.enter(&p)?;
+                let res = expand_dir(&p, &child_rel, out, lazy, scrub_rule, ancestors);
+                ancestors.leave(&id);
+                res?;
+            }
             Ok(md) => {
                 #[cfg(unix)]
                 let exec = {
@@ -2328,6 +2349,7 @@ fn expand_dir(
             Err(_) => {}
         }
     }
+    Ok(())
 }
 
 static ATOMIC_OUT_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -2400,5 +2422,71 @@ fn normalize_rel_components(p: &Path) -> Option<String> {
         None
     } else {
         Some(stack.join("/"))
+    }
+}
+
+#[cfg(test)]
+mod expand_dir_cycle_tests {
+    use super::*;
+
+    fn make_dir_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
+        }
+    }
+
+    #[test]
+    fn expand_dir_detects_relative_and_absolute_cycles_and_allows_dag_diamonds() {
+        let base = std::env::temp_dir().join(format!("zel-expand-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("tree_in");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+
+        // Relative symlink cycle (`sub/rel_up -> ..`) must fail without recursing infinitely.
+        let rel_loop = root.join("sub/rel_up");
+        make_dir_symlink(Path::new(".."), &rel_loop).unwrap();
+        let mut ancestors = crate::merkle::AncestorDirs::for_root(&root).unwrap();
+        let mut out = Vec::new();
+        let err = expand_dir(
+            &root,
+            "tree_in",
+            &mut out,
+            &HashMap::new(),
+            None,
+            &mut ancestors,
+        )
+        .expect_err("relative directory symlink cycle must return Err");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        std::fs::remove_file(&rel_loop).unwrap();
+
+        // Sibling symlinks to the same external directory (DAG diamond) must succeed.
+        let shared = base.join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("v.txt"), b"val").unwrap();
+        let abs_shared = std::fs::canonicalize(&shared).unwrap();
+        make_dir_symlink(&abs_shared, &root.join("s1")).unwrap();
+        make_dir_symlink(&abs_shared, &root.join("s2")).unwrap();
+
+        let mut ancestors = crate::merkle::AncestorDirs::for_root(&root).unwrap();
+        let mut out = Vec::new();
+        expand_dir(
+            &root,
+            "tree_in",
+            &mut out,
+            &HashMap::new(),
+            None,
+            &mut ancestors,
+        )
+        .expect("sibling symlinks to the same non-ancestor directory must succeed");
+        assert!(out.iter().any(|i| i.path == "tree_in/s1/v.txt"));
+        assert!(out.iter().any(|i| i.path == "tree_in/s2/v.txt"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

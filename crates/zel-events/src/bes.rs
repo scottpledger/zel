@@ -539,7 +539,10 @@ fn decode_file_uri(uri: &str) -> Option<String> {
 
 fn decode_file_uri_for_os(uri: &str, windows: bool) -> Option<String> {
     let mut rest = uri.strip_prefix("file://")?;
-    if rest.len() >= 10 && rest[..9].eq_ignore_ascii_case("localhost") && rest.as_bytes()[9] == b'/'
+    if rest
+        .as_bytes()
+        .get(..10)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/"))
     {
         rest = &rest[9..];
     }

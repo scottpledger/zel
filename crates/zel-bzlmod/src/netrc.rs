@@ -178,14 +178,23 @@ impl Netrc {
     }
 }
 
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn percent_decode_str(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(hi), Some(lo)) = (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                out.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
@@ -729,5 +738,51 @@ default login defuser password defpass
         let m = n.get_credential(&url_host("https://[::1]:8443/x")).unwrap();
         assert_eq!(m.machine, "::1");
         assert_eq!(m.password.as_deref(), Some("p#1"));
+    }
+
+    #[test]
+    fn percent_decode_host_handles_multibyte_utf8_and_malformed_escapes_without_panicking() {
+        // `%` followed by 2-byte (`é`), 3-byte (`日`), and 4-byte (`🦀`) UTF-8 sequences
+        // must never slice across non-char boundaries; non-hex sequences stay literal.
+        assert_eq!(percent_decode_str("%é"), "%é");
+        assert_eq!(percent_decode_str("%日"), "%日");
+        assert_eq!(percent_decode_str("%🦀"), "%🦀");
+        assert_eq!(percent_decode_str("host%"), "host%");
+        assert_eq!(percent_decode_str("host%a"), "host%a");
+        assert_eq!(percent_decode_str("host%zz.example"), "host%zz.example");
+        // Valid UTF-8 percent-encoded sequence (`%C3%A9` -> `é`).
+        assert_eq!(percent_decode_str("caf%C3%A9.example"), "café.example");
+
+        // End-to-end through `url_host` and `Netrc::get_credential`.
+        let netrc = Netrc::parse(
+            "machine café.example login utf8user password utf8pass\n\
+             default login defuser password defpass\n",
+        )
+        .unwrap();
+        for malformed_url in [
+            "https://host%é.example/archive.tar.gz",
+            "https://host%日.example/archive.tar.gz",
+            "https://host%🦀.example/archive.tar.gz",
+            "https://host%/archive.tar.gz",
+            "https://host%a/archive.tar.gz",
+            "https://host%zz.example/archive.tar.gz",
+        ] {
+            let host = url_host(malformed_url);
+            let cred = netrc.get_credential(&host).unwrap();
+            assert_eq!(cred.login.as_deref(), Some("defuser"), "{malformed_url}");
+        }
+        // Malformed hosts passed directly to `get_credential` also must not panic.
+        assert_eq!(
+            netrc.get_credential("%日").unwrap().login.as_deref(),
+            Some("defuser")
+        );
+        assert_eq!(
+            netrc
+                .get_credential(&url_host("https://CAF%C3%A9.EXAMPLE/file.tgz"))
+                .unwrap()
+                .login
+                .as_deref(),
+            Some("utf8user")
+        );
     }
 }

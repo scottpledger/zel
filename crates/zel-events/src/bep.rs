@@ -367,7 +367,11 @@ fn has_windows_drive_prefix(s: &str) -> bool {
 /// Decodes a `file://` URI back into a raw filesystem path.
 pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
-    let rest = if rest.len() >= 10 && rest[..10].eq_ignore_ascii_case("localhost/") {
+    let rest = if rest
+        .as_bytes()
+        .get(..10)
+        .is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/"))
+    {
         &rest[9..]
     } else {
         rest
@@ -3376,6 +3380,15 @@ mod tests {
         assert_eq!(
             file_uri_to_local_path("file://localhost/a%20b/c").as_deref(),
             Some("/a b/c")
+        );
+        // Multi-byte UTF-8 characters spanning byte offsets 9..10 after `file://` must never panic.
+        assert_eq!(
+            file_uri_to_local_path("file:///dir/é/out.txt").as_deref(),
+            Some("/dir/é/out.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file:///a/日本語/out.txt").as_deref(),
+            Some("/a/日本語/out.txt")
         );
 
         // On Unix, a backslash inside a `/...` path is a literal filename character (`%5C`).

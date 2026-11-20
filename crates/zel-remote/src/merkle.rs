@@ -387,6 +387,74 @@ pub fn tree_from_local_dir(
     tree_from_local_dir_ext(dir, digest_fn, false, blobs)
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DirIdentity {
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(not(unix))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct DirIdentity(PathBuf);
+
+pub(crate) fn dir_identity(path: &Path) -> io::Result<DirIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(path)?;
+        Ok(DirIdentity {
+            dev: md.dev(),
+            ino: md.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(DirIdentity(std::fs::canonicalize(path)?))
+    }
+}
+
+/// Tracks the active directory recursion stack so symlink cycles to `root` or
+/// any ancestor directory fail immediately with `InvalidData`, while DAG
+/// diamonds (sibling symlinks pointing to the same non-ancestor directory)
+/// succeed cleanly.
+pub(crate) struct AncestorDirs {
+    active: HashSet<DirIdentity>,
+}
+
+impl AncestorDirs {
+    pub(crate) fn for_root(root: &Path) -> io::Result<Self> {
+        let mut active = HashSet::new();
+        active.insert(dir_identity(root)?);
+        if let Ok(canon) = std::fs::canonicalize(root) {
+            for anc in canon.ancestors() {
+                if let Ok(id) = dir_identity(anc) {
+                    active.insert(id);
+                }
+            }
+        }
+        Ok(Self { active })
+    }
+
+    pub(crate) fn enter(&mut self, dir: &Path) -> io::Result<DirIdentity> {
+        let id = dir_identity(dir)?;
+        if !self.active.insert(id.clone()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Symlink cycle detected while traversing directory {}",
+                    dir.display()
+                ),
+            ));
+        }
+        Ok(id)
+    }
+
+    pub(crate) fn leave(&mut self, id: &DirIdentity) {
+        self.active.remove(id);
+    }
+}
+
 pub fn tree_from_local_dir_ext(
     dir: &Path,
     digest_fn: DigestFn,
@@ -399,6 +467,7 @@ pub fn tree_from_local_dir_ext(
         allow_abs: bool,
         blobs: &mut BTreeMap<Digest, BlobSource>,
         children: &mut Vec<Directory>,
+        ancestors: &mut AncestorDirs,
     ) -> io::Result<Directory> {
         let mut d = Directory::default();
         let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
@@ -418,7 +487,10 @@ pub fn tree_from_local_dir_ext(
                 if target_pb.is_absolute() {
                     match std::fs::metadata(&path) {
                         Ok(target_md) if target_md.is_dir() => {
-                            let sub = rec(&path, f, allow_abs, blobs, children)?;
+                            let guard_id = ancestors.enter(&path)?;
+                            let res = rec(&path, f, allow_abs, blobs, children, ancestors);
+                            ancestors.leave(&guard_id);
+                            let sub = res?;
                             let bytes = sub.encode_to_vec();
                             let dg = f.digest(&bytes);
                             if dg.size_bytes > 0 {
@@ -472,7 +544,10 @@ pub fn tree_from_local_dir_ext(
                     node_properties: None,
                 });
             } else if ft.is_dir() {
-                let sub = rec(&path, f, allow_abs, blobs, children)?;
+                let guard_id = ancestors.enter(&path)?;
+                let res = rec(&path, f, allow_abs, blobs, children, ancestors);
+                ancestors.leave(&guard_id);
+                let sub = res?;
                 let bytes = sub.encode_to_vec();
                 let dg = f.digest(&bytes);
                 if dg.size_bytes > 0 {
@@ -507,6 +582,7 @@ pub fn tree_from_local_dir_ext(
         }
         Ok(d)
     }
+    let mut ancestors = AncestorDirs::for_root(dir)?;
     let mut children = Vec::new();
     let root = rec(
         dir,
@@ -514,6 +590,7 @@ pub fn tree_from_local_dir_ext(
         allow_absolute_symlinks,
         blobs,
         &mut children,
+        &mut ancestors,
     )?;
     let mut seen = HashSet::new();
     children.retain(|c| seen.insert(digest_fn.hash(&c.encode_to_vec())));
@@ -626,5 +703,101 @@ mod tests {
         assert_eq!(t.blobs.get(&d), Some(&BlobSource::File(p)));
         assert_eq!(t.input_bytes, 5);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    fn make_dir_symlink(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link)
+        }
+    }
+
+    #[test]
+    fn tree_from_local_dir_ext_rejects_absolute_symlink_cycles_to_root_or_ancestor() {
+        let base = std::env::temp_dir().join(format!("zel-merkle-cycle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let ancestor = base.join("ws");
+        let out_root = ancestor.join("sub").join("out");
+        std::fs::create_dir_all(out_root.join("nested")).unwrap();
+        std::fs::write(out_root.join("file.txt"), b"ok").unwrap();
+
+        let abs_out_root = std::fs::canonicalize(&out_root).unwrap();
+        let abs_ancestor = std::fs::canonicalize(&ancestor).unwrap();
+
+        // 1. Absolute symlink pointing directly back to the output tree root.
+        let self_link = out_root.join("nested").join("self_loop");
+        make_dir_symlink(&abs_out_root, &self_link).unwrap();
+        let mut blobs = BTreeMap::new();
+        let err = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, true, &mut blobs)
+            .expect_err("symlink pointing to tree root must fail without stack overflow");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        std::fs::remove_file(&self_link).unwrap();
+
+        // 2. Absolute symlink pointing to an ancestor above the output tree root.
+        let anc_link = out_root.join("nested").join("ancestor_loop");
+        make_dir_symlink(&abs_ancestor, &anc_link).unwrap();
+        let mut blobs = BTreeMap::new();
+        let err = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, true, &mut blobs)
+            .expect_err("symlink pointing to ancestor directory must fail without stack overflow");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        std::fs::remove_file(&anc_link).unwrap();
+
+        // 3. Mutual cycle between two external directories (`ext_a -> ext_b -> ext_a`).
+        let ext_a = base.join("ext_a");
+        let ext_b = base.join("ext_b");
+        std::fs::create_dir_all(&ext_a).unwrap();
+        std::fs::create_dir_all(&ext_b).unwrap();
+        let abs_ext_a = std::fs::canonicalize(&ext_a).unwrap();
+        let abs_ext_b = std::fs::canonicalize(&ext_b).unwrap();
+        make_dir_symlink(&abs_ext_b, &ext_a.join("to_b")).unwrap();
+        make_dir_symlink(&abs_ext_a, &ext_b.join("to_a")).unwrap();
+        make_dir_symlink(&abs_ext_a, &out_root.join("ext_entry")).unwrap();
+        let mut blobs = BTreeMap::new();
+        let err = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, true, &mut blobs)
+            .expect_err("mutual external directory symlink cycle must fail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tree_from_local_dir_ext_preserves_sibling_dag_diamond_symlinks() {
+        let base = std::env::temp_dir().join(format!("zel-merkle-diamond-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let shared = base.join("shared_external");
+        let out_root = base.join("out");
+        std::fs::create_dir_all(shared.join("inner")).unwrap();
+        std::fs::write(shared.join("hello.txt"), b"shared-payload").unwrap();
+        std::fs::write(shared.join("inner/deep.txt"), b"deep-payload").unwrap();
+        std::fs::create_dir_all(&out_root).unwrap();
+
+        let abs_shared = std::fs::canonicalize(&shared).unwrap();
+        make_dir_symlink(&abs_shared, &out_root.join("first")).unwrap();
+        make_dir_symlink(&abs_shared, &out_root.join("second")).unwrap();
+
+        let mut blobs = BTreeMap::new();
+        let tree = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, false, &mut blobs)
+            .expect("sibling symlinks to the same non-ancestor directory form a DAG diamond");
+
+        let root = tree.root.as_ref().unwrap();
+        let dir_names: Vec<_> = root.directories.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(dir_names, ["first", "second"]);
+        assert_eq!(root.directories[0].digest, root.directories[1].digest);
+        // Shared child Directory protos are deduplicated in `Tree.children`.
+        assert_eq!(tree.children.len(), 2);
+
+        let entries = flatten_tree(&tree, DigestFn::Sha256).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, TreeEntry::File { path, .. } if path == "first/inner/deep.txt")));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(e, TreeEntry::File { path, .. } if path == "second/inner/deep.txt")));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
