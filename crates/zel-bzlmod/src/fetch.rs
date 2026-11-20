@@ -3561,6 +3561,170 @@ my_ext = _make_ext()
     }
 
     #[test]
+    fn native_existing_rule_semantics_match_bazel_in_extension_repo_rule_and_bzl_init() {
+        let base = tmpdir("existing_rule_phases");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "ext_ok.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('out.txt', rctx.attr.body)\n",
+                "r = repository_rule(implementation = _r, attrs = {'body': attr.string()})\n",
+                "def _ext(mctx):\n",
+                "    a = native.existing_rule('foo')\n",
+                "    b = native.existing_rules()\n",
+                "    r(name = 'ext_ok_gen', body = str(a) + '|' + str(b))\n",
+                "ext_ok = module_extension(implementation = _ext)\n",
+            ),
+        );
+        write(
+            &ws,
+            "repo_er.bzl",
+            concat!(
+                "def _r1(rctx):\n",
+                "    native.existing_rule('foo')\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('out.txt', 'ok')\n",
+                "r1 = repository_rule(implementation = _r1)\n",
+                "def _r2(rctx):\n",
+                "    native.existing_rules()\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('out.txt', 'ok')\n",
+                "r2 = repository_rule(implementation = _r2)\n",
+            ),
+        );
+        write(
+            &ws,
+            "ext_nested_repo.bzl",
+            concat!(
+                "def _out(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "out = repository_rule(implementation = _out)\n",
+                "def _ext_er(mctx):\n",
+                "    mctx.read(Label('@repo_er_one//:out.txt'))\n",
+                "    out(name = 'nested_er_gen')\n",
+                "ext_nested_er = module_extension(implementation = _ext_er)\n",
+                "def _ext_ers(mctx):\n",
+                "    mctx.read(Label('@repo_er_all//:out.txt'))\n",
+                "    out(name = 'nested_ers_gen')\n",
+                "ext_nested_ers = module_extension(implementation = _ext_ers)\n",
+            ),
+        );
+        write(
+            &ws,
+            "bzl_init_er.bzl",
+            concat!(
+                "X = native.existing_rule('foo')\n",
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _e(mctx):\n",
+                "    r(name = 'bzl_init_gen')\n",
+                "e = module_extension(implementation = _e)\n",
+            ),
+        );
+        write(
+            &ws,
+            "ext_loads_bzl_init_er.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _e(mctx):\n",
+                "    mctx.read(Label('@bzl_init_gen//:BUILD.bazel'))\n",
+                "    r(name = 'outer_bzl_init_gen')\n",
+                "e = module_extension(implementation = _e)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "ext_ok = use_extension('//:ext_ok.bzl', 'ext_ok')\n",
+                "use_repo(ext_ok, 'ext_ok_gen')\n",
+                "r1 = use_repo_rule('//:repo_er.bzl', 'r1')\n",
+                "r1(name = 'repo_er_one')\n",
+                "r2 = use_repo_rule('//:repo_er.bzl', 'r2')\n",
+                "r2(name = 'repo_er_all')\n",
+                "ext_nested_er = use_extension('//:ext_nested_repo.bzl', 'ext_nested_er')\n",
+                "use_repo(ext_nested_er, 'nested_er_gen')\n",
+                "ext_nested_ers = use_extension('//:ext_nested_repo.bzl', 'ext_nested_ers')\n",
+                "use_repo(ext_nested_ers, 'nested_ers_gen')\n",
+                "bzl_e = use_extension('//:bzl_init_er.bzl', 'e')\n",
+                "use_repo(bzl_e, 'bzl_init_gen')\n",
+                "outer_bzl_e = use_extension('//:ext_loads_bzl_init_er.bzl', 'e')\n",
+                "use_repo(outer_bzl_e, 'outer_bzl_init_gen')\n",
+            ),
+        );
+        let o = hermetic_opts(&ws, &base);
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+
+        // Inside a module_extension impl, existing_rule/existing_rules no-op to None / {}.
+        let dir = rt.fetch_repo("+ext_ok+ext_ok_gen").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+            "None|{}"
+        );
+
+        // Standalone repository_rule impl rejects both existing_rule and existing_rules.
+        let err_r1 = rt.fetch_repo("+r1+repo_er_one").unwrap_err();
+        assert!(
+            err_r1.contains("existing_rule() can only be used while evaluating a BUILD file"),
+            "unexpected error for standalone existing_rule: {err_r1}"
+        );
+        let err_r2 = rt.fetch_repo("+r2+repo_er_all").unwrap_err();
+        assert!(
+            err_r2.contains("existing_rules() can only be used while evaluating a BUILD file"),
+            "unexpected error for standalone existing_rules: {err_r2}"
+        );
+
+        // Nested repository_rule impl fetched from a module_extension impl also rejects both.
+        let find_ext = |name: &str| {
+            res.extension_ids()
+                .into_iter()
+                .find(|id| id.name == name)
+                .unwrap()
+        };
+        let err_nested_er = rt.eval_extension(&find_ext("ext_nested_er")).unwrap_err();
+        assert!(
+            err_nested_er
+                .contains("existing_rule() can only be used while evaluating a BUILD file"),
+            "unexpected error for nested repo_rule existing_rule: {err_nested_er}"
+        );
+        let err_nested_ers = rt.eval_extension(&find_ext("ext_nested_ers")).unwrap_err();
+        assert!(
+            err_nested_ers
+                .contains("existing_rules() can only be used while evaluating a BUILD file"),
+            "unexpected error for nested repo_rule existing_rules: {err_nested_ers}"
+        );
+
+        // Nested .bzl top-level init loaded from a module_extension impl also rejects existing_rule.
+        let outer_bzl_id = res
+            .extension_ids()
+            .into_iter()
+            .find(|id| id.bzl_file.contains("ext_loads_bzl_init_er.bzl"))
+            .unwrap();
+        let err_bzl_init = rt.eval_extension(&outer_bzl_id).unwrap_err();
+        assert!(
+            err_bzl_init.contains("existing_rule() can only be used while evaluating a BUILD file"),
+            "unexpected error for nested bzl init existing_rule: {err_bzl_init}"
+        );
+    }
+
+    #[test]
     fn local_repository_and_new_local_repository_refetch_when_fetching_enabled() {
         let base = tmpdir("local_refetch");
         let ws = base.join("ws");
