@@ -348,8 +348,8 @@ fn default_openssl_candidates() -> Vec<PathBuf> {
         for p in [
             r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
             r"C:\Program Files\OpenSSL\bin\openssl.exe",
-            r"C:\Program Files\Git\usr\bin\openssl.exe",
             r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+            r"C:\Program Files\Git\usr\bin\openssl.exe",
         ] {
             candidates.push(PathBuf::from(p));
         }
@@ -357,33 +357,73 @@ fn default_openssl_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn combined_output_text(out: &std::process::Output) -> String {
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    if !out.stderr.is_empty() {
+fn run_probe_cmd(path: &Path, args: &[&str], timeout: Duration) -> Option<(ExitStatus, String)> {
+    let mut child = Command::new(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
+    let out_t = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.read_to_end(&mut buf);
+        buf
+    });
+    let err_t = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_t.join();
+                    let _ = err_t.join();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_t.join();
+                let _ = err_t.join();
+                return None;
+            }
+        }
+    };
+    let out_bytes = out_t.join().unwrap_or_default();
+    let err_bytes = err_t.join().unwrap_or_default();
+    let mut text = String::from_utf8_lossy(&out_bytes).into_owned();
+    if !err_bytes.is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
         }
-        text.push_str(&String::from_utf8_lossy(&out.stderr));
+        text.push_str(&String::from_utf8_lossy(&err_bytes));
     }
-    text
+    Some((status, text))
 }
 
 fn probe_openssl_binary(path: &Path) -> Option<OpenSslBinary> {
     if path.is_absolute() && !path.is_file() {
         return None;
     }
-    let version_out = Command::new(path).arg("version").output().ok()?;
-    let version_text = combined_output_text(&version_out);
-    if !version_out.status.success() && version_text.trim().is_empty() {
+    let probe_timeout = Duration::from_secs(5);
+    let (version_status, version_text) = run_probe_cmd(path, &["version"], probe_timeout)?;
+    if !version_status.success() && version_text.trim().is_empty() {
         return None;
     }
     // Note: LibreSSL and some OpenSSL versions exit non-zero for `s_client -help` while writing
     // usage to stderr, so capture both stdout and stderr regardless of exit status.
-    let help_out = Command::new(path)
-        .args(["s_client", "-help"])
-        .output()
-        .ok()?;
-    let help_text = combined_output_text(&help_out);
+    let (_, help_text) = run_probe_cmd(path, &["s_client", "-help"], probe_timeout)?;
     let caps = parse_s_client_capabilities(&version_text, &help_text);
     Some(OpenSslBinary {
         path: path.to_path_buf(),
@@ -1574,12 +1614,44 @@ Usage: s_client [options]
             Err(e) => panic!("{e}"),
         };
         let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_srv = stop.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
         let accept_thread = std::thread::spawn(move || {
             if let Ok((_conn, _)) = listener.accept() {
-                let _ = done_rx.recv_timeout(Duration::from_secs(5));
+                if !stop_srv.load(Ordering::SeqCst) {
+                    let _ = done_rx.recv_timeout(Duration::from_secs(5));
+                }
             }
         });
+
+        struct AcceptGuard {
+            port: u16,
+            stop: Arc<AtomicBool>,
+            done_tx: std::sync::mpsc::Sender<()>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+        impl Drop for AcceptGuard {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::SeqCst);
+                let _ = self.done_tx.send(());
+                // Wake `listener.accept()` if `openssl` timed out or failed before TCP connect
+                // (e.g. slow process startup on Windows CI).
+                let _ = TcpStream::connect_timeout(
+                    &SocketAddr::from(([127, 0, 0, 1], self.port)),
+                    Duration::from_secs(1),
+                );
+                if let Some(h) = self.handle.take() {
+                    let _ = h.join();
+                }
+            }
+        }
+        let _guard = AcceptGuard {
+            port,
+            stop,
+            done_tx,
+            handle: Some(accept_thread),
+        };
 
         let tls_conn = TlsConnector {
             host: "127.0.0.1".into(),
@@ -1590,13 +1662,11 @@ Usage: s_client [options]
             unix_proxy: None,
         };
         let started = Instant::now();
-        let err = match tls_conn.connect_with_timeout(Duration::from_millis(200)) {
+        let err = match tls_conn.connect_with_timeout(Duration::from_millis(500)) {
             Ok(_) => panic!("expected TLS handshake against silent server to time out"),
             Err(e) => e,
         };
         let elapsed = started.elapsed();
-        let _ = done_tx.send(());
-        let _ = accept_thread.join();
 
         assert_eq!(err.kind(), io::ErrorKind::TimedOut, "err={err}");
         assert!(
