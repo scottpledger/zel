@@ -2231,6 +2231,9 @@ impl PackageLoader {
             }
         }
         for (an, v) in &values {
+            if an == "visibility" || rc.attr_or_implicit(an).is_some_and(|a| a.nodep) {
+                continue;
+            }
             let mut check = |labels: &[Label]| {
                 let mut seen = BTreeSet::new();
                 let mut reported = BTreeSet::new();
@@ -3624,7 +3627,10 @@ impl PackageLoader {
                 "dependency_resolution_rule",
             ],
         )
-        .map_err(|e| herr(ctx, e))?;
+        .map_err(|e| {
+            let trace = ctx.thread.format_stack_trace_at(&ctx.last_call_loc);
+            StarlarkError(format!("{trace}Error in rule: {e}"))
+        })?;
         let implementation = arg(&pos, &kw, 0, "implementation")
             .cloned()
             .ok_or_else(|| herr(ctx, "rule() missing 1 required positional argument: implementation"))?;

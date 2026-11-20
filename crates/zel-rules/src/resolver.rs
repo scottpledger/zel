@@ -305,7 +305,7 @@ impl LoaderExpander {
             || p.ends_with(":all-targets"));
         let outcome = pr.resolve_patterns(std::slice::from_ref(&p.to_string()));
         if let Some(e) = outcome.errors.first() {
-            return Err(format!(
+            let summary = format!(
                 "invalid registered {} '{}': {}",
                 if rule_class == "toolchain" {
                     "toolchain"
@@ -314,7 +314,18 @@ impl LoaderExpander {
                 },
                 p,
                 e.message
-            ));
+            );
+            let mut lines: Vec<String> = outcome
+                .events
+                .iter()
+                .filter(|ev| ev.kind == zel_packages::lookup::EventKind::Error)
+                .map(|ev| ev.render())
+                .collect();
+            if lines.is_empty() {
+                return Err(summary);
+            }
+            lines.push(format!("ERROR: {summary}"));
+            return Err(lines.join("\n"));
         }
         if explicit && outcome.targets.is_empty() {
             if let Ok(l) = Label::parse_canonical(p)

@@ -2627,3 +2627,283 @@ emit_version(name = "check")
     let ws_bad = Ws::new(&[("BUILD", "x = native.bazel_version\n")]);
     assert!(ws_bad.load("").contains_errors);
 }
+
+#[test]
+fn nested_bzl_load_chain_preserves_missing_file_eval_and_compile_errors() {
+    use crate::lookup::SimpleRepoResolver;
+    use zel_vfs::InMemoryFileSystem;
+
+    // 1. Nested missing `.bzl` preserves full `at <file>:<line>:<col>: ...` chain and leaf error.
+    let ws = Ws::new(&[
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"X\")\nfilegroup(name = \"t\")\n",
+        ),
+        ("defs.bzl", "load(\":multirun.bzl\", \"Y\")\nX = Y\n"),
+        (
+            "multirun.bzl",
+            "load(\"//internal:runfiles_enabled.bzl\", \"Z\")\nY = Z\n",
+        ),
+        ("internal/BUILD", ""),
+    ]);
+    let e = ws.try_load("").unwrap_err();
+    assert_eq!(
+        e.message,
+        "error loading package '': at /ws/defs.bzl:1:6: at /ws/multirun.bzl:1:6: cannot load '//internal:runfiles_enabled.bzl': no such file"
+    );
+    assert!(e.events.is_empty(), "unexpected events: {:?}", e.events);
+
+    // 2. Nested `.bzl` evaluation error (`rule()` unexpected kwarg) preserves traceback event
+    //    and `at <caller>: initialization of module '<leaf>' failed`.
+    let ws_eval = Ws::new(&[
+        (
+            "load_eval/BUILD",
+            "load(\":a.bzl\", \"my_rule\")\nmy_rule(name = \"t\")\n",
+        ),
+        (
+            "load_eval/a.bzl",
+            "load(\":b.bzl\", _r = \"my_rule\")\nmy_rule = _r\n",
+        ),
+        (
+            "load_eval/b.bzl",
+            "def _impl(ctx):\n    pass\n\nmy_rule = rule(\n    implementation = _impl,\n    incompatible_use_toolchain_transition = True,\n)\n",
+        ),
+    ]);
+    let e_eval = ws_eval.try_load("load_eval").unwrap_err();
+    assert_eq!(
+        e_eval.message,
+        "error loading package 'load_eval': at /ws/load_eval/a.bzl:1:6: initialization of module 'load_eval/b.bzl' failed"
+    );
+    let rendered = e_eval
+        .events
+        .iter()
+        .map(|ev| ev.render())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("ERROR: Traceback (most recent call last):"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("File \"/ws/load_eval/b.bzl\", line 4"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains(
+            "Error in rule: rule() got unexpected keyword argument 'incompatible_use_toolchain_transition'"
+        ),
+        "{rendered}"
+    );
+
+    // 3. Nested `.bzl` compile error preserves event and `at <caller>: compilation of module '<leaf>' failed`.
+    let ws_syntax = Ws::new(&[
+        (
+            "load_syntax/BUILD",
+            "load(\":a.bzl\", \"X\")\nfilegroup(name = \"t\")\n",
+        ),
+        ("load_syntax/a.bzl", "load(\":b.bzl\", \"Y\")\nX = Y\n"),
+        ("load_syntax/b.bzl", "Y = undefined_symbol_here\n"),
+    ]);
+    let e_syn = ws_syntax.try_load("load_syntax").unwrap_err();
+    assert_eq!(
+        e_syn.message,
+        "error loading package 'load_syntax': at /ws/load_syntax/a.bzl:1:6: compilation of module 'load_syntax/b.bzl' failed"
+    );
+    assert!(
+        e_syn.events.iter().any(|ev| ev.render()
+            == "ERROR: /ws/load_syntax/b.bzl:1:5: name 'undefined_symbol_here' is not defined"),
+        "{:?}",
+        e_syn.events
+    );
+
+    // 4. External repo root package error includes canonical repo name in `error loading package`.
+    let fs = Arc::new(InMemoryFileSystem::new(zel_vfs::DigestHashFunction::Sha256));
+    let write = |p: &str, c: &str| {
+        let pf = PathFragment::create(p);
+        if let Some(par) = pf.parent_directory() {
+            fs.create_directory_and_parents(&par).unwrap();
+        }
+        fs.write_file(&pf, c.as_bytes()).unwrap();
+    };
+    write("/ws/BUILD", "");
+    write(
+        "/ext/BUILD",
+        "load(\":defs.bzl\", \"resolved_toolchain\")\nresolved_toolchain(name = \"r\")\n",
+    );
+    write(
+        "/ext/defs.bzl",
+        "def _impl(ctx):\n    pass\nresolved_toolchain = rule(\n    implementation = _impl,\n    incompatible_use_toolchain_transition = True,\n)\n",
+    );
+    let mut res = SimpleRepoResolver::new(PathFragment::create("/ws"));
+    res.external
+        .insert("ext_tc".into(), PathFragment::create("/ext"));
+    res.apparent.insert(
+        "ext_tc".into(),
+        zel_cmdline::RepositoryName::create_unvalidated("ext_tc"),
+    );
+    let loader = PackageLoader::new(LoaderConfig::new(
+        fs as Arc<dyn zel_vfs::FileSystem>,
+        Arc::new(res) as Arc<dyn crate::lookup::RepoResolver>,
+    ));
+    let ext_pkg = PackageIdentifier::create(
+        zel_cmdline::RepositoryName::create_unvalidated("ext_tc"),
+        PathFragment::empty(),
+    )
+    .unwrap();
+    let e_ext = loader.load_package(&ext_pkg).unwrap_err();
+    assert_eq!(
+        e_ext.message,
+        "error loading package '@@ext_tc//': initialization of module 'defs.bzl' failed"
+    );
+    assert!(
+        e_ext.events.iter().any(|ev| ev.render().contains(
+            "Error in rule: rule() got unexpected keyword argument 'incompatible_use_toolchain_transition'"
+        )),
+        "{:?}",
+        e_ext.events
+    );
+}
+
+#[test]
+fn duplicate_canonical_labels_allowed_in_visibility_rejected_elsewhere() {
+    use crate::lookup::SimpleRepoResolver;
+    use zel_vfs::InMemoryFileSystem;
+
+    let fs = Arc::new(InMemoryFileSystem::new(zel_vfs::DigestHashFunction::Sha256));
+    let write = |p: &str, c: &str| {
+        let pf = PathFragment::create(p);
+        if let Some(par) = pf.parent_directory() {
+            fs.create_directory_and_parents(&par).unwrap();
+        }
+        fs.write_file(&pf, c.as_bytes()).unwrap();
+    };
+    write(
+        "/ws/dup_vis/BUILD",
+        r#"
+filegroup(
+    name = "fg_canon_dup",
+    srcs = [],
+    visibility = ["//:__subpackages__", "@myrepo//:__subpackages__"],
+)
+filegroup(
+    name = "fg_exact_dup",
+    srcs = [],
+    visibility = ["//:__subpackages__", "//:__subpackages__"],
+)
+"#,
+    );
+    write(
+        "/ws/dup_default_vis/BUILD",
+        r#"
+package(default_visibility = ["//:__subpackages__", "@myrepo//:__subpackages__"])
+filegroup(name = "fg", srcs = [])
+"#,
+    );
+    write(
+        "/ws/dup_exports/BUILD",
+        r#"
+exports_files(["a.txt"], visibility = ["//:__subpackages__", "@myrepo//:__subpackages__"])
+"#,
+    );
+    write(
+        "/ws/dup_pg/BUILD",
+        r#"
+package_group(name = "base", packages = ["//..."])
+package_group(name = "pg", includes = [":base", "@myrepo//dup_pg:base"])
+"#,
+    );
+    write(
+        "/ws/dup_srcs/BUILD",
+        r#"
+filegroup(name = "fg", srcs = ["a.txt", "@myrepo//dup_srcs:a.txt"])
+"#,
+    );
+    write(
+        "/ws/dup_deps/defs.bzl",
+        r#"
+my_rule = rule(
+    implementation = lambda ctx: [],
+    attrs = {"deps": attr.label_list()},
+)
+"#,
+    );
+    write(
+        "/ws/dup_deps/BUILD",
+        r#"
+load(":defs.bzl", "my_rule")
+filegroup(name = "dep", srcs = [])
+my_rule(name = "r", deps = [":dep", "@myrepo//dup_deps:dep"])
+"#,
+    );
+    write(
+        "/ws/dup_select/BUILD",
+        r#"
+filegroup(
+    name = "fg",
+    srcs = select({"//conditions:default": ["a.txt", "@myrepo//dup_select:a.txt"]}),
+)
+"#,
+    );
+    write(
+        "/ws/dup_compat/BUILD",
+        r#"
+constraint_setting(name = "cs")
+constraint_value(name = "cv", constraint_setting = ":cs")
+filegroup(name = "fg", srcs = [], target_compatible_with = [":cv", "@myrepo//dup_compat:cv"])
+"#,
+    );
+
+    let mut res = SimpleRepoResolver::new(PathFragment::create("/ws"));
+    res.apparent
+        .insert("myrepo".into(), zel_cmdline::RepositoryName::main());
+    let loader = PackageLoader::new(LoaderConfig::new(
+        fs as Arc<dyn zel_vfs::FileSystem>,
+        Arc::new(res) as Arc<dyn crate::lookup::RepoResolver>,
+    ));
+
+    // Visibility attributes accept duplicate canonical and syntactic labels cleanly.
+    for ok_pkg in ["dup_vis", "dup_default_vis", "dup_exports", "dup_pg"] {
+        let p = loader.load_package(&pid(ok_pkg)).unwrap();
+        assert!(
+            !p.contains_errors,
+            "package '{ok_pkg}' unexpectedly had errors: {:?}",
+            errors(&p)
+        );
+    }
+    let vis_pkg = loader.load_package(&pid("dup_vis")).unwrap();
+    assert_eq!(
+        rule(&vis_pkg, "fg_canon_dup").visibility,
+        vec!["//:__subpackages__", "//:__subpackages__"]
+    );
+
+    // Non-visibility label_list attributes still reject duplicate canonical labels.
+    for (bad_pkg, expected) in [
+        (
+            "dup_srcs",
+            "Label '//dup_srcs:a.txt' is duplicated in the 'srcs' attribute of rule 'fg'",
+        ),
+        (
+            "dup_deps",
+            "Label '//dup_deps:dep' is duplicated in the 'deps' attribute of rule 'r'",
+        ),
+        (
+            "dup_select",
+            "Label '//dup_select:a.txt' is duplicated in the 'srcs' attribute of rule 'fg'",
+        ),
+        (
+            "dup_compat",
+            "Label '//dup_compat:cv' is duplicated in the 'target_compatible_with' attribute of rule 'fg'",
+        ),
+    ] {
+        let p = loader.load_package(&pid(bad_pkg)).unwrap();
+        assert!(
+            p.contains_errors,
+            "expected duplicate label error in '{bad_pkg}'"
+        );
+        let errs = errors(&p).join("\n");
+        assert!(
+            errs.contains(expected),
+            "in '{bad_pkg}', expected '{expected}', got: {errs}"
+        );
+    }
+}

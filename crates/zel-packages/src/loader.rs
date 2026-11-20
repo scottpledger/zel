@@ -669,13 +669,21 @@ impl PackageLoader {
         let lookup = self.cfg.lookup.lookup(id);
         match lookup {
             PackageLookup::Found { build_file } => {
+                let pkg_display = if id.repository().is_main() {
+                    id.package_fragment().to_string()
+                } else {
+                    format!(
+                        "{}//{}",
+                        id.repository().canonical_form(),
+                        id.package_fragment()
+                    )
+                };
                 let bytes = match self.fs().read_file(&build_file) {
                     Ok(b) => b,
                     Err(e) => {
                         return Err(PackageLoadError {
                             message: format!(
-                                "error loading package '{}': Encountered error while reading BUILD file '{}': {e}",
-                                id.package_fragment(),
+                                "error loading package '{pkg_display}': Encountered error while reading BUILD file '{}': {e}",
                                 build_file
                             ),
                             events: Vec::new(),
@@ -689,10 +697,7 @@ impl PackageLoader {
                 match fatal {
                     None => Ok(pkg),
                     Some(msg) => Err(PackageLoadError {
-                        message: format!(
-                            "error loading package '{}': {msg}",
-                            id.package_fragment()
-                        ),
+                        message: format!("error loading package '{pkg_display}': {msg}"),
                         events: pkg.events,
                         repo_fetch_error: None,
                     }),
@@ -1419,15 +1424,12 @@ impl PackageLoader {
                 Err(e) => {
                     // Events of the failed module are reported before the importer's own error.
                     sink.lock().unwrap().extend(e.events.clone());
-                    if e.message.contains(".bzl load visibility violations") {
-                        let msg = match &call_loc {
-                            Some(loc) => format!("at {loc}: {}", e.message),
-                            None => e.message.clone(),
-                        };
-                        *fatal_override.lock().unwrap() = Some(msg.clone());
-                        return Err(msg);
-                    }
-                    Err(e.message)
+                    let msg = match &call_loc {
+                        Some(loc) => format!("at {loc}: {}", e.message),
+                        None => e.message.clone(),
+                    };
+                    *fatal_override.lock().unwrap() = Some(msg.clone());
+                    Err(msg)
                 }
             }
         }));
@@ -2378,7 +2380,12 @@ impl PackageLoader {
                 if fo.is_some() {
                     continue;
                 }
-                let (loc, msg) = split_location(&line);
+                let (loc, msg) = split_location(&dedup_location(&line));
+                let loc = if msg.starts_with("Traceback (most recent call last):") {
+                    None
+                } else {
+                    loc
+                };
                 events.push(PackageEvent::error(loc, msg));
             }
             let fatal_msg = fo.or_else(|| ctx.fatal_error.take()).unwrap_or_else(|| {
