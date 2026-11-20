@@ -1712,6 +1712,12 @@ impl SandboxRunner {
                 if std::fs::symlink_metadata(&mf_dest).is_err() {
                     #[cfg(unix)]
                     let _ = std::os::unix::fs::symlink(&mf_src, &mf_dest);
+                    #[cfg(windows)]
+                    if std::os::windows::fs::symlink_file(&mf_src, &mf_dest).is_err() {
+                        let _ = std::fs::copy(&mf_src, &mf_dest);
+                    }
+                    #[cfg(not(any(unix, windows)))]
+                    let _ = std::fs::copy(&mf_src, &mf_dest);
                 }
             }
         }
@@ -2222,6 +2228,41 @@ fn stage_runfiles_dir(src_dir: &Path, dest_dir: &Path) -> io::Result<()> {
                     src.clone()
                 };
                 std::os::unix::fs::symlink(&target, &dest)?;
+            }
+            #[cfg(windows)]
+            {
+                let target = if md.file_type().is_symlink() {
+                    std::fs::read_link(&src).unwrap_or_else(|_| src.clone())
+                } else {
+                    src.clone()
+                };
+                let resolved = if target.is_relative() {
+                    src.parent()
+                        .map(|p| p.join(&target))
+                        .unwrap_or_else(|| target.clone())
+                } else {
+                    target.clone()
+                };
+                let linked = if resolved.is_dir() {
+                    std::os::windows::fs::symlink_dir(&target, &dest).is_ok()
+                } else {
+                    std::os::windows::fs::symlink_file(&target, &dest).is_ok()
+                };
+                if !linked {
+                    if resolved.is_file() {
+                        std::fs::copy(&resolved, &dest)?;
+                    } else {
+                        std::fs::write(&dest, b"")?;
+                    }
+                }
+            }
+            #[cfg(not(any(unix, windows)))]
+            {
+                if src.is_file() {
+                    std::fs::copy(&src, &dest)?;
+                } else {
+                    std::fs::write(&dest, b"")?;
+                }
             }
         }
     }

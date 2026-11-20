@@ -2,7 +2,7 @@
 //! formats Bazel-style failures, builds runfiles trees, runs tests through `test-setup.sh`
 //! and prints Bazel's test summary.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zel_analysis::{Artifact, ConfiguredTarget, Runfiles};
@@ -874,6 +874,7 @@ pub(crate) fn run_build_actions(
                             repo_mapping: rs.repo_mapping.clone(),
                             enable_runfiles: enable_rf,
                             legacy_external_runfiles: legacy_rf,
+                            unresolved_symlink_paths: runfiles_unresolved_symlinks(ct),
                         },
                     );
                 }
@@ -1570,6 +1571,20 @@ pub(crate) fn runfiles_entries(ct: &ConfiguredTarget, workspace: &str) -> BTreeM
     rf.manifest_entries(workspace)
 }
 
+/// Exec paths of unresolved symlink artifacts present in `ct`'s runfiles.
+pub(crate) fn runfiles_unresolved_symlinks(ct: &ConfiguredTarget) -> BTreeSet<String> {
+    if let Some(rs) = &ct.runfiles_support {
+        return rs.runfiles.unresolved_symlink_exec_paths();
+    }
+    ct.default_info
+        .default_runfiles
+        .iter()
+        .chain(ct.default_info.data_runfiles.iter())
+        .filter(|a| a.is_unresolved_symlink)
+        .map(|a| a.exec_path.path_string().to_string())
+        .collect()
+}
+
 pub(crate) fn build_target_runfiles(
     ct: &ConfiguredTarget,
     execroot: &Path,
@@ -1588,6 +1603,7 @@ pub(crate) fn build_target_runfiles(
             .as_ref()
             .map(|r| r.repo_mapping.clone())
             .unwrap_or_default(),
+        unresolved_symlink_paths: runfiles_unresolved_symlinks(ct),
     };
     build_runfiles_tree(
         execroot,
@@ -2334,6 +2350,7 @@ pub(crate) fn run_tests(
             continue;
         };
         let mut entries_map = runfiles_entries(ct, input.workspace_name);
+        let mut unresolved_symlinks = runfiles_unresolved_symlinks(ct);
         if let Some(ru) = opt_last(parsed, "run_under") {
             let first = ru.split_whitespace().next().unwrap_or("");
             if first.starts_with("//") || first.starts_with('@') {
@@ -2347,6 +2364,7 @@ pub(crate) fn run_tests(
                     for (k, v) in runfiles_entries(ru_ct, input.workspace_name) {
                         entries_map.entry(k).or_insert(v);
                     }
+                    unresolved_symlinks.extend(runfiles_unresolved_symlinks(ru_ct));
                 }
             }
         }
@@ -2376,6 +2394,7 @@ pub(crate) fn run_tests(
                     .as_ref()
                     .map(|r| r.repo_mapping.clone())
                     .unwrap_or_default(),
+                unresolved_symlink_paths: unresolved_symlinks,
             };
             if let Err(e) = build_runfiles_tree(
                 &execroot,
@@ -2545,8 +2564,11 @@ pub(crate) fn run_tests(
         for (k, v) in entries {
             fp.add_str(&k);
             if !v.is_empty() {
-                if let Ok(b) = std::fs::read(execroot.join(&v)) {
+                let p = execroot.join(&v);
+                if let Ok(b) = std::fs::read(&p) {
                     fp.add_bytes(&server_digest_function().hash(&b));
+                } else if let Ok(link_target) = std::fs::read_link(&p) {
+                    fp.add_str(&link_target.to_string_lossy());
                 }
             }
         }
@@ -2581,7 +2603,7 @@ pub(crate) fn run_tests(
                 }
             }
         }
-        inputs.retain(|i| execroot.join(i).exists());
+        inputs.retain(|i| std::fs::symlink_metadata(execroot.join(i)).is_ok());
         inputs.extend(std::mem::take(&mut cc_cov_extra_input));
         inputs.sort();
         inputs.dedup();

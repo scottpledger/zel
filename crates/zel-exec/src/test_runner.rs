@@ -850,6 +850,7 @@ fn run_attempt(
         .map(|e| e.inputs.iter().map(|i| PathFragment::create(i)).collect())
         .unwrap_or_default();
     let mut empty_inputs: Vec<PathFragment> = Vec::new();
+    let mut symlink_inputs: Vec<PathFragment> = Vec::new();
     // Include runfiles tree entries (and empty-file markers) so sandbox/remote test spawns see them.
     if spec.runfiles_dir.starts_with(&spec.exec_root) && spec.runfiles_dir.is_dir() {
         fn collect_rf(
@@ -857,6 +858,7 @@ fn run_attempt(
             er: &Path,
             inputs: &mut Vec<PathFragment>,
             empty: &mut Vec<PathFragment>,
+            symlinks: &mut Vec<PathFragment>,
         ) {
             let Ok(rd) = std::fs::read_dir(d) else { return };
             for e in rd.flatten() {
@@ -865,7 +867,7 @@ fn run_attempt(
                     continue;
                 };
                 if md.is_dir() && !md.file_type().is_symlink() {
-                    collect_rf(&p, er, inputs, empty);
+                    collect_rf(&p, er, inputs, empty, symlinks);
                 } else if p.file_name().is_some_and(|n| n == "MANIFEST") {
                     continue;
                 } else if let Ok(rel) = p.strip_prefix(er) {
@@ -873,7 +875,13 @@ fn run_attempt(
                     if !inputs.contains(&pf) {
                         inputs.push(pf.clone());
                     }
-                    if md.is_file() && md.len() == 0 && !md.file_type().is_symlink() {
+                    if md.file_type().is_symlink() {
+                        if std::fs::read_link(&p).is_ok_and(|t| t.is_relative())
+                            && !symlinks.contains(&pf)
+                        {
+                            symlinks.push(pf);
+                        }
+                    } else if md.is_file() && md.len() == 0 {
                         empty.push(pf);
                     }
                 }
@@ -884,6 +892,7 @@ fn run_attempt(
             &spec.exec_root,
             &mut inputs,
             &mut empty_inputs,
+            &mut symlink_inputs,
         );
     }
     if let Some(m) = &spec.coverage_manifest {
@@ -916,6 +925,7 @@ fn run_attempt(
         argv,
         env,
         inputs,
+        symlink_inputs,
         empty_inputs,
         optional_outputs,
         outputs,

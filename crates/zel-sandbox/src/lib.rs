@@ -645,8 +645,15 @@ pub fn sync_symlink_tree(
         #[cfg(not(unix))]
         {
             let src = Path::new(target.path_string());
+            let resolved_src = if src.is_relative() {
+                link.parent()
+                    .map(|p| p.join(src))
+                    .unwrap_or_else(|| src.to_path_buf())
+            } else {
+                src.to_path_buf()
+            };
             #[cfg(windows)]
-            let linked = if src.is_dir() {
+            let linked = if resolved_src.is_dir() {
                 std::os::windows::fs::symlink_dir(src, link).is_ok()
             } else {
                 std::os::windows::fs::symlink_file(src, link).is_ok()
@@ -654,9 +661,9 @@ pub fn sync_symlink_tree(
             #[cfg(not(windows))]
             let linked = false;
             if !linked {
-                if src.is_file() {
-                    std::fs::copy(src, link)?;
-                } else if src.is_dir() {
+                if resolved_src.is_file() {
+                    std::fs::copy(&resolved_src, link)?;
+                } else if resolved_src.is_dir() {
                     fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
                         std::fs::create_dir_all(dst)?;
                         for entry in std::fs::read_dir(src)? {
@@ -671,7 +678,7 @@ pub fn sync_symlink_tree(
                         }
                         Ok(())
                     }
-                    copy_dir(src, link)?;
+                    copy_dir(&resolved_src, link)?;
                 } else {
                     std::fs::write(link, b"")?;
                 }

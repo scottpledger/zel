@@ -1457,7 +1457,11 @@ fn finish_target(
             },
         );
         a.progress_message = Some(format!("Creating source manifest for {}", label.canonical_form()));
-        a.inputs = default_runfiles.artifacts.clone();
+        let mut manifest_inputs = default_runfiles.artifacts.clone();
+        manifest_inputs.extend(default_runfiles.symlinks.values().cloned());
+        manifest_inputs.extend(default_runfiles.root_symlinks.values().cloned());
+        manifest_inputs.retain(|inp| inp.exec_path != manifest.exec_path);
+        a.inputs = dedup(manifest_inputs);
         a.outputs.push(manifest.clone());
         st.register(a).map_err(|e| e.0)?;
         // `RunfilesSupport.createRepoMappingManifestAction`: <executable>.repo_mapping in bin.

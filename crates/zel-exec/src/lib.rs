@@ -971,6 +971,7 @@ pub struct ToolRunfilesSpec {
     pub repo_mapping: Vec<(String, String, String)>,
     pub enable_runfiles: bool,
     pub legacy_external_runfiles: bool,
+    pub unresolved_symlink_paths: std::collections::BTreeSet<String>,
 }
 
 /// Resolves the environment of a spawn: fixed values, then the inherited variables present in
@@ -2061,6 +2062,11 @@ pub fn execute_action_with(
         .filter(|a| a.is_constant_metadata)
         .map(|a| a.exec_path.path_string())
         .collect();
+    let unresolved_symlink_inputs: std::collections::HashSet<&str> = action_inputs
+        .iter()
+        .filter(|a| a.is_unresolved_symlink)
+        .map(|a| a.exec_path.path_string())
+        .collect();
     let source_by_exec: std::collections::HashMap<&str, &Artifact> = action_inputs
         .iter()
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
@@ -2074,6 +2080,11 @@ pub fn execute_action_with(
             let target = execroot.get_relative_str(p);
             fs.exists(&target, true)
                 .then(|| "CONSTANT_METADATA".to_string())
+        } else if unresolved_symlink_inputs.contains(p) {
+            let target = execroot.get_relative_str(p);
+            fs.read_symbolic_link(&target)
+                .ok()
+                .map(|t| digest.hex(t.path_string().as_bytes()))
         } else if let Some(fc) = &opts.file_cache {
             if let Some(src_art) = source_by_exec.get(p) {
                 match fc.get_artifact_metadata(src_art) {
@@ -2737,7 +2748,13 @@ pub fn execute_action_with(
                 if builtin_ijar && rel == exe_first {
                     continue;
                 }
-                if !exists_in_action_fs(fs, execroot, rel, true, remote_runner) {
+                if !exists_in_action_fs(
+                    fs,
+                    execroot,
+                    rel,
+                    !input.is_unresolved_symlink,
+                    remote_runner,
+                ) {
                     if input.is_source {
                         let lbl = input.owner_label.canonical_form();
                         missing_sources.push(format!(
@@ -2850,6 +2867,7 @@ pub fn execute_action_with(
                             enable_runfiles: spec.enable_runfiles,
                             legacy_external_runfiles: spec.legacy_external_runfiles,
                             repo_mapping: spec.repo_mapping.clone(),
+                            unresolved_symlink_paths: spec.unresolved_symlink_paths.clone(),
                         };
                         let _ = crate::runfiles_tree::build_runfiles_tree(
                             er_path,

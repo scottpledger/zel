@@ -120,6 +120,100 @@ fn sandbox_moves_output_dirs_and_stages_tool_runfiles() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn sandbox_stages_tool_runfiles_preserving_relative_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("zel-sbx-relrf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let exec_root = root.join("execroot/_main");
+    let sbx_base = root.join("sandbox");
+    std::fs::create_dir_all(exec_root.join("external/ext_py/bin")).unwrap();
+    std::fs::create_dir_all(
+        exec_root.join("bazel-out/k8-opt-exec/bin/pylyglot/private/bundler.runfiles/_main/pylyglot/private/_bundler.venv/bin"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(
+        exec_root.join("bazel-out/k8-opt-exec/bin/pylyglot/private/bundler.runfiles/ext_py/bin"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(&sbx_base).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let exec_root = std::fs::canonicalize(&exec_root).unwrap();
+    let sbx_base = std::fs::canonicalize(&sbx_base).unwrap();
+
+    let real_py = exec_root.join("external/ext_py/bin/python3");
+    std::fs::write(&real_py, "#!/bin/sh\necho VENV_PYTHON_OK\n").unwrap();
+    std::fs::set_permissions(&real_py, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let tool_path = exec_root.join("bazel-out/k8-opt-exec/bin/pylyglot/private/bundler");
+    std::fs::write(&tool_path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&tool_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let rf = exec_root.join("bazel-out/k8-opt-exec/bin/pylyglot/private/bundler.runfiles");
+    std::os::unix::fs::symlink(&real_py, rf.join("ext_py/bin/python3")).unwrap();
+    let rel_target = "../../../../../ext_py/bin/python3";
+    std::os::unix::fs::symlink(
+        rel_target,
+        rf.join("_main/pylyglot/private/_bundler.venv/bin/python3"),
+    )
+    .unwrap();
+
+    let runner = SandboxRunner::new(
+        SandboxKind::ProcessWrapper,
+        &exec_root,
+        &sbx_base,
+        SandboxOptions::default(),
+        BTreeMap::new(),
+        None,
+    );
+    let venv_py = "bazel-out/k8-opt-exec/bin/pylyglot/private/bundler.runfiles/_main/pylyglot/private/_bundler.venv/bin/python3";
+    let spawn = Spawn {
+        mnemonic: "PylyglotBundle".into(),
+        owner_label: "//:bundle".into(),
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "mkdir -p bazel-out/k8-fastbuild/bin && readlink {venv_py} > bazel-out/k8-fastbuild/bin/link.txt && {venv_py} > bazel-out/k8-fastbuild/bin/out.txt"
+            ),
+        ],
+        inputs: vec![PathFragment::create(
+            "bazel-out/k8-opt-exec/bin/pylyglot/private/bundler",
+        )],
+        tool_inputs: vec![PathFragment::create(
+            "bazel-out/k8-opt-exec/bin/pylyglot/private/bundler",
+        )],
+        outputs: vec![
+            PathFragment::create("bazel-out/k8-fastbuild/bin/link.txt"),
+            PathFragment::create("bazel-out/k8-fastbuild/bin/out.txt"),
+        ],
+        ..Default::default()
+    };
+    let res = runner.exec(&spawn).unwrap();
+    assert_eq!(
+        res.status,
+        SpawnStatus::Success,
+        "{}",
+        String::from_utf8_lossy(&res.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(exec_root.join("bazel-out/k8-fastbuild/bin/link.txt"))
+            .unwrap()
+            .trim(),
+        rel_target
+    );
+    assert_eq!(
+        std::fs::read_to_string(exec_root.join("bazel-out/k8-fastbuild/bin/out.txt"))
+            .unwrap()
+            .trim(),
+        "VENV_PYTHON_OK"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn worker_pool_quota_counts_borrowed_only_and_parse_instances_keywords() {
     use zel_sandbox::worker::{create_worker_key, parse_instances_flag_opt};
