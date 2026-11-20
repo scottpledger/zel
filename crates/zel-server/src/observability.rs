@@ -1448,9 +1448,11 @@ impl BuildObserver {
                 } else {
                     let link_path = std::path::Path::new(&default_cmd_profile);
                     let _ = std::fs::remove_file(link_path);
-                    let target_name = format!("command-{}.profile.gz", self.invocation_id);
                     #[cfg(unix)]
-                    let linked = std::os::unix::fs::symlink(&target_name, link_path).is_ok();
+                    let linked = {
+                        let target_name = format!("command-{}.profile.gz", self.invocation_id);
+                        std::os::unix::fs::symlink(&target_name, link_path).is_ok()
+                    };
                     #[cfg(not(unix))]
                     let linked = false;
                     if !linked {
