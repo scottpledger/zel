@@ -757,17 +757,134 @@ fn test_edit_options_priorities_and_commands() {
 }
 
 #[test]
-fn test_starlark_flag_syntax_and_command_gating() {
-    // Non-analyzing commands reject --//...
-    for cmd in ["version", "info", "clean", "query"] {
-        let err = ParsedCommandOptions::parse_for_command(cmd, &["--//pkg:flag=val".to_string()])
-            .unwrap_err();
+fn test_starlark_flag_syntax_and_non_analysis_commands() {
+    // Bazel 9.3.2 `OptionsParserImpl` applies `STARLARK_SKIPPED_PREFIXES` (`--//`, `--@`,
+    // `--no//`, `--no@`, including canonical `--@@` and `--no@@`) on ALL commands, including
+    // non-analysis commands (`query`, `shutdown`, `version`, `info`, `clean`, `mod`).
+    let starlark_args = vec![
+        "--@rules_go//go/config:pure".to_string(),
+        "--//pkg:flag=val".to_string(),
+        "--no//pkg:bflag".to_string(),
+        "--no@repo//pkg:flag".to_string(),
+        "--@@canon//pkg:flag".to_string(),
+        "--no@@canon//pkg:neg_flag".to_string(),
+        "--@@canon//pkg:str_flag=hello".to_string(),
+    ];
+    for cmd in [
+        "query", "shutdown", "version", "info", "clean", "mod", "build",
+    ] {
+        let mut args = starlark_args.clone();
+        if cmd == "query" || cmd == "build" {
+            args.push("//...".to_string());
+        }
+        let parsed = ParsedCommandOptions::parse_for_command(cmd, &args)
+            .unwrap_or_else(|e| panic!("{cmd} should accept Starlark flags: {}", e.message));
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@rules_go//go/config:pure")
+                .map(String::as_str),
+            Some("true"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("//pkg:flag")
+                .map(String::as_str),
+            Some("val"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("//pkg:bflag")
+                .map(String::as_str),
+            Some("false"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@repo//pkg:flag")
+                .map(String::as_str),
+            Some("false"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@@canon//pkg:flag")
+                .map(String::as_str),
+            Some("true"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@@canon//pkg:neg_flag")
+                .map(String::as_str),
+            Some("false"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@@canon//pkg:str_flag")
+                .map(String::as_str),
+            Some("hello"),
+            "{cmd}"
+        );
+        if cmd == "query" || cmd == "build" {
+            assert_eq!(parsed.targets, vec!["//..."], "{cmd}");
+        } else {
+            assert!(
+                parsed.targets.is_empty(),
+                "{cmd} should have no residue targets: {:?}",
+                parsed.targets
+            );
+        }
+
+        // Truly invalid non-Starlark CLI flags must still be rejected.
+        let err = ParsedCommandOptions::parse_for_command(
+            cmd,
+            &["--totally_invalid_non_starlark_flag".to_string()],
+        )
+        .unwrap_err();
         assert!(
-            err.message.contains("Unrecognized option"),
+            err.message
+                .contains("Unrecognized option: --totally_invalid_non_starlark_flag"),
             "{cmd}: {}",
             err.message
         );
+
+        // Single-dash `-@` / `-//` must still be rejected with the Starlark syntax hint.
+        let single_dash_err = ParsedCommandOptions::parse_for_command(
+            cmd,
+            &["-@rules_go//go/config:pure".to_string()],
+        )
+        .unwrap_err();
+        assert!(
+            single_dash_err
+                .message
+                .contains("always start with '--', not '-'"),
+            "{cmd}: {}",
+            single_dash_err.message
+        );
     }
+
+    // `--//command_line_option:...` is skipped on non-analyzing commands without taking effect.
+    let q_clo = ParsedCommandOptions::parse_for_command(
+        "query",
+        &[
+            "--//command_line_option:output=xml".to_string(),
+            "--//command_line_option:copt=-O2".to_string(),
+            "//...".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(q_clo.query_output_format, "label");
+    assert_eq!(q_clo.targets, vec!["//..."]);
 
     // --no//pkg:flag=value keeps `no//pkg:flag` as the name
     let parsed = ParsedCommandOptions::parse_for_command(
@@ -788,6 +905,182 @@ fn test_starlark_flag_syntax_and_command_gating() {
         parsed.raw_starlark_args[1].next_non_flag_token.as_deref(),
         Some("5")
     );
+}
+
+#[test]
+fn test_common_rc_starlark_flags_across_non_analysis_and_build_commands() {
+    let fs = InMemoryFileSystem::default();
+    let ws = PathFragment::create("/workspace");
+    fs.create_directory_and_parents(&ws).unwrap();
+    let rc_content = "\
+common --@rules_go//go/config:pure
+common --//pkg:flag=val
+common --no@repo//pkg:flag
+common --@@canon//pkg:flag
+common --no@@canon//pkg:neg_flag
+common --copt=-O2
+";
+    let mut rc = BazelrcConfig::default();
+    let mut visited = HashSet::new();
+    rc.parse_str(rc_content, "/workspace/.bazelrc", &ws, &fs, &mut visited)
+        .unwrap();
+
+    for cmd in [
+        "query", "shutdown", "version", "info", "clean", "mod", "build",
+    ] {
+        let cli: Vec<String> = match cmd {
+            "query" | "build" => vec!["//...".to_string()],
+            "mod" => vec!["deps".to_string()],
+            _ => vec![],
+        };
+        let (expanded, notes) = rc
+            .expand_command_args_with_diagnostics(cmd, &cli)
+            .unwrap_or_else(|e| panic!("expand failed for {cmd}: {}", e.message));
+
+        // Starlark flags are never reported as "Ignored as unsupported" by `common`.
+        for note in &notes {
+            if let Some((_, ignored_line)) = note.split_once("Ignored as unsupported") {
+                assert!(
+                    !ignored_line.contains("--@rules_go//go/config:pure")
+                        && !ignored_line.contains("--//pkg:flag=val")
+                        && !ignored_line.contains("--no@repo//pkg:flag")
+                        && !ignored_line.contains("--@@canon//pkg:flag")
+                        && !ignored_line.contains("--no@@canon//pkg:neg_flag"),
+                    "{cmd} unexpectedly marked Starlark flag ignored: {note}"
+                );
+            }
+        }
+        // Build-only native `--copt=-O2` IS ignored on commands that don't support it.
+        if matches!(cmd, "query" | "shutdown" | "version" | "mod") {
+            assert!(
+                notes
+                    .iter()
+                    .any(|n| n.contains(&format!("Ignored as unsupported by '{cmd}': --copt=-O2"))),
+                "{cmd} should ignore --copt=-O2 in common: {notes:?}"
+            );
+        }
+
+        let parsed = ParsedCommandOptions::parse_for_command(cmd, &expanded)
+            .unwrap_or_else(|e| panic!("parse failed for {cmd}: {}", e.message));
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@rules_go//go/config:pure")
+                .map(String::as_str),
+            Some("true"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("//pkg:flag")
+                .map(String::as_str),
+            Some("val"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@repo//pkg:flag")
+                .map(String::as_str),
+            Some("false"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@@canon//pkg:flag")
+                .map(String::as_str),
+            Some("true"),
+            "{cmd}"
+        );
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@@canon//pkg:neg_flag")
+                .map(String::as_str),
+            Some("false"),
+            "{cmd}"
+        );
+        match cmd {
+            "query" | "build" => assert_eq!(parsed.targets, vec!["//..."]),
+            "mod" => assert_eq!(parsed.targets, vec!["deps"]),
+            _ => assert!(parsed.targets.is_empty(), "{cmd}: {:?}", parsed.targets),
+        }
+    }
+
+    // Truly unrecognized flag in `common` is still rejected on every command.
+    let mut bad_rc = BazelrcConfig::default();
+    let mut bad_visited = HashSet::new();
+    bad_rc
+        .parse_str(
+            "common --not_a_real_flag_anywhere\n",
+            "/workspace/.bazelrc",
+            &ws,
+            &fs,
+            &mut bad_visited,
+        )
+        .unwrap();
+    for cmd in ["query", "shutdown", "version", "info", "build"] {
+        let expanded = bad_rc.expand_command_args(cmd, &[]).unwrap();
+        let err = ParsedCommandOptions::parse_for_command(cmd, &expanded).unwrap_err();
+        assert!(
+            err.message
+                .contains("Unrecognized option: --not_a_real_flag_anywhere"),
+            "{cmd}: {}",
+            err.message
+        );
+    }
+
+    // `common --flag_alias` + `common --<alias>` works on commands supporting `flag_alias`
+    // (`query`, `info`, `build`) and rejects `--<alias>` on commands without `flag_alias` (`version`).
+    let mut alias_rc = BazelrcConfig::default();
+    let mut alias_visited = HashSet::new();
+    alias_rc
+        .parse_str(
+            "common --flag_alias=pure=@rules_go//go/config:pure\ncommon --pure\n",
+            "/workspace/.bazelrc",
+            &ws,
+            &fs,
+            &mut alias_visited,
+        )
+        .unwrap();
+    for cmd in ["query", "info", "build"] {
+        let expanded = alias_rc.expand_command_args(cmd, &[]).unwrap();
+        let parsed = ParsedCommandOptions::parse_for_command(cmd, &expanded)
+            .unwrap_or_else(|e| panic!("{cmd}: {}", e.message));
+        assert_eq!(
+            parsed
+                .starlark_options
+                .get("@rules_go//go/config:pure")
+                .map(String::as_str),
+            Some("true"),
+            "{cmd}"
+        );
+    }
+    let ver_expanded = alias_rc.expand_command_args("version", &[]).unwrap();
+    let ver_err = ParsedCommandOptions::parse_for_command("version", &ver_expanded).unwrap_err();
+    assert!(
+        ver_err.message.contains("Unrecognized option: --pure"),
+        "{}",
+        ver_err.message
+    );
+
+    // `canonicalize-flags` accepts Starlark flags both before `--` and for non-analysis `--for_command`.
+    let canon_before = canonicalize_flags(&[
+        "--@rules_go//go/config:pure".to_string(),
+        "--".to_string(),
+        "--jobs=4".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(canon_before, vec!["--jobs=4"]);
+    let canon_query = canonicalize_flags(&[
+        "--for_command=query".to_string(),
+        "--".to_string(),
+        "--//pkg:flag=val".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(canon_query, vec!["--//pkg:flag=val"]);
 }
 
 #[test]

@@ -57,6 +57,15 @@ pub struct StarlarkOccurrence {
     pub next_non_flag_token: Option<String>,
 }
 
+/// Returns true iff `arg` starts with one of Bazel's `OptionsParser.STARLARK_SKIPPED_PREFIXES`
+/// (`--//`, `--@`, `--no//`, `--no@`), which also matches canonical repo prefixes (`--@@`, `--no@@`).
+pub(crate) fn is_starlark_skipped_prefix(arg: &str) -> bool {
+    arg.starts_with("--//")
+        || arg.starts_with("--@")
+        || arg.starts_with("--no//")
+        || arg.starts_with("--no@")
+}
+
 /// Returns true iff `command` runs analysis (`Command.BuildPhase.analyzes()`).
 pub fn command_analyzes(command: &str) -> bool {
     matches!(
@@ -629,10 +638,7 @@ impl ParsedCommandOptions {
             let rewritten_native;
             let mut from_command_line_option_label = false;
             let arg = if analyzes {
-                let candidate = if !arg.starts_with("--//")
-                    && !arg.starts_with("--@")
-                    && !arg.starts_with("--no//")
-                    && !arg.starts_with("--no@")
+                let candidate = if !is_starlark_skipped_prefix(arg)
                     && arg.starts_with("--no")
                     && !arg.contains('=')
                 {
@@ -655,14 +661,13 @@ impl ParsedCommandOptions {
                 arg
             };
 
-            // 3. Starlark flags (`STARLARK_SKIPPED_PREFIXES`: `--//`, `--@`, `--no//`, `--no@`)
-            // Only recognized on commands that analyze (`BlazeOptionHandler.parseStarlarkOptions`).
-            if analyzes
-                && (arg.starts_with("--//")
-                    || arg.starts_with("--@")
-                    || arg.starts_with("--no//")
-                    || arg.starts_with("--no@"))
-            {
+            // 3. Starlark flags (`STARLARK_SKIPPED_PREFIXES`: `--//`, `--@`, `--no//`, `--no@`,
+            // which also covers canonical `--@@` and `--no@@` labels).
+            // `OptionsParserImpl` skips these prefixes on all commands (including non-analysis
+            // commands such as `query`, `version`, `info`, `shutdown`, `clean`, and `mod`);
+            // `StarlarkOptionsParser` loading/validation only runs on analyzing commands (plus
+            // `canonicalize-flags`).
+            if is_starlark_skipped_prefix(arg) {
                 self.skipped_args.push(SkippedArg {
                     raw_arg: arg.to_string(),
                     priority: priority.clone(),
@@ -1693,12 +1698,7 @@ pub fn split_unsupported_common_args(command: &str, args: &[String]) -> (Vec<Str
             kept.extend_from_slice(&args[i..]);
             break;
         }
-        if !arg.starts_with('-')
-            || arg.starts_with("--//")
-            || arg.starts_with("--@")
-            || arg.starts_with("--no//")
-            || arg.starts_with("--no@")
-        {
+        if !arg.starts_with('-') || is_starlark_skipped_prefix(arg) {
             kept.push(arg.clone());
             i += 1;
             continue;
