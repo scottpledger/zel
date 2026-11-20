@@ -1535,6 +1535,82 @@ fn test_unreachable_remote_cache_fails_first_spawn_with_remote_error() {
 }
 
 #[test]
+fn test_grpcs_handshake_failure_surfaces_real_tls_error_not_dns() {
+    use std::io::{Read, Write};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return,
+        Err(e) => panic!("{e}"),
+    };
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_srv = stop.clone();
+    let srv = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            if !stop_srv.load(Ordering::SeqCst) {
+                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = [0u8; 64];
+                let _ = s.read(&mut buf);
+                // Speak plaintext HTTP instead of TLS so OpenSSL fails the TLS handshake.
+                let _ = s.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n");
+                let _ = s.flush();
+            }
+        }
+    });
+
+    struct ServerGuard {
+        port: u16,
+        stop: Arc<AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for ServerGuard {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], self.port)),
+                std::time::Duration::from_secs(1),
+            );
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+    let _srv_guard = ServerGuard {
+        port,
+        stop,
+        handle: Some(srv),
+    };
+
+    let w = make_ws("remote-tls-err");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n",
+    );
+    let r = w.run(&[
+        "build",
+        &format!("--remote_cache=grpcs://127.0.0.1:{port}"),
+        "--remote_retries=0",
+        "--remote_timeout=5s",
+        "//pkg:g",
+    ]);
+    assert_eq!(r.code, 34, "{}", r.err);
+    assert!(
+        !r.err.contains("Unable to resolve host"),
+        "real TLS handshake failure must not be disguised as a DNS error:\n{}",
+        r.err
+    );
+    assert!(
+        r.err.contains("Executing genrule //pkg:g failed: Failed to query remote execution capabilities: UNAVAILABLE: connection failed:"),
+        "expected real TLS connection error in output:\n{}",
+        r.err
+    );
+}
+
+#[test]
 fn test_disk_cache_hit_materializes_top_level_output() {
     let w = make_ws("disk-cache-hit");
     w.write(

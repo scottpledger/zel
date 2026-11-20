@@ -606,28 +606,7 @@ pub(crate) fn build_runtime(
                         .clone()
                         .or_else(|| cfg.remote.remote_cache.clone())
                         .unwrap_or_default();
-                    let auth = target
-                        .split("://")
-                        .last()
-                        .unwrap_or("")
-                        .split('/')
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
-                    let (host, port) = auth
-                        .rsplit_once(':')
-                        .map(|(h, p)| (h.to_string(), p.to_string()))
-                        .unwrap_or((auth.clone(), String::new()));
-                    let cause = if msg.contains("Connection refused") {
-                        if host == "localhost" {
-                            format!("finishConnect(..) failed: Connection refused: localhost/[0:0:0:0:0:0:0:1]:{port}")
-                        } else {
-                            format!("finishConnect(..) failed: Connection refused: /{host}:{port}")
-                        }
-                    } else {
-                        format!("UNAVAILABLE: Unable to resolve host {host}")
-                    };
-                    remote_setup_error = Some(cause);
+                    remote_setup_error = Some(format_remote_setup_error(&target, &msg));
                     None
                 }
             }
@@ -652,6 +631,64 @@ pub(crate) fn build_runtime(
         allowed_local_actions_regex: cfg.allowed_local_actions,
         remote_setup_error,
     }))
+}
+
+fn parse_remote_host_port(target: &str) -> (String, String) {
+    let auth = target
+        .split("://")
+        .last()
+        .unwrap_or("")
+        .split('/')
+        .next()
+        .unwrap_or("");
+    if let Some(rest) = auth.strip_prefix('[') {
+        if let Some((host, after)) = rest.split_once(']') {
+            let port = after.strip_prefix(':').unwrap_or("");
+            return (host.to_string(), port.to_string());
+        }
+    }
+    match auth.rsplit_once(':') {
+        Some((h, p))
+            if !h.contains(':') && !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            (h.to_string(), p.to_string())
+        }
+        _ => (auth.to_string(), String::new()),
+    }
+}
+
+fn is_host_resolution_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("failed to lookup address information")
+        || lower.contains("no addresses resolved")
+        || lower.contains("name or service not known")
+        || lower.contains("nodename nor servname provided")
+        || lower.contains("no such host is known")
+        || lower.contains("temporary failure in name resolution")
+        || lower.contains("no address associated with hostname")
+        || lower.contains("non-recoverable failure in name resolution")
+        || lower.contains("unable to resolve host")
+}
+
+fn format_remote_setup_error(target: &str, msg: &str) -> String {
+    if target.starts_with("unix:") {
+        return msg.to_string();
+    }
+    let (host, port) = parse_remote_host_port(target);
+    if (msg.contains("Connection refused") || msg.contains("actively refused")) && !host.is_empty()
+    {
+        if host == "localhost" {
+            format!(
+                "finishConnect(..) failed: Connection refused: localhost/[0:0:0:0:0:0:0:1]:{port}"
+            )
+        } else {
+            format!("finishConnect(..) failed: Connection refused: /{host}:{port}")
+        }
+    } else if is_host_resolution_error(msg) && !host.is_empty() {
+        format!("UNAVAILABLE: Unable to resolve host {host}")
+    } else {
+        msg.to_string()
+    }
 }
 
 pub(crate) struct BuildOutcome {
@@ -4975,5 +5012,73 @@ mod test_bep_outputs_tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod remote_setup_error_tests {
+    use super::format_remote_setup_error;
+
+    #[test]
+    fn remote_setup_error_preserves_tls_and_transport_failures() {
+        // Connection refused keeps Bazel-parity message for localhost and explicit hosts.
+        assert_eq!(
+            format_remote_setup_error(
+                "grpc://localhost:1",
+                "UNAVAILABLE: connection failed: Connection refused (os error 111)"
+            ),
+            "finishConnect(..) failed: Connection refused: localhost/[0:0:0:0:0:0:0:1]:1"
+        );
+        assert_eq!(
+            format_remote_setup_error(
+                "grpc://127.0.0.1:9999",
+                "UNAVAILABLE: connection failed: Connection refused (os error 111)"
+            ),
+            "finishConnect(..) failed: Connection refused: /127.0.0.1:9999"
+        );
+        assert_eq!(
+            format_remote_setup_error(
+                "grpcs://[::1]:8443",
+                "UNAVAILABLE: connection failed: Connection refused (os error 111)"
+            ),
+            "finishConnect(..) failed: Connection refused: /::1:8443"
+        );
+
+        // Genuine DNS resolution errors map to UNAVAILABLE: Unable to resolve host.
+        for dns_err in [
+            "UNAVAILABLE: connection failed: failed to lookup address information: Name or service not known",
+            "UNAVAILABLE: connection failed: failed to lookup address information: nodename nor servname provided, or not known",
+            "UNAVAILABLE: connection failed: failed to lookup address information: No such host is known.",
+            "UNAVAILABLE: connection failed: no addresses resolved",
+        ] {
+            assert_eq!(
+                format_remote_setup_error("grpcs://no-such-host.invalid:443", dns_err),
+                "UNAVAILABLE: Unable to resolve host no-such-host.invalid",
+                "dns_err={dns_err}"
+            );
+        }
+
+        // TLS/handshake/OpenSSL/timeout/HTTP2 errors must NOT be replaced with a fake DNS error.
+        for real_err in [
+            "UNAVAILABLE: connection failed: depth=0 CN = other\nverify error:num=62:hostname mismatch",
+            "UNAVAILABLE: connection failed: TLS requires OpenSSL 1.1+ or 3+ with s_client -verify_hostname/-verify_ip support, but only found LibreSSL 3.3.6 (at openssl)",
+            "UNAVAILABLE: connection failed: TLS connection/handshake timed out after 5s",
+            "UNAVAILABLE: h2 handshake failed: unexpected end of file",
+            "UNAVAILABLE: upstream backend temporarily overloaded",
+        ] {
+            let formatted = format_remote_setup_error("grpcs://remote.example.com:443", real_err);
+            assert_eq!(formatted, real_err);
+            assert!(
+                !formatted.contains("Unable to resolve host"),
+                "must not fabricate DNS error: {formatted}"
+            );
+        }
+
+        // Unix socket targets preserve the real error verbatim.
+        let unix_err = "UNAVAILABLE: connection failed: Connection refused (os error 111)";
+        assert_eq!(
+            format_remote_setup_error("unix:/tmp/remote.sock", unix_err),
+            unix_err
+        );
     }
 }
