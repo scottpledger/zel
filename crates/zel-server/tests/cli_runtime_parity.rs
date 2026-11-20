@@ -235,8 +235,14 @@ genrule(name = "g", outs = ["g.out"], cmd = "echo hi > $@")
         "7"
     );
 
-    // Non-analyzing command rejects --//...
+    // Non-analyzing commands accept Starlark flags via STARLARK_SKIPPED_PREFIXES without loading them,
+    // while still rejecting truly unrecognized non-Starlark flags.
     let r = w.run(&["version", "--//p:i=7"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    let r = w.run(&["query", "--@rules_go//go/config:pure", "//p:g"]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("//p:g"), "{}", r.out);
+    let r = w.run(&["version", "--not_a_real_flag"]);
     assert_eq!(r.code, 2, "{}", r.err);
     assert!(r.err.contains("Unrecognized option"), "{}", r.err);
 }
