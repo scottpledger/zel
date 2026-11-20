@@ -474,9 +474,10 @@ impl BuildObserver {
                 let uses_remote = opt_last(p, "remote_cache").is_some_and(|v| !v.is_empty())
                     || opt_last(p, "remote_executor").is_some_and(|v| !v.is_empty());
                 if uses_remote {
-                    if let Ok(ropts) =
+                    if let Ok(mut ropts) =
                         zel_remote::options::RemoteOptions::from_source(&BepRemoteSource(p))
                     {
+                        ropts.set_client_env(client_env.clone());
                         let target = ropts
                             .remote_cache
                             .as_deref()

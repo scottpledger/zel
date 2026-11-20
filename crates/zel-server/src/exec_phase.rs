@@ -504,6 +504,7 @@ pub(crate) fn build_runtime(
         .unwrap_or_else(|| "_main".into());
     // The command's client environment (`--client_env`), not the daemon's own.
     let client_env: BTreeMap<String, String> = client_env.clone();
+    cfg.remote.set_client_env(client_env.clone());
     let sandbox_base =
         sandbox::compute_sandbox_base(&output_base.to_string_lossy(), &cfg.sandbox.base);
     sandbox::initialize_sandbox_base(&sandbox_base)

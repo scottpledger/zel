@@ -459,6 +459,9 @@ pub struct RemoteOptions {
     pub capture_corrupted_outputs: Option<String>,
     pub guard_against_concurrent_changes: bool,
     pub build_request_id: Option<String>,
+    pub netrc: Option<String>,
+    pub client_env: BTreeMap<String, String>,
+    pub has_client_env: bool,
 }
 
 impl Default for RemoteOptions {
@@ -508,6 +511,9 @@ impl Default for RemoteOptions {
             capture_corrupted_outputs: None,
             guard_against_concurrent_changes: false,
             build_request_id: None,
+            netrc: None,
+            client_env: BTreeMap::new(),
+            has_client_env: false,
         }
     }
 }
@@ -774,6 +780,8 @@ impl RemoteOptions {
         {
             o.credential_helper_cache_duration = parse_duration(&v)?;
         }
+        o.netrc = nonempty(src.last("netrc")).and_then(|v| normalize_path_option(&v));
+
         if let Some(v) = src.last("digest_function") {
             o.digest_fn = DigestFn::parse(&v)?;
         }
@@ -878,6 +886,12 @@ impl RemoteOptions {
         }
     }
 
+    /// Supplies the invoking command's `client_env` (`NETRC`/`HOME`/`USERPROFILE`).
+    pub fn set_client_env(&mut self, env: BTreeMap<String, String>) {
+        self.client_env = env;
+        self.has_client_env = true;
+    }
+
     /// Builds the `CallCredentialsProvider` configured by `--credential_helper`,
     /// `--google_credentials`, `--google_default_credentials`, and `.netrc`.
     pub fn build_credentials_provider(
@@ -921,7 +935,17 @@ impl RemoteOptions {
             None
         };
 
-        let netrc = NetrcCredentialsProvider::from_env();
+        let netrc = if let Some(path) = &self.netrc {
+            Some(NetrcCredentialsProvider::from_file(Path::new(path))?)
+        } else if google.is_none() {
+            if self.has_client_env || !self.client_env.is_empty() {
+                NetrcCredentialsProvider::from_client_env(&self.client_env)?
+            } else {
+                NetrcCredentialsProvider::try_from_env()?
+            }
+        } else {
+            None
+        };
 
         if helper.is_none() && google.is_none() && netrc.is_none() {
             return Ok(None);
@@ -1406,5 +1430,40 @@ mod socket_tests {
         let c = o.build_client("inv").unwrap().unwrap();
         exercise(&c, &s);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn remote_options_client_env_netrc_missing_succeeds_and_malformed_errors() {
+        let tmp = std::env::temp_dir().join(format!("zel-remote-netrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let mut o_missing =
+            RemoteOptions::from_source(&options_from_args(&["--remote_cache=grpc://x:1"])).unwrap();
+        let mut env_missing = BTreeMap::new();
+        env_missing.insert(
+            "HOME".into(),
+            tmp.join("missing-home").to_string_lossy().into_owned(),
+        );
+        o_missing.set_client_env(env_missing);
+        assert!(o_missing
+            .build_credentials_provider(None)
+            .unwrap()
+            .is_none());
+
+        let bad_netrc = tmp.join("bad.netrc");
+        std::fs::write(&bad_netrc, "machine x login\n").unwrap();
+        let mut o_bad =
+            RemoteOptions::from_source(&options_from_args(&["--remote_cache=grpc://x:1"])).unwrap();
+        let mut env_bad = BTreeMap::new();
+        env_bad.insert("NETRC".into(), bad_netrc.to_string_lossy().into_owned());
+        o_bad.set_client_env(env_bad);
+        let err = match o_bad.build_credentials_provider(None) {
+            Err(e) => e,
+            Ok(_) => panic!("expected malformed client_env NETRC to error"),
+        };
+        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

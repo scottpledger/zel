@@ -1466,7 +1466,7 @@ impl NetrcCredentialsProvider {
 
     pub fn from_file(path: &Path) -> Result<Self, String> {
         let bytes =
-            std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+            std::fs::read(path).map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
         // ISO-8859-1 / Latin-1 decoding matching Bazel's NetrcParser.
         let text: String = bytes.into_iter().map(|b| b as char).collect();
         Self::parse(&text).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
@@ -1492,35 +1492,25 @@ impl NetrcCredentialsProvider {
         let Some(path) = candidate else {
             return Ok(None);
         };
-        if !path.is_file() {
-            return Ok(None);
+        match std::fs::metadata(&path) {
+            Ok(_) => Self::from_file(&path).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Failed to parse {}: {e}", path.display())),
         }
-        Self::from_file(&path).map(Some)
+    }
+
+    pub fn try_from_env() -> Result<Option<Self>, String> {
+        let mut env = BTreeMap::new();
+        for key in ["NETRC", "HOME", "USERPROFILE"] {
+            if let Ok(val) = std::env::var(key) {
+                env.insert(key.to_string(), val);
+            }
+        }
+        Self::from_client_env(&env)
     }
 
     pub fn from_env() -> Option<Self> {
-        let candidates = [
-            std::env::var("NETRC")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(PathBuf::from),
-            std::env::var("HOME")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|h| PathBuf::from(h).join(".netrc")),
-            std::env::var("USERPROFILE")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|h| PathBuf::from(h).join(".netrc")),
-        ];
-        for path in candidates.into_iter().flatten() {
-            if path.is_file() {
-                if let Ok(parsed) = Self::from_file(&path) {
-                    return Some(parsed);
-                }
-            }
-        }
-        None
+        Self::try_from_env().ok().flatten()
     }
 }
 
@@ -1876,5 +1866,90 @@ mod tests {
             ),
             "/tools/wild"
         );
+    }
+
+    #[test]
+    fn netrc_from_client_env_distinguishes_missing_from_malformed_or_unreadable() {
+        let tmp = std::env::temp_dir().join(format!("zel-netrc-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Empty client_env -> Ok(None).
+        assert!(NetrcCredentialsProvider::from_client_env(&BTreeMap::new())
+            .unwrap()
+            .is_none());
+
+        // Non-existent $HOME/.netrc -> Ok(None) (`GoogleAuthUtilsTest.testNetrc_netrcNotExist_shouldIgnore`).
+        let missing_home = tmp.join("missing-home");
+        let mut env_missing = BTreeMap::new();
+        env_missing.insert("HOME".into(), missing_home.to_string_lossy().into_owned());
+        assert!(NetrcCredentialsProvider::from_client_env(&env_missing)
+            .unwrap()
+            .is_none());
+
+        // Non-existent $NETRC does NOT fall back to an existing $HOME/.netrc
+        // (`GoogleAuthUtilsTest.testNetrc_netrcFromNetrcEnvNotExist_shouldIgnore`).
+        let valid_home = tmp.join("valid-home");
+        std::fs::create_dir_all(&valid_home).unwrap();
+        std::fs::write(
+            valid_home.join(".netrc"),
+            "machine foo.example.org login foouser password foopass\n",
+        )
+        .unwrap();
+        let mut env_netrc_missing = BTreeMap::new();
+        env_netrc_missing.insert("HOME".into(), valid_home.to_string_lossy().into_owned());
+        env_netrc_missing.insert(
+            "NETRC".into(),
+            tmp.join("does-not-exist.netrc")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(
+            NetrcCredentialsProvider::from_client_env(&env_netrc_missing)
+                .unwrap()
+                .is_none()
+        );
+
+        // Malformed .netrc via $HOME -> Err("Failed to parse ...").
+        let bad_home = tmp.join("bad-home");
+        std::fs::create_dir_all(&bad_home).unwrap();
+        std::fs::write(bad_home.join(".netrc"), "machine\n").unwrap();
+        let mut env_bad_home = BTreeMap::new();
+        env_bad_home.insert("HOME".into(), bad_home.to_string_lossy().into_owned());
+        let err = NetrcCredentialsProvider::from_client_env(&env_bad_home).unwrap_err();
+        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
+
+        // Unreadable path (directory at $NETRC) -> Err("Failed to parse ...").
+        let dir_netrc = tmp.join("dir.netrc");
+        std::fs::create_dir_all(&dir_netrc).unwrap();
+        let mut env_dir = BTreeMap::new();
+        env_dir.insert("NETRC".into(), dir_netrc.to_string_lossy().into_owned());
+        let dir_err = NetrcCredentialsProvider::from_client_env(&env_dir).unwrap_err();
+        assert!(
+            dir_err.contains("Failed to parse"),
+            "unexpected error: {dir_err}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable = tmp.join("unreadable.netrc");
+            std::fs::write(&unreadable, "machine foo login a password b\n").unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Only assert permission error when not running as root (root bypasses mode 000).
+            if std::fs::File::open(&unreadable).is_err() {
+                let mut env_unreadable = BTreeMap::new();
+                env_unreadable.insert("NETRC".into(), unreadable.to_string_lossy().into_owned());
+                let perm_err =
+                    NetrcCredentialsProvider::from_client_env(&env_unreadable).unwrap_err();
+                assert!(
+                    perm_err.contains("Failed to parse"),
+                    "unexpected error: {perm_err}"
+                );
+            }
+            let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
