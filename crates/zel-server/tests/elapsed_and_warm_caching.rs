@@ -1,8 +1,147 @@
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::Duration;
 use zel_proto::command_server::RunRequest;
 use zel_server::{BlazeDirectories, BlazeRuntime};
 use zel_vfs::{FileSystem, LocalFileSystem, PathFragment};
+
+/// Strips Windows verbatim UNC prefixes (`\\?\`) produced by `std::fs::canonicalize` so paths
+/// work uniformly in Starlark files, CLI flags, and `cmd.exe`.
+fn strip_unc_prefix(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = p.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    p
+}
+
+/// Formats a filesystem path with forward slashes (and no Windows `\\?\` prefix) so it can be
+/// safely interpolated into Starlark string literals without invalid backslash escapes.
+fn starlark_path(p: &Path) -> String {
+    let s = strip_unc_prefix(p.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
+    s.replace('\\', "/")
+}
+
+/// Formats an arbitrary string as a properly escaped Starlark double-quoted string literal.
+fn starlark_str_lit(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Returns a cross-platform Starlark statement (indented for a 4-space function body) that
+/// appends `line` to `path` via `{ctx_var}.execute(...)` and fails loudly on non-zero exit.
+fn starlark_append_line_exec(ctx_var: &str, path: &Path, line: &str) -> String {
+    #[cfg(windows)]
+    {
+        let win_path = strip_unc_prefix(path.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        // `ctx.rs` passes `raw_arg` when argv[0] == "cmd.exe"; `/s` strips the outer quotes so
+        // paths containing spaces work without Rust's `\"` escaping interfering with cmd.exe.
+        let cmd_raw = format!("\"echo {line}>>\"{win_path}\"\"");
+        format!(
+            "_res = {ctx_var}.execute([\"cmd.exe\", \"/d\", \"/s\", \"/c\", {}])\n    if _res.return_code != 0:\n        fail(\"append failed: \" + _res.stderr)",
+            starlark_str_lit(&cmd_raw)
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let sh_cmd = format!("echo {line} >> '{}'", starlark_path(path));
+        format!(
+            "_res = {ctx_var}.execute([\"/bin/sh\", \"-c\", {}])\n    if _res.return_code != 0:\n        fail(\"append failed: \" + _res.stderr)",
+            starlark_str_lit(&sh_cmd)
+        )
+    }
+}
+
+/// Minimal loopback HTTP server that sleeps before replying, providing deterministic,
+/// OS-independent fetch latency in repository rules without relying on `/bin/sh` or `sleep`.
+struct SlowHttpServer {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl SlowHttpServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_bg = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                if stop_bg.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                if stop_bg.load(Ordering::SeqCst) || n == 0 {
+                    continue;
+                }
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let first_line = req.lines().next().unwrap_or("");
+                let (delay_ms, body) = if first_line.contains("/slow250") {
+                    (260u64, "hello\n")
+                } else {
+                    (210u64, "hello2\n")
+                };
+                std::thread::sleep(Duration::from_millis(delay_ms));
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        Self {
+            port,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{path}", self.port)
+    }
+}
+
+impl Drop for SlowHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(("127.0.0.1", self.port));
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 struct Ws {
     ws: PathBuf,
@@ -19,7 +158,7 @@ impl Ws {
         let _ = std::fs::remove_dir_all(&root);
         let ws_dir = root.join("ws");
         std::fs::create_dir_all(&ws_dir).unwrap();
-        let root = std::fs::canonicalize(&root).unwrap();
+        let root = strip_unc_prefix(std::fs::canonicalize(&root).unwrap());
         let ws_dir = root.join("ws");
         std::fs::write(ws_dir.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
         std::fs::write(ws_dir.join("BUILD"), "").unwrap();
@@ -89,6 +228,7 @@ fn parse_elapsed_secs(stderr: &str) -> Option<f64> {
 #[test]
 fn elapsed_time_includes_bzlmod_and_loading_not_just_execution() {
     let w = Ws::new("elapsed-full");
+    let srv = SlowHttpServer::start();
     w.write(
         "MODULE.bazel",
         r#"
@@ -99,11 +239,15 @@ use_repo(ext, "slow_repo")
     );
     w.write(
         "ext.bzl",
-        r#"
+        &format!(
+            r#"
 def _repo_impl(rctx):
-    rctx.execute(["/bin/sh", "-c", "sleep 0.25"])
+    rctx.download(
+        url = {url},
+        output = "data.txt",
+        sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+    )
     rctx.file("BUILD.bazel", 'exports_files(["data.txt"])\n')
-    rctx.file("data.txt", "hello\n")
 
 _slow_repo = repository_rule(
     implementation = _repo_impl,
@@ -115,21 +259,51 @@ def _ext_impl(mctx):
 
 ext = module_extension(implementation = _ext_impl)
 "#,
+            url = starlark_str_lit(&srv.url("/slow250")),
+        ),
+    );
+    w.write(
+        "defs.bzl",
+        r#"
+def _copy_impl(ctx):
+    out = ctx.actions.declare_file("out.txt")
+    ctx.actions.expand_template(
+        template = ctx.file.src,
+        output = out,
+        substitutions = {},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+copy_file = rule(
+    implementation = _copy_impl,
+    attrs = {"src": attr.label(allow_single_file = True, mandatory = True)},
+)
+"#,
     );
     w.write(
         "BUILD",
         r#"
-genrule(
+load("//:defs.bzl", "copy_file")
+copy_file(
     name = "fast",
-    srcs = ["@slow_repo//:data.txt"],
-    outs = ["out.txt"],
-    cmd = "cp $< $@",
+    src = "@slow_repo//:data.txt",
 )
 "#,
     );
 
-    let (code, _, err) = w.run(&["build", "--lockfile_mode=off", "//:fast"]);
+    let (code, _, err) = w.run(&[
+        "build",
+        "--lockfile_mode=off",
+        "--repository_cache=",
+        "//:fast",
+    ]);
     assert_eq!(code, 0, "{err}");
+    assert_eq!(
+        std::fs::read_to_string(w.bin_dir().join("out.txt"))
+            .unwrap()
+            .trim(),
+        "hello"
+    );
     let elapsed =
         parse_elapsed_secs(&err).unwrap_or_else(|| panic!("missing INFO: Elapsed time in:\n{err}"));
     assert!(
@@ -140,11 +314,15 @@ genrule(
     // Target pattern failure should also report real command elapsed time (not hardcoded 0.050s).
     w.write(
         "ext.bzl",
-        r#"
+        &format!(
+            r#"
 def _repo_impl(rctx):
-    rctx.execute(["/bin/sh", "-c", "sleep 0.20"])
+    rctx.download(
+        url = {url},
+        output = "data.txt",
+        sha256 = "167112362adb3b2041c11f7337437872f9d821e57e8c3edd68d87a1d0babd0f5",
+    )
     rctx.file("BUILD.bazel", 'exports_files(["data.txt"])\n')
-    rctx.file("data.txt", "hello2\n")
 
 _slow_repo = repository_rule(
     implementation = _repo_impl,
@@ -156,8 +334,15 @@ def _ext_impl(mctx):
 
 ext = module_extension(implementation = _ext_impl)
 "#,
+            url = starlark_str_lit(&srv.url("/slow200")),
+        ),
     );
-    let (code_bad, _, err_bad) = w.run(&["build", "--lockfile_mode=off", "@slow_repo//:missing"]);
+    let (code_bad, _, err_bad) = w.run(&[
+        "build",
+        "--lockfile_mode=off",
+        "--repository_cache=",
+        "@slow_repo//:missing",
+    ]);
     assert_ne!(code_bad, 0);
     let elapsed_bad = parse_elapsed_secs(&err_bad)
         .unwrap_or_else(|| panic!("missing INFO: Elapsed time in:\n{err_bad}"));
@@ -187,10 +372,10 @@ use_repo(ext, "local_data")
         &format!(
             r#"
 def _repo_impl(rctx):
-    rctx.execute(["/bin/sh", "-c", "echo fetch >> {fetch}"])
+    {append_fetch}
     val = rctx.read(Label("//:watched.txt")).strip()
     rctx.file("BUILD.bazel", 'exports_files(["val.txt"])\n')
-    rctx.file("val.txt", val + "\n")
+    rctx.file("val.txt", "PREFIX:" + val + "\n")
 
 _local_repo = repository_rule(
     implementation = _repo_impl,
@@ -198,13 +383,13 @@ _local_repo = repository_rule(
 )
 
 def _ext_impl(mctx):
-    mctx.execute(["/bin/sh", "-c", "echo ext >> {ext}"])
+    {append_ext}
     _local_repo(name = "local_data")
 
 ext = module_extension(implementation = _ext_impl)
 "#,
-            fetch = fetch_log.display(),
-            ext = ext_log.display(),
+            append_fetch = starlark_append_line_exec("rctx", &fetch_log, "fetch"),
+            append_ext = starlark_append_line_exec("mctx", &ext_log, "ext"),
         ),
     );
     w.write(
@@ -213,10 +398,10 @@ ext = module_extension(implementation = _ext_impl)
 def _emit_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".out")
     inp = ctx.file.src
-    ctx.actions.run_shell(
-        inputs = [inp],
-        outputs = [out],
-        command = "printf '%s:' '" + ctx.attr.tag + "' > " + out.path + " && cat " + inp.path + " >> " + out.path,
+    ctx.actions.expand_template(
+        template = inp,
+        output = out,
+        substitutions = {"PREFIX:": ctx.attr.tag + ":"},
     )
     return [DefaultInfo(files = depset([out]))]
 
@@ -351,10 +536,10 @@ emit(name = "app", src = "@local_data//:val.txt", tag = "t3")
 def _emit_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".out")
     inp = ctx.file.src
-    ctx.actions.run_shell(
-        inputs = [inp],
-        outputs = [out],
-        command = "printf 'bzl2:%s:' '" + ctx.attr.tag + "' > " + out.path + " && cat " + inp.path + " >> " + out.path,
+    ctx.actions.expand_template(
+        template = inp,
+        output = out,
+        substitutions = {"PREFIX:": "bzl2:" + ctx.attr.tag + ":"},
     )
     return [DefaultInfo(files = depset([out]))]
 
@@ -644,7 +829,6 @@ consumer(name = "out")
 fn bzlmod_option_changes_invalidate_cached_session() {
     let w = Ws::new("bzlmod-opts-invalidation");
     let ext_log = w.root.join("ext.log");
-    let ext_log_s = ext_log.to_string_lossy().replace('\\', "/");
 
     // Two alternative local modules for testing --override_module invalidation.
     let mod_v1 = w.root.join("dep_v1");
@@ -682,7 +866,7 @@ def _ext_impl(mctx):
 ext = module_extension(implementation = _ext_impl)
 
 def _counted_impl(rctx):
-    rctx.execute(["/bin/sh", "-c", "echo run >> '{ext_log_s}'"])
+    {append_run}
     rctx.file("BUILD", 'exports_files(["marker.txt"])\n')
     rctx.file("marker.txt", "ok\n")
 
@@ -692,7 +876,8 @@ def _counted_ext_impl(mctx):
     counted_repo(name = "counted")
 
 counted_ext = module_extension(implementation = _counted_ext_impl)
-"#
+"#,
+            append_run = starlark_append_line_exec("rctx", &ext_log, "run"),
         ),
     );
     w.write(
@@ -703,24 +888,47 @@ module(name = "opts_ws", version = "1.0.0")
 bazel_dep(name = "dep_mod", version = "1.0.0")
 local_path_override(
     module_name = "dep_mod",
-    path = "{}",
+    path = {mod_v1},
 )
 ext = use_extension("//:ext.bzl", "ext", dev_dependency = True)
 use_repo(ext, "dev_only_repo")
 cext = use_extension("//:ext.bzl", "counted_ext")
 use_repo(cext, "counted")
 "#,
-            mod_v1.to_string_lossy().replace('\\', "/")
+            mod_v1 = starlark_str_lit(&starlark_path(&mod_v1)),
         ),
+    );
+    w.write(
+        "defs.bzl",
+        r#"
+def _copy_app_impl(ctx):
+    out = ctx.actions.declare_file("app.txt")
+    # Reference marker so `@counted` is loaded and fetched.
+    _marker = ctx.file.marker
+    ctx.actions.expand_template(
+        template = ctx.file.src,
+        output = out,
+        substitutions = {},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+copy_app = rule(
+    implementation = _copy_app_impl,
+    attrs = {
+        "src": attr.label(allow_single_file = True, mandatory = True),
+        "marker": attr.label(allow_single_file = True, mandatory = True),
+    },
+)
+"#,
     );
     w.write(
         "BUILD",
         r#"
-genrule(
+load("//:defs.bzl", "copy_app")
+copy_app(
     name = "app",
-    srcs = ["@dep_mod//:val.txt", "@counted//:marker.txt"],
-    outs = ["app.txt"],
-    cmd = "cat $(location @dep_mod//:val.txt) > $@",
+    src = "@dep_mod//:val.txt",
+    marker = "@counted//:marker.txt",
 )
 "#,
     );
@@ -861,10 +1069,12 @@ fn cli_aspects_deps_are_reachable_and_do_not_leak_to_warm_builds() {
     w.write(
         "dep/BUILD",
         r#"
-genrule(
+load("//:defs.bzl", "write_file_rule")
+
+write_file_rule(
     name = "old",
-    outs = ["old.txt"],
-    cmd = "echo from_aspect_extra > $@",
+    out_name = "old.txt",
+    content = "from_aspect_extra\n",
     deprecation = "old aspect helper is deprecated",
     visibility = ["//visibility:public"],
 )
@@ -873,11 +1083,12 @@ genrule(
     w.write(
         "extra/BUILD",
         r#"
-genrule(
+load("//:defs.bzl", "copy_file_rule")
+
+copy_file_rule(
     name = "aspect_extra",
-    srcs = ["//dep:old"],
-    outs = ["aspect_extra.txt"],
-    cmd = "cat $< > $@",
+    src = "//dep:old",
+    out_name = "aspect_extra.txt",
     visibility = ["//visibility:public"],
 )
 "#,
@@ -885,6 +1096,37 @@ genrule(
     w.write(
         "defs.bzl",
         r#"
+def _write_file_impl(ctx):
+    out = ctx.actions.declare_file(ctx.attr.out_name)
+    ctx.actions.write(output = out, content = ctx.attr.content)
+    return [DefaultInfo(files = depset([out]))]
+
+write_file_rule = rule(
+    implementation = _write_file_impl,
+    attrs = {
+        "out_name": attr.string(mandatory = True),
+        "content": attr.string(mandatory = True),
+    },
+)
+
+def _copy_file_impl(ctx):
+    out = ctx.actions.declare_file(ctx.attr.out_name)
+    src_file = ctx.attr.src[DefaultInfo].files.to_list()[0]
+    ctx.actions.expand_template(
+        template = src_file,
+        output = out,
+        substitutions = {},
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+copy_file_rule = rule(
+    implementation = _copy_file_impl,
+    attrs = {
+        "src": attr.label(mandatory = True),
+        "out_name": attr.string(mandatory = True),
+    },
+)
+
 def _leaf_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".leaf.txt")
     ctx.actions.write(out, "leaf\n")
@@ -905,10 +1147,10 @@ parent_rule = rule(
 def _my_aspect_impl(target, ctx):
     extra_files = ctx.attr._extra[DefaultInfo].files.to_list()
     out = ctx.actions.declare_file(target.label.name + ".aspect.txt")
-    ctx.actions.run_shell(
-        inputs = extra_files,
-        outputs = [out],
-        command = "cat %s > %s" % (extra_files[0].path, out.path),
+    ctx.actions.expand_template(
+        template = extra_files[0],
+        output = out,
+        substitutions = {},
     )
     transitive = [out]
     for d in getattr(ctx.rule.attr, "deps", []):
