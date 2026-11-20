@@ -426,6 +426,56 @@ pub fn encode_sandbox_statistics(usage: &ResourceUsage, cgroups_dirs: &[String])
     adjusted.encode_execution_statistics()
 }
 
+/// Normalizes a Unix mount path by stripping trailing `/` characters (preserving `"/"`).
+pub fn normalize_mnt_key(p: &str) -> String {
+    let trimmed = p.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Maps a raw `-W` / `-w` / `-e` / `-m` path under a hermetic `-h` sandbox root (`sbx`, with
+/// optional canonical host path `canon_sbx`) into `(host_path_under_sbx, inner_path_after_pivot)`.
+pub fn to_hermetic_paths(
+    sbx: &str,
+    canon_sbx: Option<&str>,
+    raw_path: &str,
+) -> (std::path::PathBuf, String) {
+    let norm_sbx = normalize_mnt_key(sbx);
+    let norm_canon = canon_sbx.map(normalize_mnt_key);
+    let norm_raw = normalize_mnt_key(raw_path);
+    if norm_raw == norm_sbx || norm_raw == "/" || norm_canon.as_deref() == Some(norm_raw.as_str()) {
+        return (std::path::PathBuf::from(&norm_sbx), "/".to_string());
+    }
+    if let Some(rel) = norm_raw
+        .strip_prefix(&norm_sbx)
+        .and_then(|r| r.strip_prefix('/'))
+    {
+        return (
+            std::path::PathBuf::from(format!("{norm_sbx}/{rel}")),
+            format!("/{rel}"),
+        );
+    }
+    if let Some(csbx) = norm_canon.as_deref() {
+        if let Some(rel) = norm_raw
+            .strip_prefix(csbx)
+            .and_then(|r| r.strip_prefix('/'))
+        {
+            return (
+                std::path::PathBuf::from(format!("{norm_sbx}/{rel}")),
+                format!("/{rel}"),
+            );
+        }
+    }
+    let rel = norm_raw.trim_start_matches('/');
+    (
+        std::path::PathBuf::from(format!("{norm_sbx}/{rel}")),
+        format!("/{rel}"),
+    )
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use super::*;
@@ -583,32 +633,11 @@ mod imp {
             .map_err(|_| format!("path contains NUL: {}", p.display()))
     }
 
-    fn normalize_mnt_key(p: &str) -> String {
-        let trimmed = p.trim_end_matches('/');
-        if trimmed.is_empty() {
-            "/".to_string()
-        } else {
-            trimmed.to_string()
-        }
-    }
-
     fn insert_writable_mount(writable_mounts: &mut HashSet<String>, path: &str) {
         writable_mounts.insert(normalize_mnt_key(path));
         if let Ok(canon) = std::fs::canonicalize(path) {
             writable_mounts.insert(normalize_mnt_key(&canon.to_string_lossy()));
         }
-    }
-
-    fn to_hermetic_paths(sbx: &str, raw_path: &str) -> (PathBuf, String) {
-        let norm_raw = normalize_mnt_key(raw_path);
-        if norm_raw == sbx || norm_raw == "/" {
-            return (PathBuf::from(sbx), "/".to_string());
-        }
-        if let Some(rel) = norm_raw.strip_prefix(sbx).and_then(|r| r.strip_prefix('/')) {
-            return (PathBuf::from(&norm_raw), format!("/{rel}"));
-        }
-        let rel = norm_raw.trim_start_matches('/');
-        (Path::new(sbx).join(rel), format!("/{rel}"))
     }
 
     unsafe fn ensure_standard_fds() {
@@ -925,6 +954,9 @@ mod imp {
         let target_cwd = if let Some(sbx_raw) = &opt.hermetic_sandbox_dir {
             let sbx = normalize_mnt_key(sbx_raw);
             let sp = Path::new(&sbx);
+            let canon_sbx = std::fs::canonicalize(sp)
+                .ok()
+                .map(|p| normalize_mnt_key(&p.to_string_lossy()));
             let Ok(cs) = cpath(sp) else {
                 _exit(1);
             };
@@ -999,16 +1031,9 @@ mod imp {
                 }
             }
 
-            let mut writable_mounts = HashSet::new();
-            writable_mounts.insert("/proc".to_string());
-            writable_mounts.insert("/dev/shm".to_string());
-            if opt.enable_pty {
-                writable_mounts.insert("/dev/pts".to_string());
-            }
-
             for (src, dst) in &opt.bind_mounts {
                 let src_p = Path::new(src);
-                let (host_dst, _in_sbx_dst) = to_hermetic_paths(&sbx, dst);
+                let (host_dst, _in_sbx_dst) = to_hermetic_paths(&sbx, canon_sbx.as_deref(), dst);
                 ensure_mount_target(src_p, &host_dst);
                 let (Ok(cs_m), Ok(cd_m)) = (cpath(src_p), cpath(&host_dst)) else {
                     _exit(1);
@@ -1031,88 +1056,6 @@ mod imp {
                 }
             }
 
-            for tmpfs_dir in &opt.tmpfs_dirs {
-                let (host_tmpfs, in_sbx_tmpfs) = to_hermetic_paths(&sbx, tmpfs_dir);
-                let _ = std::fs::create_dir_all(&host_tmpfs);
-                let Ok(cd_t) = cpath(&host_tmpfs) else {
-                    _exit(1);
-                };
-                let fstype = c"tmpfs".as_ptr();
-                if mount(
-                    fstype,
-                    cd_t.as_ptr(),
-                    fstype,
-                    MS_NOSUID | MS_NODEV | MS_NOATIME,
-                    std::ptr::null(),
-                ) < 0
-                {
-                    eprintln!(
-                        "linux-sandbox-pid1: tmpfs mount {}: {}",
-                        host_tmpfs.display(),
-                        std::io::Error::last_os_error()
-                    );
-                    _exit(1);
-                }
-                writable_mounts.insert(in_sbx_tmpfs);
-            }
-
-            let in_sbx_wd = if let Some(explicit_wd) = &opt.working_dir {
-                let (host_wd_p, inner_wd) = to_hermetic_paths(&sbx, explicit_wd);
-                if inner_wd != "/" {
-                    let _ = std::fs::create_dir_all(&host_wd_p);
-                    let Ok(cwd_c) = cpath(&host_wd_p) else {
-                        _exit(1);
-                    };
-                    if mount(
-                        cwd_c.as_ptr(),
-                        cwd_c.as_ptr(),
-                        std::ptr::null(),
-                        MS_BIND | MS_REC,
-                        std::ptr::null(),
-                    ) < 0
-                    {
-                        eprintln!(
-                            "linux-sandbox-pid1: bind mount working dir {}: {}",
-                            host_wd_p.display(),
-                            std::io::Error::last_os_error()
-                        );
-                        _exit(1);
-                    }
-                }
-                writable_mounts.insert(inner_wd.clone());
-                inner_wd
-            } else {
-                "/".to_string()
-            };
-
-            for w in &opt.writable_files {
-                let (host_w, in_sbx_w) = to_hermetic_paths(&sbx, w);
-                if std::fs::symlink_metadata(&host_w).is_ok() {
-                    if let Ok(cw) = cpath(&host_w) {
-                        if mount(
-                            cw.as_ptr(),
-                            cw.as_ptr(),
-                            std::ptr::null(),
-                            MS_BIND | MS_REC,
-                            std::ptr::null(),
-                        ) < 0
-                        {
-                            eprintln!(
-                                "linux-sandbox-pid1: writable bind mount {}: {}",
-                                host_w.display(),
-                                std::io::Error::last_os_error()
-                            );
-                            _exit(1);
-                        }
-                    }
-                    if let Ok(canon) = std::fs::canonicalize(&host_w) {
-                        let (_, canon_inner) = to_hermetic_paths(&sbx, &canon.to_string_lossy());
-                        writable_mounts.insert(canon_inner);
-                    }
-                }
-                writable_mounts.insert(in_sbx_w);
-            }
-
             if chdir(cs.as_ptr()) < 0 {
                 eprintln!(
                     "linux-sandbox-pid1: chdir({sbx}): {}",
@@ -1133,6 +1076,105 @@ mod imp {
                 _exit(1);
             }
             let _ = chdir(root_c);
+
+            // Mount `-e` tmpfs, `-W` working_dir, and `-w` writable_files inside the pivoted root
+            // and record both unresolved and canonical inner paths via `insert_writable_mount` so
+            // symlinked targets match `/proc/self/mounts` during `make_filesystem_mostly_read_only`.
+            let mut writable_mounts = HashSet::new();
+            insert_writable_mount(&mut writable_mounts, "/proc");
+            insert_writable_mount(&mut writable_mounts, "/dev/shm");
+            if opt.enable_pty {
+                insert_writable_mount(&mut writable_mounts, "/dev/pts");
+            }
+
+            for tmpfs_dir in &opt.tmpfs_dirs {
+                let (_host_tmpfs, in_sbx_tmpfs) =
+                    to_hermetic_paths(&sbx, canon_sbx.as_deref(), tmpfs_dir);
+                let inner_p = Path::new(&in_sbx_tmpfs);
+                let _ = std::fs::create_dir_all(inner_p);
+                let Ok(cd_t) = cpath(inner_p) else {
+                    _exit(1);
+                };
+                let fstype = c"tmpfs".as_ptr();
+                if mount(
+                    fstype,
+                    cd_t.as_ptr(),
+                    fstype,
+                    MS_NOSUID | MS_NODEV | MS_NOATIME,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: tmpfs mount {in_sbx_tmpfs}: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+                insert_writable_mount(&mut writable_mounts, &in_sbx_tmpfs);
+            }
+
+            let in_sbx_wd = if let Some(explicit_wd) = &opt.working_dir {
+                let (_host_wd_p, inner_wd) =
+                    to_hermetic_paths(&sbx, canon_sbx.as_deref(), explicit_wd);
+                let inner_wd_p = Path::new(&inner_wd);
+                let _ = std::fs::create_dir_all(inner_wd_p);
+                let canon_wd = std::fs::canonicalize(inner_wd_p)
+                    .ok()
+                    .map(|p| normalize_mnt_key(&p.to_string_lossy()));
+                if inner_wd != "/" && canon_wd.as_deref() != Some("/") {
+                    let Ok(cwd_c) = cpath(inner_wd_p) else {
+                        _exit(1);
+                    };
+                    if mount(
+                        cwd_c.as_ptr(),
+                        cwd_c.as_ptr(),
+                        std::ptr::null(),
+                        MS_BIND | MS_REC,
+                        std::ptr::null(),
+                    ) < 0
+                    {
+                        eprintln!(
+                            "linux-sandbox-pid1: bind mount working dir {inner_wd}: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        _exit(1);
+                    }
+                }
+                insert_writable_mount(&mut writable_mounts, &inner_wd);
+                inner_wd
+            } else {
+                "/".to_string()
+            };
+
+            for w in &opt.writable_files {
+                let (_host_w, in_sbx_w) = to_hermetic_paths(&sbx, canon_sbx.as_deref(), w);
+                let inner_w_p = Path::new(&in_sbx_w);
+                if inner_w_p.exists() {
+                    let canon_w = std::fs::canonicalize(inner_w_p)
+                        .ok()
+                        .map(|p| normalize_mnt_key(&p.to_string_lossy()));
+                    if in_sbx_w != "/" && canon_w.as_deref() != Some("/") {
+                        let Ok(cw) = cpath(inner_w_p) else {
+                            _exit(1);
+                        };
+                        if mount(
+                            cw.as_ptr(),
+                            cw.as_ptr(),
+                            std::ptr::null(),
+                            MS_BIND | MS_REC,
+                            std::ptr::null(),
+                        ) < 0
+                        {
+                            eprintln!(
+                                "linux-sandbox-pid1: writable bind mount {in_sbx_w}: {}",
+                                std::io::Error::last_os_error()
+                            );
+                            _exit(1);
+                        }
+                    }
+                    insert_writable_mount(&mut writable_mounts, &in_sbx_w);
+                }
+            }
 
             if let Err(e) = make_filesystem_mostly_read_only(&writable_mounts) {
                 eprintln!("linux-sandbox-pid1: {e}");
@@ -1717,6 +1759,29 @@ mod tests {
         assert_eq!(
             lookup_tty_gid_from_etc_group("root:x:0:\ntty:x:5:syslog\nnogroup:x:65534:\n"),
             Some(5)
+        );
+
+        assert_eq!(
+            to_hermetic_paths("/tmp/sym/sbx/", Some("/tmp/real/sbx"), "/tmp/sym/sbx/work/"),
+            (
+                std::path::PathBuf::from("/tmp/sym/sbx/work"),
+                "/work".to_string()
+            )
+        );
+        assert_eq!(
+            to_hermetic_paths(
+                "/tmp/sym/sbx",
+                Some("/tmp/real/sbx"),
+                "/tmp/real/sbx/tmp_link"
+            ),
+            (
+                std::path::PathBuf::from("/tmp/sym/sbx/tmp_link"),
+                "/tmp_link".to_string()
+            )
+        );
+        assert_eq!(
+            to_hermetic_paths("/tmp/sym/sbx", Some("/tmp/real/sbx"), "/tmp/real/sbx"),
+            (std::path::PathBuf::from("/tmp/sym/sbx"), "/".to_string())
         );
 
         let _ = std::fs::remove_dir_all(&dir);

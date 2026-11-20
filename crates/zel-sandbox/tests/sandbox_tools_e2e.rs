@@ -288,6 +288,71 @@ fn standalone_linux_sandbox_probe_and_isolation() {
     assert!(!sbx_ro_inside.join("nope").exists());
     assert!(!ro_bind_src.join("nope").exists());
 
+    // 2b. Hermetic (`-h`) with symlinked `-h` root, symlinked `-W` working directory, symlinked
+    // `-e` tmpfs directory (inner absolute symlink), and symlinked `-w` writable directory:
+    // `mount()` resolves symlinks in `/proc/self/mounts`, and `make_filesystem_mostly_read_only`
+    // must keep those canonical mount points writable (`!MS_RDONLY`) while sibling dirs stay RO.
+    let sbx_sym_root = dir.join("hermetic_root_link");
+    std::os::unix::fs::symlink(&sbx, &sbx_sym_root).unwrap();
+    let sbx_real_wd = sbx.join("nested/real_work");
+    let sbx_real_tmp = sbx.join("nested/real_tmp");
+    let sbx_real_w = sbx.join("nested/real_w");
+    std::fs::create_dir_all(&sbx_real_wd).unwrap();
+    std::fs::create_dir_all(&sbx_real_tmp).unwrap();
+    std::fs::create_dir_all(&sbx_real_w).unwrap();
+    std::os::unix::fs::symlink("nested/real_work", sbx.join("work_link")).unwrap();
+    std::os::unix::fs::symlink("/nested/real_tmp", sbx.join("tmp_link")).unwrap();
+    std::os::unix::fs::symlink("nested/real_w", sbx.join("w_link")).unwrap();
+
+    let mut sym_hermetic_args: Vec<String> = vec![
+        "-h".into(),
+        sbx_sym_root.to_str().unwrap().into(),
+        "-W".into(),
+        sbx_sym_root.join("work_link").to_str().unwrap().into(),
+        "-e".into(),
+        "/tmp_link".into(),
+        "-w".into(),
+        sbx_sym_root.join("w_link").to_str().unwrap().into(),
+    ];
+    for sys_dir in ["/bin", "/usr", "/lib", "/lib64"] {
+        if std::path::Path::new(sys_dir).exists() {
+            sym_hermetic_args.push("-M".into());
+            sym_hermetic_args.push(sys_dir.into());
+        }
+    }
+    sym_hermetic_args.extend([
+        "--".into(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "set -e; \
+         echo sym_wd > via_wd; \
+         echo sym_tmp > /tmp_link/ephemeral; \
+         test \"$(cat /nested/real_tmp/ephemeral)\" = sym_tmp; \
+         echo sym_w > /w_link/persisted; \
+         if touch /ro_inside/sym_nope 2>/dev/null; then echo SYM_RO_WRITABLE; exit 24; fi"
+            .into(),
+    ]);
+    let sym_h_out = Command::new(ls).args(&sym_hermetic_args).output().unwrap();
+    assert!(
+        sym_h_out.status.success(),
+        "symlinked hermetic failed: status={:?} stderr={}",
+        sym_h_out.status,
+        String::from_utf8_lossy(&sym_h_out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sbx_real_wd.join("via_wd")).unwrap(),
+        "sym_wd\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sbx_real_w.join("persisted")).unwrap(),
+        "sym_w\n"
+    );
+    assert!(
+        !sbx_real_tmp.join("ephemeral").exists(),
+        "tmpfs at symlinked -e target must not write through to backing directory"
+    );
+    assert!(!sbx_ro_inside.join("sym_nope").exists());
+
     // 3. `-P` (`enable_pty`): maps inner gid to `tty`, keeps `/dev/pts` writable, preserves
     // stdout/stderr without EIO/SIGHUP, and allows pseudoterminals to be opened and used.
     let expected_tty_gid = zel_sandbox::linux_sandbox::lookup_tty_gid();
