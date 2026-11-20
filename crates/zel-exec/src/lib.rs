@@ -3449,6 +3449,26 @@ pub fn execute_action_with(
                     if !st.is_directory || st.is_symlink {
                         let _ = fs.delete(&out_abs);
                     } else {
+                        #[cfg(unix)]
+                        {
+                            fn unlock_dirs(dir: &std::path::Path) {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Ok(sm) = std::fs::symlink_metadata(dir) {
+                                    if sm.file_type().is_dir() {
+                                        let _ = std::fs::set_permissions(
+                                            dir,
+                                            std::fs::Permissions::from_mode(0o755),
+                                        );
+                                        if let Ok(rd) = std::fs::read_dir(dir) {
+                                            for entry in rd.flatten() {
+                                                unlock_dirs(&entry.path());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            unlock_dirs(std::path::Path::new(out_abs.path_string()));
+                        }
                         fn prune_unowned(
                             fs: &dyn FileSystem,
                             execroot: &PathFragment,
@@ -3698,21 +3718,34 @@ pub fn execute_action_with(
             })
             .collect();
         let recorded_md = {
-            let mut all: Vec<(String, Option<String>)> = pre_exec_inputs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            if declared_inputs
-                .iter()
-                .any(|p| p.as_str() == "bazel-out/volatile-status.txt")
-            {
-                all.push((
-                    "bazel-out/volatile-status.txt".to_string(),
-                    input_digest_with("bazel-out/volatile-status.txt", false),
-                ));
-            }
+            let mut all: Vec<(String, Option<String>)> = if has_unused_inputs_list {
+                Vec::new()
+            } else {
+                let mut base: Vec<(String, Option<String>)> = pre_exec_inputs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if declared_inputs
+                    .iter()
+                    .any(|p| p.as_str() == "bazel-out/volatile-status.txt")
+                {
+                    base.push((
+                        "bazel-out/volatile-status.txt".to_string(),
+                        input_digest_with("bazel-out/volatile-status.txt", false),
+                    ));
+                }
+                base
+            };
             for p in &discovered {
-                all.push((p.clone(), input_digest_with(p, false)));
+                let d = if p == "bazel-out/volatile-status.txt" {
+                    input_digest_with("bazel-out/volatile-status.txt", false)
+                } else {
+                    pre_exec_inputs
+                        .get(p)
+                        .cloned()
+                        .unwrap_or_else(|| input_digest_with(p, false))
+                };
+                all.push((p.clone(), d));
             }
             all.extend(tool_rf_entries.iter().cloned());
             all.sort();
