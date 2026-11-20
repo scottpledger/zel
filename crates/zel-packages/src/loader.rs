@@ -52,10 +52,6 @@ pub struct LoaderConfig {
     pub use_prelude: bool,
     /// `--experimental_sibling_repository_layout`: when `false`, `//...` skips top-level `external/`.
     pub sibling_repository_layout: bool,
-    /// `--experimental_bzl_visibility` (default `true` in Bazel 9).
-    pub experimental_bzl_visibility: bool,
-    /// `--check_bzl_visibility` (default `true` in Bazel 9).
-    pub check_bzl_visibility: bool,
     /// `--experimental_enable_scl_dialect` (default `true` in Bazel 9).
     pub experimental_enable_scl_dialect: bool,
     /// `--incompatible_use_cc_configure_from_rules_cc` (default `false` in Bazel 9).
@@ -107,8 +103,6 @@ impl LoaderConfig {
             check_bzl_visibility: true,
             use_prelude: true,
             sibling_repository_layout: false,
-            experimental_bzl_visibility: true,
-            check_bzl_visibility: true,
             experimental_enable_scl_dialect: true,
             incompatible_use_cc_configure_from_rules_cc: false,
             external_host: None,

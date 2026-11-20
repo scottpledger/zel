@@ -182,9 +182,9 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
             settings.push(format!("values:{key}={norm_v}"));
             match option_values(n.cfg, &key) {
                 Some(vals) => {
-                    let is_bool_opt =
-                        opt_meta.is_some_and(|(_, o)| matches!(o.java_type, "boolean" | "Boolean"))
-                            || (vals.len() == 1 && matches!(vals[0].as_str(), "true" | "false"));
+                    let is_bool_opt = opt_meta
+                        .is_some_and(|(_, o)| matches!(o.java_type, "boolean" | "Boolean"))
+                        || (vals.len() == 1 && matches!(vals[0].as_str(), "true" | "false"));
                     let is_comma_list = opt_meta.is_some_and(|(_, o)| {
                         o.converter.contains("CommaSeparated")
                             || o.converter.ends_with("LabelListConverter")

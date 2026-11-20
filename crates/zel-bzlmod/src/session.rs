@@ -182,7 +182,8 @@ pub(crate) fn expand_option_path(
     }
 }
 
-pub(crate) fn expand_workspace_path(p: &str, workspace: &Path, cwd: &Path) -> PathBuf {
+#[cfg(test)]
+fn expand_workspace_path(p: &str, workspace: &Path, cwd: &Path) -> PathBuf {
     if p == "%workspace%"
         || p.strip_prefix("%workspace%")
             .is_some_and(|r| r.starts_with(['/', '\\']))

@@ -1330,7 +1330,9 @@ impl ParsedCommandOptions {
         if let Some(default_raw) = def.default_value {
             if default_raw == "null" {
                 self.clear_legacy_field(def.name);
-            } else if let Ok(default_val) = convert_option(default_raw, def) {
+            } else if let Ok(default_val) =
+                convert_option_with_home(default_raw, def, self.user_home.as_deref())
+            {
                 self.update_legacy_field(def.name, &default_val, default_raw);
             }
         } else {

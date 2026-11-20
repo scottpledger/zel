@@ -960,6 +960,7 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 is_tree_artifact: false,
                 root: ArtifactRoot::Bin,
                 is_unresolved_symlink: false,
+                is_constant_metadata: status_file == "volatile-status.txt",
                 exec_path: PathFragment::create(&format!("bazel-out/{status_file}")),
                 root_relative_path: PathFragment::create(status_file),
                 owner_label: label.clone(),

@@ -575,7 +575,6 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
         ("apple", "xcode_config_label") => {
             opt("xcode_version_config").or_else(|| tools("tools/cpp:host_xcodes"))
         }
-        ("java", "launcher") => opt("java_launcher"),
         ("proto", "proto_compiler") => {
             opt("proto_compiler").or_else(|| tools("tools/proto:protoc"))
         }
