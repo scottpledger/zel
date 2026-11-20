@@ -1619,12 +1619,19 @@ java_package_configuration(
         "//p:wrapped_exec",
     ]);
     assert_eq!(b.code, 0, "stdout:\n{}\nstderr:\n{}", b.out, b.err);
+    let info_bin = w.run(&["info", "bazel-bin"]);
     assert_eq!(
-        std::fs::read_to_string(w.ws.join("bazel-bin/p/target_flags.txt")).unwrap(),
+        info_bin.code, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        info_bin.out, info_bin.err
+    );
+    let bin_dir = PathBuf::from(info_bin.out.trim());
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("p/target_flags.txt")).unwrap(),
         "-Werror|-Werror 'unterminated|trailing\\"
     );
     assert_eq!(
-        std::fs::read_to_string(w.ws.join("bazel-bin/p/wrapped_exec.txt")).unwrap(),
+        std::fs::read_to_string(bin_dir.join("p/wrapped_exec.txt")).unwrap(),
         "-Xlint|-Xlint 'host_unterminated"
     );
 
