@@ -1540,3 +1540,140 @@ fn bazel9_removed_bzl_symbols_and_autoload_externally() {
         "unexpected error:\n{rendered}"
     );
 }
+
+#[test]
+fn concurrent_autoload_resolution_waits_for_populated_values() {
+    use std::sync::{Condvar, Mutex};
+
+    let base = std::env::temp_dir().join(format!(
+        "zel-pkg-autoload-concurrent-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    let fs = Arc::new(zel_vfs::LocalFileSystem::new(
+        zel_vfs::DigestHashFunction::Sha256,
+    ));
+    let root = PathFragment::create(base.join("ws").to_str().unwrap());
+    let rules_cc_root = PathFragment::create(base.join("ext/rules_cc+").to_str().unwrap());
+    let ext_root = PathFragment::create(base.join("ext/ext+").to_str().unwrap());
+    fs.create_directory_and_parents(&root).unwrap();
+    fs.create_directory_and_parents(&rules_cc_root).unwrap();
+    fs.create_directory_and_parents(&ext_root).unwrap();
+    let write = |dir: &PathFragment, rel: &str, content: &str| {
+        let p = dir.get_relative_str(rel);
+        if let Some(parent) = p.parent_directory() {
+            fs.create_directory_and_parents(&parent).unwrap();
+        }
+        fs.write_file(&p, content.as_bytes()).unwrap();
+    };
+
+    write(&rules_cc_root, "cc/BUILD", "");
+    write(
+        &rules_cc_root,
+        "cc/cc_library.bzl",
+        "def _impl(ctx):\n    return []\ncc_library = rule(implementation = _impl, attrs = {\"srcs\": attr.label_list(allow_files = True)})\n",
+    );
+    write(
+        &ext_root,
+        "p1/BUILD.bazel",
+        "cc_library(name = 'lib1', srcs = ['a.c'])\n",
+    );
+    write(
+        &ext_root,
+        "p2/BUILD.bazel",
+        "cc_library(name = 'lib2', srcs = ['b.c'])\n",
+    );
+
+    struct SyncState {
+        t1_in_autoload: bool,
+        t2_started: bool,
+    }
+    struct BlockingAutoloadResolver {
+        inner: SimpleRepoResolver,
+        sync: Arc<(Mutex<SyncState>, Condvar)>,
+    }
+    impl RepoResolver for BlockingAutoloadResolver {
+        fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+            self.inner.repo_root(repo)
+        }
+        fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
+            self.inner.mapping(owner)
+        }
+        fn autoload_module_repo(
+            &self,
+            module_name: &str,
+            repo_name: &str,
+        ) -> Option<RepositoryName> {
+            let (lock, cv) = &*self.sync;
+            {
+                let mut st = lock.lock().unwrap();
+                if !st.t1_in_autoload {
+                    st.t1_in_autoload = true;
+                    cv.notify_all();
+                    while !st.t2_started {
+                        st = cv.wait(st).unwrap();
+                    }
+                }
+            }
+            // Give thread 2 time to enter `resolve_autoload_values` while thread 1 holds `Loading`.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.inner.autoload_module_repo(module_name, repo_name)
+        }
+    }
+
+    let mut inner = SimpleRepoResolver::new(root);
+    let cc_canon = RepositoryName::create("rules_cc+").unwrap();
+    let ext_canon = RepositoryName::create("ext+").unwrap();
+    inner
+        .external
+        .insert("rules_cc+".to_string(), rules_cc_root);
+    inner.external.insert("ext+".to_string(), ext_root);
+    inner.apparent.insert("rules_cc".to_string(), cc_canon);
+    inner.apparent.insert("ext".to_string(), ext_canon.clone());
+
+    let sync = Arc::new((
+        Mutex::new(SyncState {
+            t1_in_autoload: false,
+            t2_started: false,
+        }),
+        Condvar::new(),
+    ));
+    let resolver = Arc::new(BlockingAutoloadResolver {
+        inner,
+        sync: Arc::clone(&sync),
+    });
+
+    let mut cfg = LoaderConfig::new(fs, resolver);
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+cc_library".to_string()];
+    let loader = PackageLoader::new(cfg);
+
+    let l1 = Arc::clone(&loader);
+    let ext1 = ext_canon.clone();
+    let t1 = std::thread::spawn(move || {
+        l1.load_package(&PackageIdentifier::create(ext1, PathFragment::create("p1")).unwrap())
+    });
+
+    let l2 = Arc::clone(&loader);
+    let ext2 = ext_canon;
+    let sync2 = Arc::clone(&sync);
+    let t2 = std::thread::spawn(move || {
+        let (lock, cv) = &*sync2;
+        {
+            let mut st = lock.lock().unwrap();
+            while !st.t1_in_autoload {
+                st = cv.wait(st).unwrap();
+            }
+            st.t2_started = true;
+            cv.notify_all();
+        }
+        l2.load_package(&PackageIdentifier::create(ext2, PathFragment::create("p2")).unwrap())
+    });
+
+    let p1 = t1.join().unwrap().expect("p1 should load");
+    let p2 = t2.join().unwrap().expect("p2 should load");
+    assert!(!p1.contains_errors, "p1 errors: {:?}", p1.events);
+    assert!(!p2.contains_errors, "p2 errors: {:?}", p2.events);
+    assert!(p1.targets.contains_key("lib1"));
+    assert!(p2.targets.contains_key("lib2"));
+}

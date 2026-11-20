@@ -271,6 +271,8 @@ pub struct PackageLoader {
     autoload_symbols: Result<crate::autoload::AutoloadSymbols, String>,
     /// Lazily loaded autoloaded symbol values from external ruleset repositories.
     autoload_values: Mutex<AutoloadValues>,
+    /// Notifies concurrent threads waiting on an in-flight `autoload_values` load.
+    autoload_values_cv: std::sync::Condvar,
 }
 
 /// Key under which `exported_rules` are stored in the builtins map (not a valid identifier).
@@ -289,7 +291,7 @@ enum BuiltinToplevels {
 enum AutoloadValues {
     #[default]
     Unloaded,
-    Loading,
+    Loading(std::thread::ThreadId),
     Ready(BTreeMap<String, Value>),
     Failed(String),
 }
@@ -570,6 +572,7 @@ impl PackageLoader {
             builtin_toplevels: Mutex::new(BuiltinToplevels::Unloaded),
             autoload_symbols,
             autoload_values: Mutex::new(AutoloadValues::Unloaded),
+            autoload_values_cv: std::sync::Condvar::new(),
             cfg,
             rule_classes: native_rule_classes(),
             registry: Mutex::new(Registry::default()),
@@ -1721,6 +1724,7 @@ impl PackageLoader {
                 builtin_toplevels: Mutex::new(BuiltinToplevels::Loading),
                 autoload_symbols: Ok(crate::autoload::AutoloadSymbols::empty()),
                 autoload_values: Mutex::new(AutoloadValues::Unloaded),
+                autoload_values_cv: std::sync::Condvar::new(),
                 cfg,
                 rule_classes: native_rule_classes(),
                 registry: Mutex::new(Registry::default()),
@@ -1927,15 +1931,51 @@ impl PackageLoader {
         self: &Arc<Self>,
         autoloads: &crate::autoload::AutoloadSymbols,
     ) -> Result<BTreeMap<String, Value>, String> {
+        let me = std::thread::current().id();
         {
-            let mut st = self.autoload_values.lock().unwrap();
-            match &*st {
-                AutoloadValues::Ready(m) => return Ok(m.clone()),
-                AutoloadValues::Failed(e) => return Err(e.clone()),
-                AutoloadValues::Loading => return Ok(BTreeMap::new()),
-                AutoloadValues::Unloaded => *st = AutoloadValues::Loading,
+            let mut st = self
+                .autoload_values
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            loop {
+                match &*st {
+                    AutoloadValues::Ready(m) => return Ok(m.clone()),
+                    AutoloadValues::Failed(e) => return Err(e.clone()),
+                    AutoloadValues::Loading(owner) if *owner == me => return Ok(BTreeMap::new()),
+                    AutoloadValues::Loading(_) => {
+                        st = self
+                            .autoload_values_cv
+                            .wait(st)
+                            .unwrap_or_else(|e| e.into_inner());
+                    }
+                    AutoloadValues::Unloaded => {
+                        *st = AutoloadValues::Loading(me);
+                        break;
+                    }
+                }
             }
         }
+        struct LoadingGuard<'a> {
+            state: &'a Mutex<AutoloadValues>,
+            cv: &'a std::sync::Condvar,
+            armed: bool,
+        }
+        impl Drop for LoadingGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if matches!(&*st, AutoloadValues::Loading(_)) {
+                        *st = AutoloadValues::Unloaded;
+                    }
+                    self.cv.notify_all();
+                }
+            }
+        }
+        let mut guard = LoadingGuard {
+            state: &self.autoload_values,
+            cv: &self.autoload_values_cv,
+            armed: true,
+        };
         let mut loaded: BTreeMap<String, Value> = BTreeMap::new();
         let mut err: Option<String> = None;
         for sym in autoloads.autoloaded_symbols() {
@@ -1988,8 +2028,11 @@ impl PackageLoader {
                 }
             }
         }
-        let mut st = self.autoload_values.lock().unwrap();
-        match err {
+        let mut st = self
+            .autoload_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let res = match err {
             Some(e) => {
                 *st = AutoloadValues::Failed(e.clone());
                 Err(e)
@@ -1998,7 +2041,10 @@ impl PackageLoader {
                 *st = AutoloadValues::Ready(loaded.clone());
                 Ok(loaded)
             }
-        }
+        };
+        guard.armed = false;
+        self.autoload_values_cv.notify_all();
+        res
     }
 
     /// Applies `--incompatible_autoload_externally` (and `--repositories_without_autoloads` /
