@@ -874,6 +874,16 @@ pub fn apply_transition_split(
     apply_transition_split_with_resolver(trans, cfg, attrs, None)
 }
 
+fn compose_split_keys(key1: Option<&str>, key2: Option<String>) -> Option<String> {
+    match (key1, key2) {
+        (None, k) => k,
+        (Some(a), None) => Some(a.to_string()),
+        (Some(""), Some(b)) => Some(b),
+        (Some(a), Some(b)) if b.is_empty() => Some(a.to_string()),
+        (Some(a), Some(b)) => Some(format!("{a},{b}")),
+    }
+}
+
 pub fn apply_transition_split_with_resolver(
     trans: &Value,
     cfg: &BuildConfigurationKey,
@@ -893,29 +903,28 @@ pub fn apply_transition_split_with_resolver(
             let mut next = Vec::new();
             for (k0, c0) in current {
                 for (k1, c1) in apply_transition_split_with_resolver(step, &c0, attrs, resolver)? {
-                    let key = match (k0.as_ref(), k1) {
-                        (None, k) => k,
-                        (Some(a), None) => Some(a.clone()),
-                        (Some(a), Some(b)) if a.is_empty() => Some(b),
-                        (Some(a), Some(b)) if b.is_empty() => Some(a.clone()),
-                        (Some(a), Some(b)) => Some(format!("{a}/{b}")),
-                    };
-                    next.push((key, c1));
+                    next.push((compose_split_keys(k0.as_deref(), k1), c1));
                 }
             }
             current = next;
         }
         return Ok(current);
     }
-    if matches!(
-        s.fields.get("_build_setting").and_then(|v| v.as_str()),
-        Some("none")
-    ) {
-        let mut out = cfg.clone();
-        out.flag_values.clear();
-        out.flag_types.clear();
-        out.transition_changes.clear();
-        return Ok(vec![(None, out)]);
+    match s.fields.get("_build_setting").and_then(|v| v.as_str()) {
+        Some("none") => {
+            let mut out = cfg.clone();
+            out.flag_values.clear();
+            out.flag_types.clear();
+            out.transition_changes.clear();
+            return Ok(vec![(None, out)]);
+        }
+        Some("target") => {
+            return Ok(vec![(None, cfg.clone())]);
+        }
+        Some("exec") => {
+            return Ok(vec![(None, cfg.to_exec())]);
+        }
+        _ => {}
     }
     let tctx = parse_transition_ctx(&s.fields);
     if let Some(Value::String(attr_name)) = s.fields.get("_feature_flag_transition_attr") {
@@ -1220,5 +1229,28 @@ mod tests {
         set_setting(&mut d, "//b:flag", &Value::Bool(true)).unwrap();
         assert_eq!(c.mnemonic(), d.mnemonic());
         set_setting(&mut d, "//b:flag", &Value::None).ok();
+    }
+
+    #[test]
+    fn compose_split_keys_absorbs_patch_keys_and_joins_splits_with_comma() {
+        assert_eq!(compose_split_keys(None, None), None);
+        assert_eq!(compose_split_keys(None, Some("k".into())), Some("k".into()));
+        assert_eq!(compose_split_keys(Some("k"), None), Some("k".into()));
+        assert_eq!(
+            compose_split_keys(Some(""), Some("k".into())),
+            Some("k".into())
+        );
+        assert_eq!(
+            compose_split_keys(Some("k"), Some(String::new())),
+            Some("k".into())
+        );
+        assert_eq!(
+            compose_split_keys(Some(""), Some(String::new())),
+            Some(String::new())
+        );
+        assert_eq!(
+            compose_split_keys(Some("stub_split0"), Some("stub_split1".into())),
+            Some("stub_split0,stub_split1".into())
+        );
     }
 }

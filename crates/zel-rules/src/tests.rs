@@ -5462,3 +5462,171 @@ cyclic_map = rule(implementation = _impl)
         "cyclic vs non-cyclic globals must produce distinct action keys"
     );
 }
+
+#[test]
+fn composed_split_and_patch_transitions_match_bazel_split_attr_keys() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _split1_impl(settings, attr):
+    return {
+        "a": {"//command_line_option:copt": ["-DA"]},
+        "b": {"//command_line_option:copt": ["-DB"]},
+    }
+
+def _split2_impl(settings, attr):
+    return {
+        "x": {"//command_line_option:cxxopt": ["-DX"]},
+        "y": {"//command_line_option:cxxopt": ["-DY"]},
+    }
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:conlyopt": ["-DPATCH"]}
+
+split1 = transition(
+    implementation = _split1_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+split2 = transition(
+    implementation = _split2_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cxxopt"],
+)
+patch = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:conlyopt"],
+)
+
+split_then_split = split1.and_then(split2)
+patch_then_split = patch.and_then(split2)
+split_then_patch = split1.and_then(patch)
+patch_then_patch = patch.and_then(config.target())
+
+def _leaf_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}".format(
+            ",".join(ctx.fragments.cpp.copts),
+            ",".join(ctx.fragments.cpp.cxxopts),
+            ",".join(ctx.fragments.cpp.conlyopts),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+leaf = rule(implementation = _leaf_impl, fragments = ["cpp"])
+
+def _format_split(split_dict):
+    entries = []
+    for k in sorted(split_dict.keys()):
+        entries.append(k + "->" + split_dict[k].files.to_list()[0].path)
+    return ";".join(entries)
+
+def _top_impl(ctx):
+    out = ctx.actions.declare_file("summary.txt")
+    lines = [
+        "ss=" + _format_split(ctx.split_attr.ss),
+        "ps=" + _format_split(ctx.split_attr.ps),
+        "sp=" + _format_split(ctx.split_attr.sp),
+        "pp=" + ctx.attr.pp.files.to_list()[0].path,
+    ]
+    ctx.actions.write(out, "\n".join(lines))
+    return [DefaultInfo(files = depset([out]))]
+
+top = rule(
+    implementation = _top_impl,
+    attrs = {
+        "ss": attr.label(cfg = split_then_split),
+        "ps": attr.label(cfg = patch_then_split),
+        "sp": attr.label(cfg = split_then_patch),
+        "pp": attr.label(cfg = patch_then_patch),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "leaf", "top")
+leaf(name = "l")
+top(name = "t", ss = ":l", ps = ":l", sp = ":l", pp = ":l")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:t").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+
+    let st_ax = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DA]",
+        "//command_line_option:cxxopt=[-DX]",
+    ]);
+    let st_ay = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DA]",
+        "//command_line_option:cxxopt=[-DY]",
+    ]);
+    let st_bx = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DB]",
+        "//command_line_option:cxxopt=[-DX]",
+    ]);
+    let st_by = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DB]",
+        "//command_line_option:cxxopt=[-DY]",
+    ]);
+    assert_eq!(
+        lines[0],
+        format!(
+            "ss=a,x->bazel-out/k8-fastbuild-{st_ax}/bin/l.txt;a,y->bazel-out/k8-fastbuild-{st_ay}/bin/l.txt;b,x->bazel-out/k8-fastbuild-{st_bx}/bin/l.txt;b,y->bazel-out/k8-fastbuild-{st_by}/bin/l.txt"
+        ),
+        "{text}"
+    );
+
+    let st_px = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:cxxopt=[-DX]",
+    ]);
+    let st_py = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:cxxopt=[-DY]",
+    ]);
+    assert_eq!(
+        lines[1],
+        format!(
+            "ps=x->bazel-out/k8-fastbuild-{st_px}/bin/l.txt;y->bazel-out/k8-fastbuild-{st_py}/bin/l.txt"
+        ),
+        "{text}"
+    );
+
+    let st_ap = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:copt=[-DA]",
+    ]);
+    let st_bp = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:copt=[-DB]",
+    ]);
+    assert_eq!(
+        lines[2],
+        format!(
+            "sp=a->bazel-out/k8-fastbuild-{st_ap}/bin/l.txt;b->bazel-out/k8-fastbuild-{st_bp}/bin/l.txt"
+        ),
+        "{text}"
+    );
+
+    let st_pp = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+    ]);
+    assert_eq!(
+        lines[3],
+        format!("pp=bazel-out/k8-fastbuild-{st_pp}/bin/l.txt"),
+        "{text}"
+    );
+}
