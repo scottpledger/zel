@@ -1415,13 +1415,82 @@ fn product_name() -> String {
         .unwrap_or_else(|| "Bazel".to_string())
 }
 
-static CANCEL_WATCH_STOP: AtomicBool = AtomicBool::new(false);
-
 /// Result of a `Run` call.
 pub struct RunOutcome {
     pub response: RunResponse,
     /// The stream ended without a terminal `finished` message (server died).
     pub abrupt: Option<GrpcStatus>,
+}
+
+#[derive(Clone, Copy)]
+struct SignalSnapshot {
+    sigint: usize,
+    sigterm: usize,
+    sigquit: usize,
+    sigwinch: usize,
+}
+
+trait SignalSource: Send + Sync {
+    fn snapshot(&self) -> SignalSnapshot;
+}
+
+struct ProcessSignalSource;
+
+impl SignalSource for ProcessSignalSource {
+    fn snapshot(&self) -> SignalSnapshot {
+        SignalSnapshot {
+            sigint: sys::SIGINT_COUNT.load(Ordering::SeqCst),
+            sigterm: sys::SIGTERM_COUNT.load(Ordering::SeqCst),
+            sigquit: sys::SIGQUIT_COUNT.load(Ordering::SeqCst),
+            sigwinch: sys::SIGWINCH_COUNT.load(Ordering::SeqCst),
+        }
+    }
+}
+
+fn send_cancel_async(info: ServerInfo, command_id: String) {
+    let _ = std::thread::Builder::new()
+        .name("zel-client-cancel".into())
+        .spawn(move || {
+            if let Some(c) = channel_for(&info.address, Duration::from_secs(5)) {
+                let r = CancelRequest {
+                    cookie: info.request_cookie,
+                    command_id,
+                };
+                let _ = c.unary(
+                    &format!("{SERVICE}Cancel"),
+                    &r.encode_to_vec(),
+                    &CallOptions {
+                        timeout: Some(Duration::from_secs(5)),
+                        ..Default::default()
+                    },
+                );
+                c.close();
+            }
+        });
+}
+
+fn send_terminal_size_async(info: ServerInfo, command_id: String, in_flight: Arc<AtomicBool>) {
+    struct ClearOnDrop(Arc<AtomicBool>);
+    impl Drop for ClearOnDrop {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    let clear = ClearOnDrop(in_flight);
+    let _ = std::thread::Builder::new()
+        .name("zel-client-winch".into())
+        .spawn(move || {
+            let _clear = clear;
+            let fd = if sys::is_tty(2) { 2 } else { 1 };
+            let (cols, rows) = sys::terminal_size(fd);
+            let _ = update_terminal_size(
+                &info,
+                &command_id,
+                cols as i32,
+                rows as i32,
+                Duration::from_secs(5),
+            );
+        });
 }
 
 /// Streams a `Run` call: forwards stdout/stderr chunks as they arrive; `SIGINT` and `SIGTERM`
@@ -1432,73 +1501,73 @@ pub fn run_command(
     out: &mut dyn Write,
     err: &mut dyn Write,
     connect_timeout: Duration,
-    mut locks: Option<ClientLocks>,
+    locks: Option<ClientLocks>,
 ) -> RunOutcome {
-    let mut req = req.clone();
-    req.cookie = info.request_cookie.clone();
-    let ch = channel_for(&info.address, connect_timeout).expect("server address");
     sys::unblock_client_signals();
     sys::install_handler(sys::SIGINT);
     sys::install_handler(sys::SIGTERM);
     sys::install_handler(sys::SIGQUIT);
     sys::install_handler(sys::SIGWINCH);
-    let sigint_base = sys::SIGINT_COUNT.load(Ordering::SeqCst);
-    let sigterm_base = sys::SIGTERM_COUNT.load(Ordering::SeqCst);
-    let sigquit_base = sys::SIGQUIT_COUNT.load(Ordering::SeqCst);
-    let sigwinch_base = sys::SIGWINCH_COUNT.load(Ordering::SeqCst);
+    let signals = Arc::new(ProcessSignalSource);
+    run_command_inner(
+        info,
+        req,
+        out,
+        err,
+        connect_timeout,
+        locks,
+        signals,
+        Arc::new(|srv| {
+            // Only `SIGINT` increments the 3-strike server kill (`blaze_util_posix.cc:143-155`).
+            eprintln!(
+                "\n{} caught third interrupt signal; server killed. (This may be expensive, see https://bazel.build/advanced/performance/iteration-speed#avoid-ctrl-c.)\n",
+                product_name()
+            );
+            sys::send_process_group_signal(srv.pid, sys::SIGKILL);
+            std::process::exit(1);
+        }),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_command_inner(
+    info: &ServerInfo,
+    req: &RunRequest,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    connect_timeout: Duration,
+    mut locks: Option<ClientLocks>,
+    signals: Arc<dyn SignalSource>,
+    on_third_sigint: Arc<dyn Fn(&ServerInfo) + Send + Sync>,
+) -> RunOutcome {
+    let mut req = req.clone();
+    req.cookie = info.request_cookie.clone();
+    let ch = channel_for(&info.address, connect_timeout).expect("server address");
+    let base = signals.snapshot();
     let command_id = Arc::new(Mutex::new(String::new()));
-    CANCEL_WATCH_STOP.store(false, Ordering::SeqCst);
+    let watch_stop = Arc::new(AtomicBool::new(false));
     let watcher = {
         let id = Arc::clone(&command_id);
         let info = info.clone();
+        let stop = Arc::clone(&watch_stop);
+        let signals = Arc::clone(&signals);
+        let on_third_sigint = Arc::clone(&on_third_sigint);
         std::thread::spawn(move || {
             let mut cancelled = false;
             let mut announced = false;
             let mut forwarded_sigquit = 0usize;
             let mut forwarded_sigwinch = 0usize;
-            while !CANCEL_WATCH_STOP.load(Ordering::SeqCst) {
-                let sigint_n = sys::SIGINT_COUNT
-                    .load(Ordering::SeqCst)
-                    .saturating_sub(sigint_base);
-                let sigterm_n = sys::SIGTERM_COUNT
-                    .load(Ordering::SeqCst)
-                    .saturating_sub(sigterm_base);
-                let sigquit_n = sys::SIGQUIT_COUNT
-                    .load(Ordering::SeqCst)
-                    .saturating_sub(sigquit_base);
-                let sigwinch_n = sys::SIGWINCH_COUNT
-                    .load(Ordering::SeqCst)
-                    .saturating_sub(sigwinch_base);
-
-                if sigquit_n > forwarded_sigquit {
-                    forwarded_sigquit = sigquit_n;
-                    sys::send_signal(info.pid, sys::SIGQUIT);
-                }
-
-                if sigwinch_n > forwarded_sigwinch {
-                    let cid = id.lock().unwrap().clone();
-                    if !cid.is_empty() {
-                        forwarded_sigwinch = sigwinch_n;
-                        let fd = if sys::is_tty(2) { 2 } else { 1 };
-                        let (cols, rows) = sys::terminal_size(fd);
-                        let _ = update_terminal_size(
-                            &info,
-                            &cid,
-                            cols as i32,
-                            rows as i32,
-                            Duration::from_secs(5),
-                        );
-                    }
-                }
+            let winch_in_flight = Arc::new(AtomicBool::new(false));
+            while !stop.load(Ordering::SeqCst) {
+                let snap = signals.snapshot();
+                let sigint_n = snap.sigint.saturating_sub(base.sigint);
+                let sigterm_n = snap.sigterm.saturating_sub(base.sigterm);
+                let sigquit_n = snap.sigquit.saturating_sub(base.sigquit);
+                let sigwinch_n = snap.sigwinch.saturating_sub(base.sigwinch);
 
                 if sigint_n >= 3 {
-                    // Only `SIGINT` increments the 3-strike server kill (`blaze_util_posix.cc`).
-                    eprintln!(
-                        "\n{} caught third interrupt signal; server killed. (This may be expensive, see https://bazel.build/advanced/performance/iteration-speed#avoid-ctrl-c.)\n",
-                        product_name()
-                    );
-                    sys::send_process_group_signal(info.pid, sys::SIGKILL);
-                    std::process::exit(1);
+                    on_third_sigint(&info);
+                    break;
                 }
                 if (sigint_n >= 1 || sigterm_n >= 1) && !announced {
                     announced = true;
@@ -1516,21 +1585,24 @@ pub fn run_command(
                     let cid = id.lock().unwrap().clone();
                     if !cid.is_empty() {
                         cancelled = true;
-                        if let Some(c) = channel_for(&info.address, Duration::from_secs(5)) {
-                            let r = CancelRequest {
-                                cookie: info.request_cookie.clone(),
-                                command_id: cid,
-                            };
-                            let _ = c.unary(
-                                &format!("{SERVICE}Cancel"),
-                                &r.encode_to_vec(),
-                                &CallOptions {
-                                    timeout: Some(Duration::from_secs(5)),
-                                    ..Default::default()
-                                },
-                            );
-                            c.close();
-                        }
+                        send_cancel_async(info.clone(), cid);
+                    }
+                }
+                if sigquit_n > forwarded_sigquit {
+                    forwarded_sigquit = sigquit_n;
+                    if info.pid > 0 {
+                        sys::send_signal(info.pid, sys::SIGQUIT);
+                    }
+                }
+                if !cancelled
+                    && sigwinch_n > forwarded_sigwinch
+                    && !winch_in_flight.load(Ordering::SeqCst)
+                {
+                    let cid = id.lock().unwrap().clone();
+                    if !cid.is_empty() {
+                        forwarded_sigwinch = sigwinch_n;
+                        winch_in_flight.store(true, Ordering::SeqCst);
+                        send_terminal_size_async(info.clone(), cid, Arc::clone(&winch_in_flight));
                     }
                 }
                 std::thread::sleep(Duration::from_millis(25));
@@ -1573,7 +1645,7 @@ pub fn run_command(
             Ok(())
         },
     );
-    CANCEL_WATCH_STOP.store(true, Ordering::SeqCst);
+    watch_stop.store(true, Ordering::SeqCst);
     let _ = watcher.join();
     ch.close();
     match (final_resp, result) {
@@ -1756,5 +1828,361 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hung_update_terminal_size_does_not_block_sigint_cancel_or_three_strike_kill() {
+        use std::net::{Shutdown, TcpListener};
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Condvar;
+        use zel_proto::command_server::CancelResponse;
+        use zel_remote::grpc::{frame_message, MessageParser};
+        use zel_remote::hpack::Header;
+        use zel_remote::http2::{Conn, Event, LocalSettings, Stream};
+        use zel_remote::transport::Transport;
+
+        #[derive(Default)]
+        struct TestSignals {
+            sigint: AtomicUsize,
+            sigterm: AtomicUsize,
+            sigquit: AtomicUsize,
+            sigwinch: AtomicUsize,
+        }
+
+        impl SignalSource for TestSignals {
+            fn snapshot(&self) -> SignalSnapshot {
+                SignalSnapshot {
+                    sigint: self.sigint.load(Ordering::SeqCst),
+                    sigterm: self.sigterm.load(Ordering::SeqCst),
+                    sigquit: self.sigquit.load(Ordering::SeqCst),
+                    sigwinch: self.sigwinch.load(Ordering::SeqCst),
+                }
+            }
+        }
+
+        struct Gate {
+            flag: Mutex<bool>,
+            cv: Condvar,
+        }
+
+        impl Gate {
+            fn new() -> Self {
+                Self {
+                    flag: Mutex::new(false),
+                    cv: Condvar::new(),
+                }
+            }
+
+            fn signal(&self) {
+                *self.flag.lock().unwrap() = true;
+                self.cv.notify_all();
+            }
+
+            fn wait_timeout(&self, dur: Duration) -> bool {
+                let mut g = self.flag.lock().unwrap();
+                let deadline = Instant::now() + dur;
+                while !*g {
+                    let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                        return false;
+                    };
+                    let (ng, _) = self.cv.wait_timeout(g, rem).unwrap();
+                    g = ng;
+                }
+                true
+            }
+        }
+
+        struct MockState {
+            hang_cancel: bool,
+            run_started: Gate,
+            winch_entered: Gate,
+            cancel_entered: Gate,
+            finish_run: Gate,
+            release_hung_rpcs: Gate,
+            stop_accept: AtomicBool,
+        }
+
+        fn send_grpc_ok_headers(st: &Stream) -> io::Result<()> {
+            st.send_headers(
+                &[
+                    (":status".into(), "200".into()),
+                    ("content-type".into(), "application/grpc".into()),
+                ],
+                false,
+            )
+        }
+
+        fn finish_grpc_ok(st: &Stream) -> io::Result<()> {
+            st.send_headers(&[("grpc-status".into(), "0".into())], true)
+        }
+
+        fn read_unary_request(st: &Stream) -> io::Result<String> {
+            let mut headers: Vec<Header> = Vec::new();
+            let mut parser = MessageParser::default();
+            loop {
+                match st.recv(None)? {
+                    Event::Headers(h) => headers = h,
+                    Event::Data(d) => {
+                        parser.push(&d);
+                        while let Ok(Some(_)) = parser.next() {}
+                    }
+                    Event::End => break,
+                    Event::Trailers(_) => {}
+                    Event::Reset(_) => return Ok(String::new()),
+                }
+            }
+            Ok(headers
+                .iter()
+                .find(|(k, _)| k == ":path")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default())
+        }
+
+        fn start_mock_server(
+            hang_cancel: bool,
+        ) -> (String, Arc<MockState>, std::thread::JoinHandle<()>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let _ = listener.set_nonblocking(true);
+            let addr = listener.local_addr().unwrap().to_string();
+            let state = Arc::new(MockState {
+                hang_cancel,
+                run_started: Gate::new(),
+                winch_entered: Gate::new(),
+                cancel_entered: Gate::new(),
+                finish_run: Gate::new(),
+                release_hung_rpcs: Gate::new(),
+                stop_accept: AtomicBool::new(false),
+            });
+            let st_srv = Arc::clone(&state);
+            let accept_handle = std::thread::spawn(move || {
+                while !st_srv.stop_accept.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((tcp, _)) => {
+                            let _ = tcp.set_nonblocking(false);
+                            let _ = tcp.set_nodelay(true);
+                            let (Ok(r), Ok(w)) = (tcp.try_clone(), tcp.try_clone()) else {
+                                continue;
+                            };
+                            let st_conn = Arc::clone(&st_srv);
+                            std::thread::spawn(move || {
+                                let t = Transport {
+                                    reader: Box::new(r),
+                                    writer: Box::new(w),
+                                    shutdown: Box::new(move || {
+                                        let _ = tcp.shutdown(Shutdown::Both);
+                                    }),
+                                };
+                                let Ok((conn, rx)) = Conn::server_from(t, LocalSettings::default())
+                                else {
+                                    return;
+                                };
+                                while let Ok(stream) = rx.recv() {
+                                    let st_s = Arc::clone(&st_conn);
+                                    std::thread::spawn(move || {
+                                        let Ok(path) = read_unary_request(&stream) else {
+                                            return;
+                                        };
+                                        match path.strip_prefix(SERVICE) {
+                                            Some("Run") => {
+                                                let _ = send_grpc_ok_headers(&stream);
+                                                let init = RunResponse {
+                                                    cookie: "resp-cookie".into(),
+                                                    command_id: "cmd-hang-test".into(),
+                                                    finished: false,
+                                                    ..Default::default()
+                                                };
+                                                let _ = stream.send_data(
+                                                    &frame_message(&init.encode_to_vec()),
+                                                    false,
+                                                    None,
+                                                );
+                                                st_s.run_started.signal();
+                                                let _ = st_s
+                                                    .finish_run
+                                                    .wait_timeout(Duration::from_secs(10));
+                                                let done = RunResponse {
+                                                    cookie: "resp-cookie".into(),
+                                                    command_id: "cmd-hang-test".into(),
+                                                    exit_code: 8,
+                                                    finished: true,
+                                                    ..Default::default()
+                                                };
+                                                let _ = stream.send_data(
+                                                    &frame_message(&done.encode_to_vec()),
+                                                    false,
+                                                    None,
+                                                );
+                                                let _ = finish_grpc_ok(&stream);
+                                            }
+                                            Some("UpdateTerminalSize") => {
+                                                st_s.winch_entered.signal();
+                                                let _ = st_s
+                                                    .release_hung_rpcs
+                                                    .wait_timeout(Duration::from_secs(10));
+                                                let _ = send_grpc_ok_headers(&stream);
+                                                let resp = TerminalSizeResponse {
+                                                    cookie: "resp-cookie".into(),
+                                                };
+                                                let _ = stream.send_data(
+                                                    &frame_message(&resp.encode_to_vec()),
+                                                    false,
+                                                    None,
+                                                );
+                                                let _ = finish_grpc_ok(&stream);
+                                            }
+                                            Some("Cancel") => {
+                                                st_s.cancel_entered.signal();
+                                                if st_s.hang_cancel {
+                                                    let _ = st_s
+                                                        .release_hung_rpcs
+                                                        .wait_timeout(Duration::from_secs(10));
+                                                } else {
+                                                    st_s.finish_run.signal();
+                                                }
+                                                let _ = send_grpc_ok_headers(&stream);
+                                                let resp = CancelResponse {
+                                                    cookie: "resp-cookie".into(),
+                                                };
+                                                let _ = stream.send_data(
+                                                    &frame_message(&resp.encode_to_vec()),
+                                                    false,
+                                                    None,
+                                                );
+                                                let _ = finish_grpc_ok(&stream);
+                                            }
+                                            _ => {}
+                                        }
+                                    });
+                                }
+                                conn.close();
+                            });
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            (addr, state, accept_handle)
+        }
+
+        // Case 1: Hung `UpdateTerminalSize` RPC must not delay `SIGINT` `Cancel` or `run_command` exit.
+        {
+            let (addr, state, accept_handle) = start_mock_server(false);
+            let signals = Arc::new(TestSignals::default());
+            let info = ServerInfo {
+                pid: 0,
+                address: addr,
+                request_cookie: "req-cookie".into(),
+                response_cookie: "resp-cookie".into(),
+            };
+            let sig_client = Arc::clone(&signals);
+            let client = std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                run_command_inner(
+                    &info,
+                    &RunRequest::default(),
+                    &mut out,
+                    &mut err,
+                    Duration::from_secs(5),
+                    None,
+                    sig_client,
+                    Arc::new(|_| {}),
+                )
+            });
+
+            assert!(state.run_started.wait_timeout(Duration::from_secs(5)));
+            signals.sigwinch.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                state.winch_entered.wait_timeout(Duration::from_secs(5)),
+                "UpdateTerminalSize must reach server and block"
+            );
+
+            let t0 = Instant::now();
+            signals.sigint.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                state.cancel_entered.wait_timeout(Duration::from_secs(2)),
+                "Cancel RPC must not wait behind hung UpdateTerminalSize RPC"
+            );
+            let outcome = client.join().unwrap();
+            let elapsed = t0.elapsed();
+            assert!(outcome.abrupt.is_none(), "{:?}", outcome.abrupt);
+            assert_eq!(outcome.response.exit_code, 8);
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "SIGINT cancel took {elapsed:?} despite non-blocking UpdateTerminalSize"
+            );
+            assert!(
+                !*state.release_hung_rpcs.flag.lock().unwrap(),
+                "UpdateTerminalSize was still hung while Cancel completed"
+            );
+
+            state.stop_accept.store(true, Ordering::SeqCst);
+            state.release_hung_rpcs.signal();
+            let _ = accept_handle.join();
+        }
+
+        // Case 2: Hung `UpdateTerminalSize` AND hung `Cancel` must not block 3-strike `SIGINT` kill.
+        {
+            let (addr, state, accept_handle) = start_mock_server(true);
+            let signals = Arc::new(TestSignals::default());
+            let info = ServerInfo {
+                pid: 424242,
+                address: addr,
+                request_cookie: "req-cookie".into(),
+                response_cookie: "resp-cookie".into(),
+            };
+            let third_strike_pid = Arc::new(Mutex::new(None));
+            let third_strike_gate = Arc::new(Gate::new());
+            let pid_slot = Arc::clone(&third_strike_pid);
+            let strike_gate = Arc::clone(&third_strike_gate);
+            let state_kill = Arc::clone(&state);
+            let sig_client = Arc::clone(&signals);
+            let client = std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                run_command_inner(
+                    &info,
+                    &RunRequest::default(),
+                    &mut out,
+                    &mut err,
+                    Duration::from_secs(5),
+                    None,
+                    sig_client,
+                    Arc::new(move |srv| {
+                        *pid_slot.lock().unwrap() = Some(srv.pid);
+                        strike_gate.signal();
+                        state_kill.finish_run.signal();
+                    }),
+                )
+            });
+
+            assert!(state.run_started.wait_timeout(Duration::from_secs(5)));
+            signals.sigwinch.fetch_add(1, Ordering::SeqCst);
+            assert!(state.winch_entered.wait_timeout(Duration::from_secs(5)));
+
+            signals.sigint.fetch_add(1, Ordering::SeqCst);
+            assert!(state.cancel_entered.wait_timeout(Duration::from_secs(2)));
+
+            let t0 = Instant::now();
+            signals.sigint.fetch_add(2, Ordering::SeqCst);
+            assert!(
+                third_strike_gate.wait_timeout(Duration::from_secs(2)),
+                "third SIGINT kill must not wait behind hung UpdateTerminalSize or Cancel RPCs"
+            );
+            let elapsed = t0.elapsed();
+            assert_eq!(*third_strike_pid.lock().unwrap(), Some(424242));
+            assert!(
+                elapsed < Duration::from_secs(2),
+                "3-strike SIGINT took {elapsed:?}"
+            );
+            let _ = client.join().unwrap();
+
+            state.stop_accept.store(true, Ordering::SeqCst);
+            state.release_hung_rpcs.signal();
+            let _ = accept_handle.join();
+        }
     }
 }
