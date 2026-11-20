@@ -161,6 +161,7 @@ pub(crate) struct BuildObserver {
     default_profile: bool,
     output_base: String,
     invocation_id: String,
+    build_request_id: String,
     include_run_residue: bool,
     bes: Option<Arc<bes::BesTransport>>,
     bes_streaming_msg: Option<String>,
@@ -188,13 +189,20 @@ pub(crate) struct BuildObserver {
     convenience_symlinks: std::sync::Mutex<Vec<(String, String, bool)>>,
 }
 
-fn uuid_like() -> String {
-    // Version-4 shaped identifier derived from time + pid (no RNG crate available).
-    let n = zel_events::now_millis() as u128;
-    let p = std::process::id() as u128;
-    let x = n
+pub(crate) fn uuid_like() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    // Version-4 shaped identifier derived from time + pid + monotonic counter (no RNG crate).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_else(|_| zel_events::now_millis() as u128 * 1_000_000);
+    let pid = std::process::id() as u128;
+    let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128;
+    let x = nanos
         .wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835)
-        .wrapping_add(p.rotate_left(17));
+        .wrapping_add(pid.rotate_left(17))
+        .wrapping_add(seq.wrapping_mul(0xBF58_476D_1CE4_E5B9_94D0_49BB_1331_11EB));
+    let x = (x ^ (x >> 64)).wrapping_mul(0x94D0_49BB_1331_11EB_BF58_476D_1CE4_E5B9);
     format!(
         "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
         (x >> 96) as u32,
@@ -478,6 +486,9 @@ impl BuildObserver {
                         zel_remote::options::RemoteOptions::from_source(&BepRemoteSource(p))
                     {
                         ropts.set_client_env(client_env.clone());
+                        if ropts.build_request_id.is_none() {
+                            ropts.build_request_id = Some(build_request_id.clone());
+                        }
                         let target = ropts
                             .remote_cache
                             .as_deref()
@@ -541,6 +552,7 @@ impl BuildObserver {
             }
         }
         reporter.set_invocation_id(&invocation_id);
+        reporter.set_build_request_id(&build_request_id);
 
         // Profiler.
         let profile_flag = get("profile");
@@ -637,6 +649,7 @@ impl BuildObserver {
             default_profile,
             output_base: output_base.to_string(),
             invocation_id,
+            build_request_id,
             include_run_residue,
             bes: bes_t,
             bes_streaming_msg,
@@ -663,6 +676,15 @@ impl BuildObserver {
                 .unwrap_or(true),
             convenience_symlinks: Default::default(),
         }
+    }
+
+    pub(crate) fn invocation_id(&self) -> &str {
+        &self.invocation_id
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn build_request_id(&self) -> &str {
+        &self.build_request_id
     }
 
     pub(crate) fn set_convenience_symlinks(&self, links: Vec<(String, String, bool)>) {
@@ -2203,6 +2225,602 @@ mod tests {
         assert!(
             saw_test_summary_bs,
             "TestSummary missing bytestream log: {remote_bep}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn is_valid_uuid_v4(s: &str) -> bool {
+        let bytes = s.as_bytes();
+        if bytes.len() != 36 {
+            return false;
+        }
+        for (i, &b) in bytes.iter().enumerate() {
+            match i {
+                8 | 13 | 18 | 23 => {
+                    if b != b'-' {
+                        return false;
+                    }
+                }
+                14 => {
+                    if b != b'4' {
+                        return false;
+                    }
+                }
+                19 => {
+                    if !matches!(b, b'8' | b'9' | b'a' | b'b' | b'A' | b'B') {
+                        return false;
+                    }
+                }
+                _ => {
+                    if !b.is_ascii_hexdigit() {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    #[test]
+    fn uuid_like_generates_distinct_v4_uuids() {
+        let mut seen = HashSet::new();
+        for _ in 0..16 {
+            let id = uuid_like();
+            assert!(is_valid_uuid_v4(&id), "not a valid v4 UUID: {id}");
+            assert!(seen.insert(id.clone()), "duplicate uuid_like: {id}");
+        }
+    }
+
+    #[test]
+    fn build_observer_unifies_invocation_and_build_request_ids() {
+        let env = std::collections::BTreeMap::new();
+        let ob = std::env::temp_dir()
+            .join(format!("zel-obs-inv-unit-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+
+        // 1. Explicit --invocation_id and --build_request_id.
+        let exp_inv = "11111111-2222-4333-8444-555555555555";
+        let exp_req = "req-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+        let parsed = ParsedCommandOptions::parse_for_command(
+            "build",
+            &[
+                format!("--invocation_id={exp_inv}"),
+                format!("--build_request_id={exp_req}"),
+            ],
+        )
+        .unwrap();
+        let obs = BuildObserver::new_with_fallback_invocation_id(
+            Some(&parsed),
+            "build",
+            &ob,
+            Some("99999999-9999-4999-8999-999999999999"),
+            &env,
+        );
+        assert_eq!(obs.invocation_id(), exp_inv);
+        assert_eq!(obs.reporter.invocation_id(), exp_inv);
+        assert_eq!(obs.build_request_id(), exp_req);
+        assert_eq!(obs.reporter.build_request_id().as_deref(), Some(exp_req));
+
+        // 2. Empty --invocation_id= falls back to BAZEL_INTERNAL_INVOCATION_ID.
+        let env_inv = "22222222-3333-4444-8555-666666666666";
+        let parsed_empty =
+            ParsedCommandOptions::parse_for_command("build", &["--invocation_id=".to_string()])
+                .unwrap();
+        let obs_env = BuildObserver::new_with_fallback_invocation_id(
+            Some(&parsed_empty),
+            "build",
+            &ob,
+            Some(env_inv),
+            &env,
+        );
+        assert_eq!(obs_env.invocation_id(), env_inv);
+        assert_eq!(obs_env.reporter.invocation_id(), env_inv);
+        assert!(is_valid_uuid_v4(obs_env.build_request_id()));
+        assert_eq!(
+            obs_env.reporter.build_request_id().as_deref(),
+            Some(obs_env.build_request_id())
+        );
+
+        // 3. Auto-generated UUID when neither flag nor env var is set.
+        let parsed_auto = ParsedCommandOptions::parse_for_command("build", &[]).unwrap();
+        let obs_auto = BuildObserver::new_with_fallback_invocation_id(
+            Some(&parsed_auto),
+            "build",
+            &ob,
+            None,
+            &env,
+        );
+        assert!(is_valid_uuid_v4(obs_auto.invocation_id()));
+        assert_eq!(obs_auto.reporter.invocation_id(), obs_auto.invocation_id());
+        assert!(is_valid_uuid_v4(obs_auto.build_request_id()));
+        assert_eq!(
+            obs_auto.reporter.build_request_id().as_deref(),
+            Some(obs_auto.build_request_id())
+        );
+        assert_ne!(obs_auto.invocation_id(), obs_auto.build_request_id());
+    }
+
+    #[cfg(unix)]
+    #[derive(Clone, Default)]
+    struct TestBesServer {
+        lifecycle_ids: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        stream_ids: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+        lifecycle_rm: Arc<std::sync::Mutex<Vec<zel_proto::reapi::RequestMetadata>>>,
+        stream_rm: Arc<std::sync::Mutex<Vec<zel_proto::reapi::RequestMetadata>>>,
+    }
+
+    #[cfg(unix)]
+    impl TestBesServer {
+        fn clear(&self) {
+            self.lifecycle_ids.lock().unwrap().clear();
+            self.stream_ids.lock().unwrap().clear();
+            self.lifecycle_rm.lock().unwrap().clear();
+            self.stream_rm.lock().unwrap().clear();
+        }
+
+        fn serve_tcp(&self, listener: std::net::TcpListener) {
+            let me = self.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let (Ok(r), Ok(w)) = (stream.try_clone(), stream.try_clone()) else {
+                        continue;
+                    };
+                    let me2 = me.clone();
+                    let t = zel_remote::transport::Transport {
+                        reader: Box::new(r),
+                        writer: Box::new(w),
+                        shutdown: Box::new(move || {
+                            let _ = stream.shutdown(std::net::Shutdown::Both);
+                        }),
+                    };
+                    std::thread::spawn(move || {
+                        let Ok((_conn, rx)) = zel_remote::http2::Conn::server_from(
+                            t,
+                            zel_remote::http2::LocalSettings::default(),
+                        ) else {
+                            return;
+                        };
+                        while let Ok(st) = rx.recv() {
+                            let me3 = me2.clone();
+                            std::thread::spawn(move || me3.handle(st));
+                        }
+                    });
+                }
+            });
+        }
+
+        fn handle(&self, st: zel_remote::http2::Stream) {
+            use zel_proto::dynamic::Msg;
+            use zel_remote::grpc::{frame_message, MessageParser};
+            use zel_remote::http2::Event;
+
+            let mut headers = Vec::new();
+            let mut parser = MessageParser::default();
+            let mut msgs = Vec::new();
+            loop {
+                match st.recv(None) {
+                    Ok(Event::Headers(h)) => headers = h,
+                    Ok(Event::Data(d)) => {
+                        parser.push(&d);
+                        while let Ok(Some(m)) = parser.next() {
+                            msgs.push(m);
+                        }
+                    }
+                    Ok(Event::End) => break,
+                    _ => return,
+                }
+            }
+            let path = headers
+                .iter()
+                .find(|(k, _)| k == ":path")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            let rm = decode_request_metadata(&headers);
+            let ok_headers = [
+                (":status".to_string(), "200".to_string()),
+                ("content-type".to_string(), "application/grpc".to_string()),
+            ];
+            if path.ends_with("/PublishLifecycleEvent") {
+                if let Some(m) = msgs.first() {
+                    if let Ok(req) =
+                        Msg::decode("google.devtools.build.v1.PublishLifecycleEventRequest", m)
+                    {
+                        if let Some(obe) = req.get_msg("build_event") {
+                            if let Some(sid) = obe.get_msg("stream_id") {
+                                self.lifecycle_ids.lock().unwrap().push((
+                                    sid.get_str("invocation_id").to_string(),
+                                    sid.get_str("build_id").to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                if let Some(rm) = rm {
+                    self.lifecycle_rm.lock().unwrap().push(rm);
+                }
+                let _ = st.send_headers(&ok_headers, false);
+                let _ = st.send_data(&frame_message(&[]), false, None);
+                let _ = st.send_headers(&[("grpc-status".to_string(), "0".to_string())], true);
+                return;
+            }
+            if let Some(rm) = rm {
+                self.stream_rm.lock().unwrap().push(rm);
+            }
+            let _ = st.send_headers(&ok_headers, false);
+            for m in &msgs {
+                let r = Msg::decode(
+                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                    m,
+                )
+                .unwrap();
+                let o = r.get_msg("ordered_build_event").unwrap();
+                let seq = o.get_i64("sequence_number");
+                let mut resp =
+                    Msg::new("google.devtools.build.v1.PublishBuildToolEventStreamResponse");
+                resp.set_int("sequence_number", seq);
+                if let Some(sid) = o.get_msg("stream_id") {
+                    self.stream_ids.lock().unwrap().push((
+                        sid.get_str("invocation_id").to_string(),
+                        sid.get_str("build_id").to_string(),
+                    ));
+                    resp.set_msg("stream_id", sid.clone());
+                }
+                let _ = st.send_data(&frame_message(&resp.encode_to_vec()), false, None);
+            }
+            let _ = st.send_headers(&[("grpc-status".to_string(), "0".to_string())], true);
+        }
+    }
+
+    #[cfg(unix)]
+    fn decode_request_metadata(
+        headers: &[(String, String)],
+    ) -> Option<zel_proto::reapi::RequestMetadata> {
+        use zel_proto::reapi::{Message, RequestMetadata};
+        let raw = headers
+            .iter()
+            .find(|(k, _)| k == zel_remote::reapi_client::REQUEST_METADATA_HEADER)
+            .map(|(_, v)| v.as_str())?;
+        let bytes = zel_util::base64_decode(raw).ok()?;
+        RequestMetadata::decode(&bytes).ok()
+    }
+
+    #[cfg(unix)]
+    fn extract_info_invocation_id(stderr: &str) -> String {
+        stderr
+            .lines()
+            .find_map(|l| l.strip_prefix("INFO: Invocation ID: "))
+            .map(str::trim)
+            .unwrap_or_else(|| panic!("missing 'INFO: Invocation ID:' in stderr:\n{stderr}"))
+            .to_string()
+    }
+
+    #[cfg(unix)]
+    fn extract_bep_started_uuid(bep_json: &str) -> String {
+        let first = bep_json
+            .lines()
+            .next()
+            .expect("BEP JSON must contain BuildStarted event");
+        let needle = "\"uuid\":\"";
+        let start = first
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing uuid in BuildStarted: {first}"))
+            + needle.len();
+        let rest = &first[start..];
+        let end = rest.find('"').expect("unterminated uuid string");
+        rest[..end].to_string()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invocation_id_unified_across_bes_console_reapi_and_commands() {
+        let reapi_listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIPPED: loopback sockets not permitted ({e})");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let reapi_port = reapi_listener.local_addr().unwrap().port();
+        let bes_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bes_port = bes_listener.local_addr().unwrap().port();
+
+        let reapi = zel_remote::fake_server::FakeReapiServer::new();
+        reapi.serve_tcp(reapi_listener);
+        let bes = TestBesServer::default();
+        bes.serve_tcp(bes_listener);
+
+        let root = std::env::temp_dir().join(format!("zel-obs-inv-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("p")).unwrap();
+        std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
+        std::fs::write(
+            ws.join("p/defs.bzl"),
+            concat!(
+                "def _exe_impl(ctx):\n",
+                "    exe = ctx.actions.declare_file(ctx.label.name + '.sh')\n",
+                "    ctx.actions.run_shell(outputs = [exe], command = 'printf \"#!/bin/sh\\necho ok\\nexit 0\\n\" > ' + exe.path + ' && chmod +x ' + exe.path)\n",
+                "    return [DefaultInfo(executable = exe)]\n",
+                "my_test = rule(implementation = _exe_impl, test = True)\n",
+                "my_bin = rule(implementation = _exe_impl, executable = True)\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("p/BUILD"),
+            concat!(
+                "load('//p:defs.bzl', 'my_test', 'my_bin')\n",
+                "genrule(name='g_explicit', outs=['g_explicit.txt'], cmd='echo explicit > $@')\n",
+                "genrule(name='g_env', outs=['g_env.txt'], cmd='echo env > $@')\n",
+                "genrule(name='g_auto1', outs=['g_auto1.txt'], cmd='echo auto1 > $@')\n",
+                "genrule(name='g_auto2', outs=['g_auto2.txt'], cmd='echo auto2 > $@')\n",
+                "my_test(name='t_auto')\n",
+                "my_bin(name='bin_auto')\n",
+            ),
+        )
+        .unwrap();
+
+        let rt = runtime(&root, &ws);
+        let bes_flag = format!("--bes_backend=grpc://127.0.0.1:{bes_port}");
+        let results_url = "https://bes.example/invocation/";
+        let results_flag = format!("--bes_results_url={results_url}");
+        let cache_flag = format!("--remote_cache=grpc://127.0.0.1:{reapi_port}");
+        let path_for = |n: &str| root.join(n).to_str().unwrap().to_string();
+
+        let assert_all_match = |label: &str,
+                                err: &str,
+                                bep_path: &str,
+                                expected_inv: Option<&str>,
+                                expected_req: Option<&str>|
+         -> (String, String) {
+            let console_inv = extract_info_invocation_id(err);
+            assert!(
+                is_valid_uuid_v4(&console_inv) || expected_inv.is_some(),
+                "[{label}] console invocation id not valid UUID: {console_inv}"
+            );
+            if let Some(exp) = expected_inv {
+                assert_eq!(console_inv, exp, "[{label}] console invocation id mismatch");
+            }
+            assert!(
+                err.contains(&format!(
+                    "INFO: Streaming build results to: {results_url}{console_inv}"
+                )),
+                "[{label}] streaming URL mismatch in stderr:\n{err}"
+            );
+
+            let bep_json = std::fs::read_to_string(bep_path).unwrap();
+            let bep_uuid = extract_bep_started_uuid(&bep_json);
+            assert_eq!(
+                bep_uuid, console_inv,
+                "[{label}] BEP BuildStarted.uuid mismatch"
+            );
+
+            let lc_ids = bes.lifecycle_ids.lock().unwrap().clone();
+            assert!(
+                !lc_ids.is_empty(),
+                "[{label}] no BES lifecycle events captured"
+            );
+            let bes_build_id = lc_ids[0].1.clone();
+            if let Some(exp_r) = expected_req {
+                assert_eq!(bes_build_id, exp_r, "[{label}] BES build_id mismatch");
+            } else {
+                assert!(
+                    is_valid_uuid_v4(&bes_build_id),
+                    "[{label}] BES auto build_id not valid UUID: {bes_build_id}"
+                );
+            }
+            let mut saw_lifecycle_inv = 0usize;
+            for (inv, bid) in &lc_ids {
+                if !inv.is_empty() {
+                    assert_eq!(
+                        inv, &console_inv,
+                        "[{label}] BES lifecycle invocation_id mismatch"
+                    );
+                    saw_lifecycle_inv += 1;
+                }
+                assert_eq!(
+                    bid, &bes_build_id,
+                    "[{label}] BES lifecycle build_id mismatch"
+                );
+            }
+            assert!(
+                saw_lifecycle_inv >= 2,
+                "[{label}] expected invocation_attempt_started/finished with invocation_id, got {lc_ids:?}"
+            );
+            let st_ids = bes.stream_ids.lock().unwrap().clone();
+            assert!(
+                !st_ids.is_empty(),
+                "[{label}] no BES stream events captured"
+            );
+            for (inv, bid) in &st_ids {
+                assert_eq!(
+                    inv, &console_inv,
+                    "[{label}] BES stream invocation_id mismatch"
+                );
+                assert_eq!(bid, &bes_build_id, "[{label}] BES stream build_id mismatch");
+            }
+            for rm in bes
+                .lifecycle_rm
+                .lock()
+                .unwrap()
+                .iter()
+                .chain(bes.stream_rm.lock().unwrap().iter())
+            {
+                assert_eq!(
+                    rm.tool_invocation_id, console_inv,
+                    "[{label}] BES RequestMetadata.tool_invocation_id mismatch"
+                );
+                assert_eq!(
+                    rm.correlated_invocations_id, bes_build_id,
+                    "[{label}] BES RequestMetadata.correlated_invocations_id mismatch"
+                );
+            }
+
+            let reapi_headers = reapi
+                .last_headers("GetActionResult")
+                .or_else(|| reapi.last_headers("FindMissingBlobs"))
+                .unwrap_or_else(|| panic!("[{label}] no REAPI RPC headers recorded"));
+            let reapi_rm = decode_request_metadata(&reapi_headers)
+                .unwrap_or_else(|| panic!("[{label}] missing REAPI RequestMetadata header"));
+            assert_eq!(
+                reapi_rm.tool_invocation_id, console_inv,
+                "[{label}] REAPI RequestMetadata.tool_invocation_id mismatch"
+            );
+            assert_eq!(
+                reapi_rm.correlated_invocations_id, bes_build_id,
+                "[{label}] REAPI RequestMetadata.correlated_invocations_id mismatch"
+            );
+
+            (console_inv, bes_build_id)
+        };
+
+        // 1. Explicit --invocation_id and --build_request_id.
+        bes.clear();
+        let explicit_inv = "11111111-2222-4333-8444-555555555555";
+        let explicit_req = "req-11111111-2222-4333-8444-555555555555";
+        let bep1 = path_for("bep_explicit.json");
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                "--nouse_action_cache",
+                &format!("--invocation_id={explicit_inv}"),
+                &format!("--build_request_id={explicit_req}"),
+                &bes_flag,
+                &results_flag,
+                &cache_flag,
+                &format!("--build_event_json_file={bep1}"),
+                "//p:g_explicit",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_all_match(
+            "explicit",
+            &err,
+            &bep1,
+            Some(explicit_inv),
+            Some(explicit_req),
+        );
+
+        // 2. BAZEL_INTERNAL_INVOCATION_ID via --client_env (with empty --invocation_id=).
+        bes.clear();
+        let env_inv = "22222222-3333-4444-8555-666666666666";
+        let bep2 = path_for("bep_env.json");
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                "--nouse_action_cache",
+                "--invocation_id=",
+                &format!("--client_env=BAZEL_INTERNAL_INVOCATION_ID={env_inv}"),
+                &bes_flag,
+                &results_flag,
+                &cache_flag,
+                &format!("--build_event_json_file={bep2}"),
+                "//p:g_env",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_all_match("env", &err, &bep2, Some(env_inv), None);
+
+        // 3. Auto-generated UUID (two consecutive builds produce distinct, internally consistent UUIDs).
+        bes.clear();
+        let bep3 = path_for("bep_auto1.json");
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                "--nouse_action_cache",
+                &bes_flag,
+                &results_flag,
+                &cache_flag,
+                &format!("--build_event_json_file={bep3}"),
+                "//p:g_auto1",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let (auto_inv1, _) = assert_all_match("auto1", &err, &bep3, None, None);
+
+        bes.clear();
+        let bep4 = path_for("bep_auto2.json");
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                "--nouse_action_cache",
+                &bes_flag,
+                &results_flag,
+                &cache_flag,
+                &format!("--build_event_json_file={bep4}"),
+                "//p:g_auto2",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let (auto_inv2, _) = assert_all_match("auto2", &err, &bep4, None, None);
+        assert_ne!(
+            auto_inv1, auto_inv2,
+            "consecutive auto-generated invocations must have distinct UUIDs"
+        );
+
+        // 4. `test` command with auto-generated UUID.
+        bes.clear();
+        let bep5 = path_for("bep_test.json");
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "test",
+                "--nouse_action_cache",
+                "--nocache_test_results",
+                &bes_flag,
+                &results_flag,
+                &cache_flag,
+                &format!("--build_event_json_file={bep5}"),
+                "//p:t_auto",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        assert_all_match("test", &err, &bep5, None, None);
+
+        // 5. `run --norun` command with auto-generated UUID: BUILD_ID in ExecRequest also matches.
+        bes.clear();
+        let bep6 = path_for("bep_run.json");
+        let run_req = zel_proto::command_server::RunRequest {
+            cookie: "c".into(),
+            arg: [
+                "run",
+                "--norun",
+                "--nouse_action_cache",
+                &bes_flag,
+                &results_flag,
+                &cache_flag,
+                &format!("--build_event_json_file={bep6}"),
+                "//p:bin_auto",
+            ]
+            .iter()
+            .map(|a| a.as_bytes().to_vec())
+            .collect(),
+            client_description: "t".into(),
+            ..Default::default()
+        };
+        let run_resp = rt.dispatch_command(&run_req, "r");
+        let run_err = String::from_utf8_lossy(&run_resp.standard_error).to_string();
+        assert_eq!(run_resp.exit_code, 0, "{run_err}");
+        let (run_inv, _) = assert_all_match("run", &run_err, &bep6, None, None);
+        let exec = run_resp
+            .exec_request
+            .expect("ExecRequest must be populated for `run --norun`");
+        let build_id_env = exec
+            .environment_variable
+            .iter()
+            .find(|ev| ev.name == b"BUILD_ID")
+            .map(|ev| String::from_utf8_lossy(&ev.value).into_owned());
+        assert_eq!(
+            build_id_env.as_deref(),
+            Some(run_inv.as_str()),
+            "run ExecRequest BUILD_ID must match canonical invocation_id"
         );
 
         let _ = std::fs::remove_dir_all(&root);
