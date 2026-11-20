@@ -38,7 +38,7 @@ use zel_remote::credentials::{
     GoogleAuthCallCredentialsProvider, NetrcCredentialsProvider,
 };
 use zel_remote::digest::DigestFn;
-use zel_remote::grpc::{BidiStream, CallOptions, Channel, ChannelConfig, GrpcStatus, RetryPolicy};
+use zel_remote::grpc::{BidiStream, CallOptions, Channel, ChannelConfig, GrpcStatus};
 use zel_remote::http_cache::HttpCacheClient;
 use zel_remote::merkle::BlobSource;
 use zel_remote::options::{BuildEventUploadMode, Endpoint};
@@ -165,11 +165,32 @@ fn push_background_upload(upload: BackgroundUpload) {
 }
 
 fn cancel_background_shared(shared: &Arc<Shared>) {
-    shared.cancelled.store(true, Ordering::SeqCst);
+    {
+        let _q = shared.q.lock().unwrap();
+        shared.cancelled.store(true, Ordering::SeqCst);
+    }
     if let Some(b) = shared.active_bidi.lock().unwrap().take() {
         b.cancel();
     }
+    shared.channel.close();
     shared.cv.notify_all();
+}
+
+fn sleep_interruptible(shared: &Shared, dur: Duration) -> bool {
+    if shared.cancelled.load(Ordering::SeqCst) {
+        return false;
+    }
+    let deadline = Instant::now() + dur;
+    let mut q = shared.q.lock().unwrap();
+    while !shared.cancelled.load(Ordering::SeqCst) {
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        let (nq, _) = shared.cv.wait_timeout(q, deadline - now).unwrap();
+        q = nq;
+    }
+    false
 }
 
 fn format_previous_upload_error(err: &BesUploadError) -> String {
@@ -229,7 +250,6 @@ pub fn drain_previous_uploads_ext(is_shutdown: bool, max_wait: Duration) -> Prev
                     ));
                 }
                 cancel_background_shared(&u.shared);
-                let _ = u.worker.join();
             } else if let Some(rx) = u.done_rx.take() {
                 match rx.try_recv() {
                     Ok(Ok(())) | Err(mpsc::TryRecvError::Disconnected) => {
@@ -244,7 +264,6 @@ pub fn drain_previous_uploads_ext(is_shutdown: bool, max_wait: Duration) -> Prev
                         if bes_dl.is_some_and(|bdl| Instant::now() >= bdl) {
                             warnings.push(format_previous_upload_error(&BesUploadError::timeout()));
                             cancel_background_shared(&u.shared);
-                            let _ = u.worker.join();
                         } else {
                             // `BuildEventServiceModule.waitForPreviousInvocation`: `fully_async`
                             // waits only on `halfCloseFuture` during non-shutdown commands while
@@ -285,7 +304,6 @@ pub fn drain_previous_uploads_ext(is_shutdown: bool, max_wait: Duration) -> Prev
                         ));
                     }
                     cancel_background_shared(&u.shared);
-                    let _ = u.worker.join();
                 }
             }
         } else {
@@ -1102,6 +1120,7 @@ struct Shared {
     cv: Condvar,
     cancelled: AtomicBool,
     active_bidi: Mutex<Option<BidiStream>>,
+    channel: Arc<Channel>,
     success: AtomicBool,
 }
 
@@ -1125,6 +1144,7 @@ impl BesTransport {
             cv: Condvar::new(),
             cancelled: AtomicBool::new(false),
             active_bidi: Mutex::new(None),
+            channel: channel.clone(),
             success: AtomicBool::new(true),
         });
         let (tx, rx) = mpsc::channel();
@@ -1175,24 +1195,45 @@ impl BesTransport {
     }
 }
 
+/// Per-RPC deadline for unary `PublishLifecycleEvent` calls
+/// (`BuildEventServiceGrpcClient.RPC_TIMEOUT = Duration.ofSeconds(15)`).
+const LIFECYCLE_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
 fn publish_lifecycle_rpc(
     cfg: &BesConfig,
     channel: &Channel,
+    shared: &Shared,
     kind: &str,
     success: bool,
 ) -> Result<(), GrpcStatus> {
     let req = lifecycle_request(cfg, kind, success).encode_to_vec();
     let opts = CallOptions {
-        timeout: Some(cfg.timeout.unwrap_or(Duration::from_secs(15))),
+        timeout: Some(LIFECYCLE_RPC_TIMEOUT),
         metadata: cfg.request_metadata_headers(),
     };
-    let policy = RetryPolicy {
-        max_retries: BES_MAX_RETRIES,
-        ..Default::default()
-    };
-    policy
-        .run(|| channel.unary(PUBLISH_LIFECYCLE, &req, &opts))
-        .map(|_| ())
+    let mut attempt = 0u32;
+    let mut delay = Duration::from_millis(100);
+    loop {
+        if shared.cancelled.load(Ordering::SeqCst) {
+            return Err(GrpcStatus::new(code::CANCELLED, "BES upload cancelled"));
+        }
+        match channel.unary(PUBLISH_LIFECYCLE, &req, &opts) {
+            Ok(_) => return Ok(()),
+            Err(st) => {
+                if shared.cancelled.load(Ordering::SeqCst) {
+                    return Err(GrpcStatus::new(code::CANCELLED, "BES upload cancelled"));
+                }
+                if !is_bes_stream_retriable(&st) || attempt >= BES_MAX_RETRIES {
+                    return Err(st);
+                }
+                attempt += 1;
+                if !sleep_interruptible(shared, delay) {
+                    return Err(GrpcStatus::new(code::CANCELLED, "BES upload cancelled"));
+                }
+                delay = Duration::from_secs_f64((delay.as_secs_f64() * 1.6).min(30.0));
+            }
+        }
+    }
 }
 
 fn run_uploader(
@@ -1205,7 +1246,10 @@ fn run_uploader(
             if shared.cancelled.load(Ordering::SeqCst) {
                 return Err(BesUploadError::timeout());
             }
-            if let Err(st) = publish_lifecycle_rpc(cfg, channel, kind, true) {
+            if let Err(st) = publish_lifecycle_rpc(cfg, channel, shared, kind, true) {
+                if shared.cancelled.load(Ordering::SeqCst) {
+                    return Err(BesUploadError::timeout());
+                }
                 return Err(BesUploadError::from_grpc(&st));
             }
         }
@@ -1219,11 +1263,20 @@ fn run_uploader(
         let ok = shared.success.load(Ordering::SeqCst);
         let mut lc_err: Option<BesUploadError> = None;
         for kind in ["invocation_attempt_finished", "build_finished"] {
-            if let Err(st) = publish_lifecycle_rpc(cfg, channel, kind, ok) {
+            if shared.cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+            if let Err(st) = publish_lifecycle_rpc(cfg, channel, shared, kind, ok) {
+                if shared.cancelled.load(Ordering::SeqCst) {
+                    break;
+                }
                 if lc_err.is_none() {
                     lc_err = Some(BesUploadError::from_grpc(&st));
                 }
             }
+        }
+        if shared.cancelled.load(Ordering::SeqCst) {
+            return Err(BesUploadError::timeout());
         }
         if stream_res.is_ok() {
             if let Some(e) = lc_err {
@@ -1260,7 +1313,9 @@ fn run_bidi_stream(
                     return Err(BesUploadError::from_grpc(&st));
                 }
                 attempt += 1;
-                std::thread::sleep(delay);
+                if !sleep_interruptible(shared, delay) {
+                    return Err(BesUploadError::timeout());
+                }
                 delay = Duration::from_secs_f64((delay.as_secs_f64() * 1.6).min(30.0));
                 continue;
             }
@@ -1308,10 +1363,11 @@ fn run_bidi_stream(
                         send_bidi.send_message(&bytes, false, None)?;
                     }
                     None => {
-                        send_bidi.close_send()?;
+                        let close_res = send_bidi.close_send();
                         let mut q = send_shared.q.lock().unwrap();
                         q.half_closed = true;
                         send_shared.cv.notify_all();
+                        close_res?;
                         return Ok(idx as i64);
                     }
                 }
@@ -1377,12 +1433,19 @@ fn run_bidi_stream(
 
         match recv_res {
             Ok(()) => {
+                // `BuildEventServiceUploader`: once the final event has been queued/sent, every
+                // event has been acknowledged, and the server completed the stream with `OK`, the
+                // upload succeeded even if client `close_send` raced with server stream teardown.
+                if closed && acked == total_len {
+                    let mut q = shared.q.lock().unwrap();
+                    q.half_closed = true;
+                    shared.cv.notify_all();
+                    return Ok(());
+                }
                 if let Err(wst) = writer_res {
                     if !is_bes_stream_retriable(&wst) || attempt >= BES_MAX_RETRIES {
                         return Err(BesUploadError::from_grpc(&wst));
                     }
-                } else if closed && acked == total_len {
-                    return Ok(());
                 } else {
                     // Clean OK completion with unacknowledged events fails immediately without
                     // retrying (`BuildEventServiceUploader`).
@@ -1407,7 +1470,9 @@ fn run_bidi_stream(
         }
 
         attempt += 1;
-        std::thread::sleep(delay);
+        if !sleep_interruptible(shared, delay) {
+            return Err(BesUploadError::timeout());
+        }
         delay = Duration::from_secs_f64((delay.as_secs_f64() * 1.6).min(30.0));
     }
 }
@@ -1517,17 +1582,15 @@ impl BuildEventTransport for BesTransport {
         }
 
         let rx = self.done_rx.lock().unwrap().take();
+        let mut timed_out = false;
         let mut result: Result<(), BesUploadError> = Ok(());
         if let Some(rx) = rx {
             result = match self.cfg.timeout {
                 Some(t) => match rx.recv_timeout(t) {
                     Ok(r) => r,
                     Err(_) => {
-                        self.shared.cancelled.store(true, Ordering::SeqCst);
-                        if let Some(b) = self.shared.active_bidi.lock().unwrap().take() {
-                            b.cancel();
-                        }
-                        self.shared.cv.notify_all();
+                        timed_out = true;
+                        cancel_background_shared(&self.shared);
                         Err(BesUploadError::timeout())
                     }
                 },
@@ -1537,7 +1600,9 @@ impl BuildEventTransport for BesTransport {
             };
         }
         if let Some(h) = self.worker.lock().unwrap().take() {
-            let _ = h.join();
+            if !timed_out {
+                let _ = h.join();
+            }
         }
         if let Err(ref e) = result {
             *self.last_error.lock().unwrap() = Some(e.clone());
@@ -2935,5 +3000,276 @@ mod tests {
             background_uploads().lock().unwrap().is_empty(),
             "completed retained fully_async upload must be reaped on subsequent non-shutdown drain"
         );
+    }
+
+    #[test]
+    fn bes_close_respects_timeout_during_retry_sleep_and_hanging_lifecycle_rpc() {
+        struct SlowOrRetryingConn {
+            hang_lifecycle: bool,
+        }
+
+        impl Connector for SlowOrRetryingConn {
+            fn authority(&self) -> String {
+                "x:1".into()
+            }
+
+            fn connect(&self) -> io::Result<Transport> {
+                let (c, s) = memory_pair();
+                let hang_lifecycle = self.hang_lifecycle;
+                std::thread::spawn(move || {
+                    let Ok((_conn, rx)) = Conn::server_from(s, LocalSettings::default()) else {
+                        return;
+                    };
+                    while let Ok(st) = rx.recv() {
+                        std::thread::spawn(move || {
+                            let mut path = String::new();
+                            loop {
+                                match st.recv(None) {
+                                    Ok(Event::Headers(h)) => {
+                                        path = h
+                                            .iter()
+                                            .find(|kv| kv.0 == ":path")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        if !hang_lifecycle && path == PUBLISH_STREAM {
+                                            // Reject stream immediately with retriable UNAVAILABLE
+                                            // so the uploader enters retry backoff sleep.
+                                            let _ = st.send_headers(
+                                                &[
+                                                    (":status".to_string(), "200".to_string()),
+                                                    (
+                                                        "content-type".to_string(),
+                                                        "application/grpc".to_string(),
+                                                    ),
+                                                    ("grpc-status".to_string(), "14".to_string()),
+                                                    (
+                                                        "grpc-message".to_string(),
+                                                        "unavailable".to_string(),
+                                                    ),
+                                                ],
+                                                true,
+                                            );
+                                            return;
+                                        }
+                                    }
+                                    Ok(Event::Data(_)) => {}
+                                    Ok(Event::End) => break,
+                                    _ => return,
+                                }
+                            }
+                            if path == PUBLISH_LIFECYCLE {
+                                if hang_lifecycle {
+                                    // Hold the unary lifecycle RPC open until the client closes
+                                    // the channel on `--bes_timeout`.
+                                    let _ = st.recv(Some(Instant::now() + Duration::from_secs(10)));
+                                    return;
+                                }
+                                let _ = st.send_headers(
+                                    &[
+                                        (":status".to_string(), "200".to_string()),
+                                        (
+                                            "content-type".to_string(),
+                                            "application/grpc".to_string(),
+                                        ),
+                                    ],
+                                    false,
+                                );
+                                let _ = st.send_data(&frame_message(&[]), false, None);
+                                let _ = st.send_headers(
+                                    &[("grpc-status".to_string(), "0".to_string())],
+                                    true,
+                                );
+                            }
+                        });
+                    }
+                });
+                Ok(c)
+            }
+        }
+
+        // 1. Worker in retry backoff sleep when `--bes_timeout` expires: `close()` must return
+        //    promptly instead of waiting out uninterruptible retry sleeps.
+        let ch_retry = Arc::new(Channel::new(
+            Arc::new(SlowOrRetryingConn {
+                hang_lifecycle: false,
+            }),
+            1,
+            vec![],
+        ));
+        let mut c_retry = cfg();
+        c_retry.timeout = Some(Duration::from_millis(60));
+        let t_retry = BesTransport::start(c_retry, ch_retry);
+        t_retry.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        let started_retry = Instant::now();
+        let err_retry = t_retry.close().unwrap_err();
+        let elapsed_retry = started_retry.elapsed();
+        assert!(err_retry.contains("timed out"), "unexpected: {err_retry}");
+        assert!(
+            elapsed_retry < Duration::from_millis(500),
+            "close() exceeded --bes_timeout during retry sleep: {elapsed_retry:?}"
+        );
+
+        // 2. Worker blocked inside a hanging `PublishLifecycleEvent` RPC when `--bes_timeout`
+        //    expires: `close()` cancels the channel and returns promptly at `--bes_timeout`.
+        let ch_lc = Arc::new(Channel::new(
+            Arc::new(SlowOrRetryingConn {
+                hang_lifecycle: true,
+            }),
+            1,
+            vec![],
+        ));
+        let mut c_lc = cfg();
+        c_lc.timeout = Some(Duration::from_millis(60));
+        let t_lc = BesTransport::start(c_lc, ch_lc);
+        t_lc.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        let started_lc = Instant::now();
+        let err_lc = t_lc.close().unwrap_err();
+        let elapsed_lc = started_lc.elapsed();
+        assert!(err_lc.contains("timed out"), "unexpected: {err_lc}");
+        assert!(
+            elapsed_lc < Duration::from_millis(500),
+            "close() exceeded --bes_timeout during lifecycle RPC: {elapsed_lc:?}"
+        );
+    }
+
+    #[test]
+    fn bes_stream_succeeds_when_all_events_acked_and_server_closes_ok_before_close_send() {
+        struct EarlyOkBeforeHalfCloseConn {
+            stream_attempts: Arc<Mutex<u32>>,
+            lifecycle_count: Arc<Mutex<u32>>,
+        }
+
+        impl Connector for EarlyOkBeforeHalfCloseConn {
+            fn authority(&self) -> String {
+                "x:1".into()
+            }
+
+            fn connect(&self) -> io::Result<Transport> {
+                let (c, s) = memory_pair();
+                let stream_attempts = self.stream_attempts.clone();
+                let lifecycle_count = self.lifecycle_count.clone();
+                std::thread::spawn(move || {
+                    let Ok((conn, rx)) = Conn::server_from(s, LocalSettings::default()) else {
+                        return;
+                    };
+                    while let Ok(st) = rx.recv() {
+                        let stream_attempts = stream_attempts.clone();
+                        let lifecycle_count = lifecycle_count.clone();
+                        let conn_ref = conn.clone();
+                        std::thread::spawn(move || {
+                            let mut parser = MessageParser::default();
+                            let mut path = String::new();
+                            let ok_headers = [
+                                (":status".to_string(), "200".to_string()),
+                                ("content-type".to_string(), "application/grpc".to_string()),
+                            ];
+                            let mut sent_hdrs = false;
+                            loop {
+                                match st.recv(None) {
+                                    Ok(Event::Headers(h)) => {
+                                        path = h
+                                            .iter()
+                                            .find(|kv| kv.0 == ":path")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        if path == PUBLISH_STREAM {
+                                            *stream_attempts.lock().unwrap() += 1;
+                                        }
+                                    }
+                                    Ok(Event::Data(d)) => {
+                                        parser.push(&d);
+                                        while let Ok(Some(m)) = parser.next() {
+                                            if path == PUBLISH_STREAM {
+                                                if !sent_hdrs {
+                                                    let _ = st.send_headers(&ok_headers, false);
+                                                    sent_hdrs = true;
+                                                }
+                                                let r = Msg::decode(
+                                                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                                                    &m,
+                                                )
+                                                .unwrap();
+                                                let o = r.get_msg("ordered_build_event").unwrap();
+                                                let mut resp = Msg::new(
+                                                    "google.devtools.build.v1.PublishBuildToolEventStreamResponse",
+                                                );
+                                                resp.set_int(
+                                                    "sequence_number",
+                                                    o.get_i64("sequence_number"),
+                                                );
+                                                if let Some(sid) = o.get_msg("stream_id") {
+                                                    resp.set_msg("stream_id", sid.clone());
+                                                }
+                                                let _ = st.send_data(
+                                                    &frame_message(&resp.encode_to_vec()),
+                                                    false,
+                                                    None,
+                                                );
+                                                let is_finish = o
+                                                    .get_msg("event")
+                                                    .and_then(|ev| {
+                                                        ev.get_msg("component_stream_finished")
+                                                    })
+                                                    .is_some();
+                                                if is_finish {
+                                                    // Complete stream with Status.OK immediately
+                                                    // upon receiving `ComponentStreamFinished` and
+                                                    // tear down the stream/connection before client
+                                                    // `close_send` runs (RFC 9113 §8.1).
+                                                    let _ = st.send_headers(
+                                                        &[(
+                                                            "grpc-status".to_string(),
+                                                            "0".to_string(),
+                                                        )],
+                                                        true,
+                                                    );
+                                                    st.reset(12); // INADEQUATE_SECURITY -> non-retriable PERMISSION_DENIED on writer
+                                                    let _ = conn_ref;
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Ok(Event::End) => break,
+                                    _ => return,
+                                }
+                            }
+                            if path == PUBLISH_LIFECYCLE {
+                                *lifecycle_count.lock().unwrap() += 1;
+                                let _ = st.send_headers(&ok_headers, false);
+                                let _ = st.send_data(&frame_message(&[]), false, None);
+                                let _ = st.send_headers(
+                                    &[("grpc-status".to_string(), "0".to_string())],
+                                    true,
+                                );
+                            }
+                        });
+                    }
+                });
+                Ok(c)
+            }
+        }
+
+        let stream_attempts = Arc::new(Mutex::new(0u32));
+        let lifecycle_count = Arc::new(Mutex::new(0u32));
+        let ch = Arc::new(Channel::new(
+            Arc::new(EarlyOkBeforeHalfCloseConn {
+                stream_attempts: stream_attempts.clone(),
+                lifecycle_count: lifecycle_count.clone(),
+            }),
+            1,
+            vec![],
+        ));
+        let t = BesTransport::start(cfg(), ch);
+        t.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        t.close().expect(
+            "upload must succeed when server ACKs all events and closes OK before close_send",
+        );
+        assert_eq!(
+            *stream_attempts.lock().unwrap(),
+            1,
+            "fully-acknowledged OK stream must not retry on close_send race"
+        );
+        assert_eq!(*lifecycle_count.lock().unwrap(), 4);
     }
 }
