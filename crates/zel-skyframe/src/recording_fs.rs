@@ -168,9 +168,20 @@ impl FileSystem for RecordingFileSystem {
     ) -> io::Result<()> {
         self.inner.create_symbolic_link(link_path, target)
     }
+    fn create_symbolic_link_raw(
+        &self,
+        link_path: &PathFragment,
+        raw_target: &str,
+    ) -> io::Result<()> {
+        self.inner.create_symbolic_link_raw(link_path, raw_target)
+    }
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
         record_file(link_path);
         self.inner.read_symbolic_link(link_path)
+    }
+    fn read_symbolic_link_raw(&self, link_path: &PathFragment) -> io::Result<String> {
+        record_file(link_path);
+        self.inner.read_symbolic_link_raw(link_path)
     }
     fn create_hard_link(
         &self,

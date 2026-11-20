@@ -964,7 +964,22 @@ pub trait FileSystem: Send + Sync {
         link_path: &PathFragment,
         target_fragment: &PathFragment,
     ) -> io::Result<()>;
+    /// Creates a symbolic link whose target string is stored verbatim (without `PathFragment`
+    /// collapsing `.` or `..` segments).
+    fn create_symbolic_link_raw(
+        &self,
+        link_path: &PathFragment,
+        raw_target: &str,
+    ) -> io::Result<()> {
+        self.create_symbolic_link(link_path, &PathFragment::create(raw_target))
+    }
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment>;
+    /// Reads a symbolic link's raw target string without collapsing `.` or `..` segments
+    /// (stripping Windows NT extended prefixes and normalizing `\` on Windows).
+    fn read_symbolic_link_raw(&self, link_path: &PathFragment) -> io::Result<String> {
+        self.read_symbolic_link(link_path)
+            .map(|p| p.path_string().to_string())
+    }
     fn chmod(&self, _path: &PathFragment, _mode: u32) -> io::Result<()> {
         Ok(())
     }
@@ -1180,17 +1195,22 @@ impl FileSystem for LocalFileSystem {
         link_path: &PathFragment,
         target_fragment: &PathFragment,
     ) -> io::Result<()> {
+        self.create_symbolic_link_raw(link_path, target_fragment.path_string())
+    }
+
+    fn create_symbolic_link_raw(
+        &self,
+        link_path: &PathFragment,
+        raw_target: &str,
+    ) -> io::Result<()> {
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(
-                StdPath::new(target_fragment.path_string()),
-                Self::to_std_path(link_path),
-            )
+            std::os::unix::fs::symlink(StdPath::new(raw_target), Self::to_std_path(link_path))
         }
         #[cfg(windows)]
         {
             let link = Self::to_std_path(link_path);
-            let raw_target = StdPath::new(target_fragment.path_string());
+            let raw_target = StdPath::new(raw_target);
             let resolved_target = if raw_target.is_absolute() {
                 raw_target.to_path_buf()
             } else {
@@ -1206,7 +1226,7 @@ impl FileSystem for LocalFileSystem {
         }
         #[cfg(all(not(unix), not(windows)))]
         {
-            let _ = (link_path, target_fragment);
+            let _ = (link_path, raw_target);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "symlinks not supported on this platform",
@@ -1218,6 +1238,12 @@ impl FileSystem for LocalFileSystem {
         let target = fs::read_link(Self::to_std_path(link_path))?;
         let raw = target.to_string_lossy();
         Ok(PathFragment::create(&strip_windows_nt_prefix(&raw)))
+    }
+
+    fn read_symbolic_link_raw(&self, link_path: &PathFragment) -> io::Result<String> {
+        let target = fs::read_link(Self::to_std_path(link_path))?;
+        let raw = target.to_string_lossy();
+        Ok(normalize_raw_symlink_target(&raw))
     }
 
     fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
@@ -1375,6 +1401,20 @@ pub fn strip_windows_nt_prefix(raw: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(rest);
     }
     std::borrow::Cow::Borrowed(raw)
+}
+
+/// Normalizes a raw `read_link` target string without collapsing `.` or `..` segments:
+/// strips Windows NT extended/object prefixes (`\\?\`, `\??\`, `//?/`) and converts `\`
+/// separators to `/` on Windows (or for Windows NT-prefixed paths), preserving POSIX
+/// relative/absolute symlink targets verbatim.
+pub fn normalize_raw_symlink_target(raw: &str) -> String {
+    let stripped = strip_windows_nt_prefix(raw);
+    let has_nt_prefix = stripped.len() != raw.len();
+    if cfg!(windows) || has_nt_prefix {
+        stripped.replace('\\', "/")
+    } else {
+        stripped.into_owned()
+    }
 }
 
 /// Compares a raw `read_link` target string against an expected path string, accounting for
@@ -1650,6 +1690,7 @@ enum InMemoryNode {
     },
     Symlink {
         target: PathFragment,
+        raw_target: String,
         mtime_ms: u64,
         node_id: u64,
     },
@@ -1782,15 +1823,16 @@ impl FileSystem for InMemoryFileSystem {
                 node_id: *node_id,
             }),
             Some(InMemoryNode::Symlink {
-                target,
+                raw_target,
                 mtime_ms,
                 node_id,
+                ..
             }) => Ok(FileStatus {
                 is_file: false,
                 is_directory: false,
                 is_symlink: true,
                 is_special_file: false,
-                size: target.path_string().len() as u64,
+                size: raw_target.len() as u64,
                 last_modified_time_ms: *mtime_ms,
                 last_change_time_ms: *mtime_ms,
                 permissions: 0o777,
@@ -1964,7 +2006,27 @@ impl FileSystem for InMemoryFileSystem {
         map.insert(
             link_path.clone(),
             InMemoryNode::Symlink {
+                raw_target: target_fragment.path_string().to_string(),
                 target: target_fragment.clone(),
+                mtime_ms: 0,
+                node_id: id,
+            },
+        );
+        Ok(())
+    }
+
+    fn create_symbolic_link_raw(
+        &self,
+        link_path: &PathFragment,
+        raw_target: &str,
+    ) -> io::Result<()> {
+        let id = self.alloc_id();
+        let mut map = self.nodes.write().unwrap();
+        map.insert(
+            link_path.clone(),
+            InMemoryNode::Symlink {
+                target: PathFragment::create(raw_target),
+                raw_target: normalize_raw_symlink_target(raw_target),
                 mtime_ms: 0,
                 node_id: id,
             },
@@ -1977,6 +2039,18 @@ impl FileSystem for InMemoryFileSystem {
         let resolved = Self::resolve_path(&map, link_path, false)?;
         match map.get(&resolved) {
             Some(InMemoryNode::Symlink { target, .. }) => Ok(target.clone()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Not a symlink: {link_path}"),
+            )),
+        }
+    }
+
+    fn read_symbolic_link_raw(&self, link_path: &PathFragment) -> io::Result<String> {
+        let map = self.nodes.read().unwrap();
+        let resolved = Self::resolve_path(&map, link_path, false)?;
+        match map.get(&resolved) {
+            Some(InMemoryNode::Symlink { raw_target, .. }) => Ok(raw_target.clone()),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("Not a symlink: {link_path}"),
@@ -3083,5 +3157,38 @@ mod tests {
             assert_eq!(host_posix.drive_str_length(), 1);
             assert_eq!(PathFragment::create(host_posix.path_string()), host_posix);
         }
+    }
+
+    #[test]
+    fn raw_symlink_target_preserves_dot_and_dotdot_segments() {
+        assert_eq!(
+            normalize_raw_symlink_target("./sub/../target.txt"),
+            "./sub/../target.txt"
+        );
+        assert_eq!(normalize_raw_symlink_target("a/../b"), "a/../b");
+        assert_eq!(normalize_raw_symlink_target("../../foo"), "../../foo");
+        assert_eq!(
+            normalize_raw_symlink_target(r"\\?\C:\ws\a\..\b"),
+            "C:/ws/a/../b"
+        );
+        assert_eq!(
+            normalize_raw_symlink_target(r"\??\UNC\server\share\a\..\b"),
+            "//server/share/a/../b"
+        );
+
+        let mem = InMemoryFileSystem::default();
+        mem.create_directory_and_parents(&PathFragment::create("/ws/pkg"))
+            .unwrap();
+        let link = PathFragment::create("/ws/pkg/sym");
+        mem.create_symbolic_link_raw(&link, "./sub/../target.txt")
+            .unwrap();
+        assert_eq!(
+            mem.read_symbolic_link_raw(&link).unwrap(),
+            "./sub/../target.txt"
+        );
+        assert_eq!(
+            mem.read_symbolic_link(&link).unwrap(),
+            PathFragment::create("target.txt")
+        );
     }
 }

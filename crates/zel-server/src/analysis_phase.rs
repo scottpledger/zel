@@ -2475,7 +2475,13 @@ fn select_actions(
                     push_art(&mut work, a.exec_path.path_string());
                 }
                 if let Some(rs) = &ct.runfiles_support {
-                    for a in &rs.runfiles.artifacts {
+                    for a in rs
+                        .runfiles
+                        .artifacts
+                        .iter()
+                        .chain(rs.runfiles.symlinks.values())
+                        .chain(rs.runfiles.root_symlinks.values())
+                    {
                         push_art(&mut work, a.exec_path.path_string());
                     }
                 }

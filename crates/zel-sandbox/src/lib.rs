@@ -516,7 +516,7 @@ fn update_single_runfiles_tree(exec_root: &Path, tree: &RunfilesTreeData) -> io:
     }
     match tree.symlinks_mode {
         RunfilesSymlinksMode::Create => {
-            let mut symlinks = BTreeMap::new();
+            let mut symlinks: BTreeMap<PathFragment, Option<String>> = BTreeMap::new();
             for (k, v) in &tree.mapping {
                 let target = match v {
                     None => None,
@@ -526,21 +526,31 @@ fn update_single_runfiles_tree(exec_root: &Path, tree: &RunfilesTreeData) -> io:
                     }) => {
                         let p = exec_root.join(exec_path.path_string());
                         if *is_symlink {
-                            Some(PathFragment::create(
+                            Some(zel_vfs::normalize_raw_symlink_target(
                                 &std::fs::read_link(&p)?.to_string_lossy(),
                             ))
                         } else {
-                            Some(PathFragment::create(&p.to_string_lossy()))
+                            Some(
+                                PathFragment::create(&p.to_string_lossy())
+                                    .path_string()
+                                    .to_string(),
+                            )
                         }
                     }
-                    Some(RunfilesTarget::TreeArtifact { exec_path, .. }) => {
-                        Some(PathFragment::create(
+                    Some(RunfilesTarget::TreeArtifact { exec_path, .. }) => Some(
+                        PathFragment::create(
                             &exec_root.join(exec_path.path_string()).to_string_lossy(),
-                        ))
-                    }
-                    Some(RunfilesTarget::Fileset { exec_path, .. }) => Some(PathFragment::create(
-                        &exec_root.join(exec_path.path_string()).to_string_lossy(),
-                    )),
+                        )
+                        .path_string()
+                        .to_string(),
+                    ),
+                    Some(RunfilesTarget::Fileset { exec_path, .. }) => Some(
+                        PathFragment::create(
+                            &exec_root.join(exec_path.path_string()).to_string_lossy(),
+                        )
+                        .path_string()
+                        .to_string(),
+                    ),
                     Some(RunfilesTarget::NestedRunfilesTree) => {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidInput,
@@ -550,7 +560,7 @@ fn update_single_runfiles_tree(exec_root: &Path, tree: &RunfilesTreeData) -> io:
                 };
                 symlinks.insert(k.clone(), target);
             }
-            sync_symlink_tree(&runfiles_dir, &symlinks)?;
+            sync_symlink_tree_raw(&runfiles_dir, &symlinks)?;
             std::fs::create_dir_all(runfiles_dir.join(&tree.workspace_name))?;
             link_manifest(&input_manifest, &output_manifest)?;
         }
@@ -597,9 +607,22 @@ pub fn sync_symlink_tree(
     symlink_tree_root: &Path,
     symlinks: &BTreeMap<PathFragment, Option<PathFragment>>,
 ) -> io::Result<()> {
+    let raw: BTreeMap<PathFragment, Option<String>> = symlinks
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_ref().map(|p| p.path_string().to_string())))
+        .collect();
+    sync_symlink_tree_raw(symlink_tree_root, &raw)
+}
+
+/// Like [`sync_symlink_tree`], but preserves raw symlink target strings verbatim (without
+/// collapsing `.` or `..` segments via `PathFragment::create`).
+pub fn sync_symlink_tree_raw(
+    symlink_tree_root: &Path,
+    symlinks: &BTreeMap<PathFragment, Option<String>>,
+) -> io::Result<()> {
     #[derive(Default)]
     struct DirNode {
-        symlinks: BTreeMap<String, Option<PathFragment>>,
+        symlinks: BTreeMap<String, Option<String>>,
         directories: BTreeMap<String, DirNode>,
     }
 
@@ -628,12 +651,11 @@ pub fn sync_symlink_tree(
             .insert(path.base_name().to_string(), target.clone());
     }
 
-    fn ensure_symlink(link: &Path, target: &PathFragment) -> io::Result<()> {
+    fn ensure_symlink(link: &Path, target: &str) -> io::Result<()> {
         if let Ok(existing) = std::fs::read_link(link) {
-            let raw = existing.to_string_lossy();
-            let existing_frag = PathFragment::create(&zel_vfs::strip_windows_nt_prefix(&raw));
-            let target_frag = PathFragment::create(target.path_string());
-            if existing_frag == target_frag {
+            let existing_raw = zel_vfs::normalize_raw_symlink_target(&existing.to_string_lossy());
+            let target_raw = zel_vfs::normalize_raw_symlink_target(target);
+            if existing_raw == target_raw {
                 return Ok(());
             }
         }
@@ -641,12 +663,19 @@ pub fn sync_symlink_tree(
             delete_tree(link)?;
         }
         #[cfg(unix)]
-        std::os::unix::fs::symlink(target.path_string(), link)?;
+        std::os::unix::fs::symlink(target, link)?;
         #[cfg(not(unix))]
         {
-            let src = Path::new(target.path_string());
+            let src = Path::new(target);
+            let resolved_src = if src.is_relative() {
+                link.parent()
+                    .map(|p| p.join(src))
+                    .unwrap_or_else(|| src.to_path_buf())
+            } else {
+                src.to_path_buf()
+            };
             #[cfg(windows)]
-            let linked = if src.is_dir() {
+            let linked = if resolved_src.is_dir() {
                 std::os::windows::fs::symlink_dir(src, link).is_ok()
             } else {
                 std::os::windows::fs::symlink_file(src, link).is_ok()
@@ -654,9 +683,9 @@ pub fn sync_symlink_tree(
             #[cfg(not(windows))]
             let linked = false;
             if !linked {
-                if src.is_file() {
-                    std::fs::copy(src, link)?;
-                } else if src.is_dir() {
+                if resolved_src.is_file() {
+                    std::fs::copy(&resolved_src, link)?;
+                } else if resolved_src.is_dir() {
                     fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
                         std::fs::create_dir_all(dst)?;
                         for entry in std::fs::read_dir(src)? {
@@ -671,7 +700,7 @@ pub fn sync_symlink_tree(
                         }
                         Ok(())
                     }
-                    copy_dir(src, link)?;
+                    copy_dir(&resolved_src, link)?;
                 } else {
                     std::fs::write(link, b"")?;
                 }

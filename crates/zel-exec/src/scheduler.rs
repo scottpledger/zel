@@ -268,15 +268,63 @@ pub fn execute_actions(
         if st.states.iter().all(|s| *s != ActionState::NotRun) || st.stop || st.catastrophic_stop {
             None
         } else {
-            // Remaining NotRun actions whose deps never failed => cycle among them.
-            let stuck: Vec<usize> = (0..n)
-                .filter(|&i| {
-                    st.states[i] == ActionState::NotRun
-                        && deps[i].iter().all(|&d| st.states[d] != ActionState::Failed)
-                        && st.pending_deps[i] > 0
-                        && deps[i].iter().any(|&d| st.states[d] == ActionState::NotRun)
+            // Distinguish genuine action-graph cycles from actions left `NotRun` because an
+            // upstream dependency failed (potentially multiple hops away under `--keep_going`).
+            // On the induced subgraph of `NotRun` actions, peel all zero-in-degree nodes (which
+            // removes every DAG chain downstream of a failed action), then peel zero-out-degree
+            // nodes so only true cycle members remain.
+            let mut alive: Vec<bool> = (0..n)
+                .map(|i| st.states[i] == ActionState::NotRun)
+                .collect();
+            let mut in_deg: Vec<usize> = (0..n)
+                .map(|i| {
+                    if alive[i] {
+                        deps[i].iter().filter(|&&d| alive[d]).count()
+                    } else {
+                        0
+                    }
                 })
                 .collect();
+            let mut q: VecDeque<usize> = (0..n).filter(|&i| alive[i] && in_deg[i] == 0).collect();
+            while let Some(u) = q.pop_front() {
+                if !alive[u] {
+                    continue;
+                }
+                alive[u] = false;
+                for &v in &dependents[u] {
+                    if alive[v] {
+                        in_deg[v] -= 1;
+                        if in_deg[v] == 0 {
+                            q.push_back(v);
+                        }
+                    }
+                }
+            }
+            let mut out_deg: Vec<usize> = (0..n)
+                .map(|i| {
+                    if alive[i] {
+                        dependents[i].iter().filter(|&&v| alive[v]).count()
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let mut rq: VecDeque<usize> = (0..n).filter(|&i| alive[i] && out_deg[i] == 0).collect();
+            while let Some(u) = rq.pop_front() {
+                if !alive[u] {
+                    continue;
+                }
+                alive[u] = false;
+                for &d in &deps[u] {
+                    if alive[d] {
+                        out_deg[d] -= 1;
+                        if out_deg[d] == 0 {
+                            rq.push_back(d);
+                        }
+                    }
+                }
+            }
+            let stuck: Vec<usize> = (0..n).filter(|&i| alive[i]).collect();
             if stuck.is_empty() {
                 None
             } else {
@@ -562,6 +610,91 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(format!("{}/bazel-out/k8-fastbuild/bin/pkg/z", r)).unwrap(),
             "hi\n"
+        );
+    }
+
+    #[test]
+    fn keep_going_transitive_failure_not_reported_as_cycle() {
+        let r = root("kg-trans-fail");
+        let a_out = out("bazel-out/k8-fastbuild/bin/smoke_bundle.tar");
+        let b_out = out("bazel-out/k8-fastbuild/bin/smoke_build_test_0__deps.out");
+        let w_out = out("bazel-out/k8-fastbuild/bin/smoke_build_test.sh");
+        let c_out = out("bazel-out/k8-fastbuild/bin/smoke_build_test.sh.runfiles_manifest");
+        let d_out = out("bazel-out/k8-fastbuild/bin/independent.txt");
+
+        // Exact `build_test` graph: A (bundle) fails -> B (genrule) skipped -> C (runfiles_manifest) skipped.
+        let a = sh("exit 1", vec![], vec![a_out.clone()]);
+        let b = sh(
+            "touch bazel-out/k8-fastbuild/bin/smoke_build_test_0__deps.out",
+            vec![a_out],
+            vec![b_out.clone()],
+        );
+        let w = sh(
+            "echo '#!/bin/sh' > bazel-out/k8-fastbuild/bin/smoke_build_test.sh",
+            vec![],
+            vec![w_out.clone()],
+        );
+        let c = ActionAnalysisMetadata::FileWriteAction {
+            owner: Label::parse_canonical("//:smoke_build_test").unwrap(),
+            output: c_out,
+            content: b"_main/smoke_build_test.sh bazel-out/k8-fastbuild/bin/smoke_build_test.sh\n"
+                .to_vec(),
+            is_executable: false,
+            inputs: vec![w_out, b_out],
+            param_file_spec: None,
+        };
+        let d = sh(
+            "echo ok > bazel-out/k8-fastbuild/bin/independent.txt",
+            vec![],
+            vec![d_out],
+        );
+
+        let res = run(&[a, b, w, c, d], 2, true, &r);
+        assert!(
+            res.cycle.is_none(),
+            "transitive dependents of failed actions must not be reported as a cycle: {:?}",
+            res.cycle
+        );
+        assert_eq!(res.actions[0].state, ActionState::Failed);
+        assert_eq!(res.actions[1].state, ActionState::NotRun);
+        assert_eq!(res.actions[2].state, ActionState::Succeeded);
+        assert_eq!(res.actions[3].state, ActionState::NotRun);
+        assert_eq!(res.actions[4].state, ActionState::Succeeded);
+    }
+
+    #[test]
+    fn real_cycle_detected_under_keep_going_without_downstream_bystanders() {
+        let r = root("kg-real-cycle");
+        let a_out = out("bazel-out/k8-fastbuild/bin/pkg/fail.out");
+        let x_out = out("bazel-out/k8-fastbuild/bin/pkg/x.out");
+        let y_out = out("bazel-out/k8-fastbuild/bin/pkg/y.out");
+        let z_out = out("bazel-out/k8-fastbuild/bin/pkg/z.out");
+
+        // A fails and feeds X, while X <-> Y is a genuine cycle and Z is downstream of Y.
+        let a = sh("exit 1", vec![], vec![a_out.clone()]);
+        let x = sh(
+            "echo x > bazel-out/k8-fastbuild/bin/pkg/x.out",
+            vec![a_out, y_out.clone()],
+            vec![x_out.clone()],
+        );
+        let y = sh(
+            "echo y > bazel-out/k8-fastbuild/bin/pkg/y.out",
+            vec![x_out],
+            vec![y_out.clone()],
+        );
+        let z = sh(
+            "echo z > bazel-out/k8-fastbuild/bin/pkg/z.out",
+            vec![y_out],
+            vec![z_out],
+        );
+
+        let res = run(&[a, x, y, z], 2, true, &r);
+        let cycle = res.cycle.expect("genuine X <-> Y cycle must be detected");
+        assert!(cycle.iter().any(|p| p.ends_with("pkg/x.out")), "{cycle:?}");
+        assert!(cycle.iter().any(|p| p.ends_with("pkg/y.out")), "{cycle:?}");
+        assert!(
+            !cycle.iter().any(|p| p.ends_with("pkg/z.out")),
+            "downstream bystander Z should be peeled from cycle report: {cycle:?}"
         );
     }
 }

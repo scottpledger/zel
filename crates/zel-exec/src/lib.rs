@@ -971,6 +971,7 @@ pub struct ToolRunfilesSpec {
     pub repo_mapping: Vec<(String, String, String)>,
     pub enable_runfiles: bool,
     pub legacy_external_runfiles: bool,
+    pub unresolved_symlink_paths: std::collections::BTreeSet<String>,
 }
 
 /// Resolves the environment of a spawn: fixed values, then the inherited variables present in
@@ -1871,6 +1872,33 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
                 }
             }
         }
+        ActionAnalysisMetadata::SourceSymlinkManifestAction { spec, inputs, .. } => {
+            p.kind = "source_symlink_manifest".into();
+            p.payload
+                .extend_from_slice(&(spec.workspace_name.len() as u32).to_le_bytes());
+            p.payload.extend_from_slice(spec.workspace_name.as_bytes());
+            p.payload.push(spec.legacy_external_runfiles as u8);
+            p.payload
+                .extend_from_slice(&(spec.entries.len() as u32).to_le_bytes());
+            for (k, v) in &spec.entries {
+                p.payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                p.payload.extend_from_slice(k.as_bytes());
+                p.payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                p.payload.extend_from_slice(v.as_bytes());
+            }
+            let mut unresolved: Vec<&str> = inputs
+                .iter()
+                .filter(|a| a.is_unresolved_symlink)
+                .map(|a| a.exec_path.path_string())
+                .collect();
+            unresolved.sort_unstable();
+            p.payload
+                .extend_from_slice(&(unresolved.len() as u32).to_le_bytes());
+            for u in unresolved {
+                p.payload.extend_from_slice(&(u.len() as u32).to_le_bytes());
+                p.payload.extend_from_slice(u.as_bytes());
+            }
+        }
         ActionAnalysisMetadata::SymlinkAction { input_path, .. } => {
             p.kind = "symlink".into();
             p.payload = input_path.path_string().as_bytes().to_vec();
@@ -2061,6 +2089,11 @@ pub fn execute_action_with(
         .filter(|a| a.is_constant_metadata)
         .map(|a| a.exec_path.path_string())
         .collect();
+    let unresolved_symlink_inputs: std::collections::HashSet<&str> = action_inputs
+        .iter()
+        .filter(|a| a.is_unresolved_symlink)
+        .map(|a| a.exec_path.path_string())
+        .collect();
     let source_by_exec: std::collections::HashMap<&str, &Artifact> = action_inputs
         .iter()
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
@@ -2074,6 +2107,11 @@ pub fn execute_action_with(
             let target = execroot.get_relative_str(p);
             fs.exists(&target, true)
                 .then(|| "CONSTANT_METADATA".to_string())
+        } else if unresolved_symlink_inputs.contains(p) {
+            let target = execroot.get_relative_str(p);
+            fs.read_symbolic_link_raw(&target)
+                .ok()
+                .map(|t| digest.hex(t.as_bytes()))
         } else if let Some(fc) = &opts.file_cache {
             if let Some(src_art) = source_by_exec.get(p) {
                 match fc.get_artifact_metadata(src_art) {
@@ -2142,9 +2180,9 @@ pub fn execute_action_with(
         let p = abs(&o.exec_path);
         let rel = o.exec_path.path_string();
         if o.is_unresolved_symlink {
-            fs.read_symbolic_link(&p)
+            fs.read_symbolic_link_raw(&p)
                 .ok()
-                .map(|t| digest.hex(t.path_string().as_bytes()))
+                .map(|t| digest.hex(t.as_bytes()))
         } else {
             hybrid_path_digest(digest, fs, execroot, rel, remote_runner, check_ttl)
         }
@@ -2213,6 +2251,9 @@ pub fn execute_action_with(
                 } else {
                     format!("Writing file {}", output.root_relative_path)
                 }
+            }
+            ActionAnalysisMetadata::SourceSymlinkManifestAction { owner, .. } => {
+                format!("Creating source manifest for {owner}")
             }
             ActionAnalysisMetadata::TemplateExpansionAction { output, .. } => {
                 format!("Expanding template {}", output.root_relative_path)
@@ -2423,6 +2464,72 @@ pub fn execute_action_with(
                 if *is_executable {
                     let _ = fs.chmod(&out_path, 0o755);
                 }
+            }
+        }
+        ActionAnalysisMetadata::SourceSymlinkManifestAction {
+            output,
+            spec,
+            inputs,
+            ..
+        } => {
+            let out_path = execroot.get_relative(&output.exec_path);
+            if let Some(parent) = out_path.parent_directory() {
+                fs.create_directory_and_parents(&parent)?;
+            }
+            let unresolved: std::collections::BTreeSet<String> = inputs
+                .iter()
+                .filter(|a| a.is_unresolved_symlink)
+                .map(|a| a.exec_path.path_string().to_string())
+                .collect();
+            let resolved = crate::runfiles_tree::resolve_manifest_entries_with(
+                std::path::Path::new(execroot.path_string()),
+                &spec.entries,
+                &unresolved,
+                &spec.workspace_name,
+                spec.legacy_external_runfiles,
+                |abs_path, force_unresolved| {
+                    let pf = PathFragment::create(&abs_path.to_string_lossy());
+                    let is_unresolved = force_unresolved
+                        || (fs.stat(&pf, false).is_ok_and(|st| st.is_symlink)
+                            && !fs.exists(&pf, true));
+                    if is_unresolved {
+                        fs.read_symbolic_link_raw(&pf).ok()
+                    } else {
+                        None
+                    }
+                },
+            );
+            let final_bytes = crate::runfiles_tree::encode_source_manifest_iso_8859_1(&resolved);
+            let host_parent_exists = out_path
+                .parent_directory()
+                .is_some_and(|pd| std::path::Path::new(pd.path_string()).is_dir());
+            if host_parent_exists {
+                let p = std::path::Path::new(out_path.path_string());
+                if let Err(e) = file_write_strategy_write(p, &final_bytes, false) {
+                    return Ok(fail_ext(
+                        vec![format!(
+                            "ERROR: {loc}: Creating source manifest {} failed: {e}",
+                            output.root_relative_path
+                        )],
+                        36,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                    ));
+                }
+            } else if let Err(e) = fs.write_file(&out_path, &final_bytes) {
+                return Ok(fail_ext(
+                    vec![format!(
+                        "ERROR: {loc}: Creating source manifest {} failed: {e}",
+                        output.root_relative_path
+                    )],
+                    36,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    true,
+                ));
             }
         }
         ActionAnalysisMetadata::SymlinkAction {
@@ -2737,7 +2844,13 @@ pub fn execute_action_with(
                 if builtin_ijar && rel == exe_first {
                     continue;
                 }
-                if !exists_in_action_fs(fs, execroot, rel, true, remote_runner) {
+                if !exists_in_action_fs(
+                    fs,
+                    execroot,
+                    rel,
+                    !input.is_unresolved_symlink,
+                    remote_runner,
+                ) {
                     if input.is_source {
                         let lbl = input.owner_label.canonical_form();
                         missing_sources.push(format!(
@@ -2850,6 +2963,7 @@ pub fn execute_action_with(
                             enable_runfiles: spec.enable_runfiles,
                             legacy_external_runfiles: spec.legacy_external_runfiles,
                             repo_mapping: spec.repo_mapping.clone(),
+                            unresolved_symlink_paths: spec.unresolved_symlink_paths.clone(),
                         };
                         let _ = crate::runfiles_tree::build_runfiles_tree(
                             er_path,

@@ -292,6 +292,20 @@ impl Runfiles {
         }
         out
     }
+
+    /// Exec paths of unresolved symlink artifacts (`is_unresolved_symlink == true`) present in
+    /// `artifacts`, `symlinks`, or `root_symlinks`.
+    pub fn unresolved_symlink_exec_paths(&self) -> BTreeSet<String> {
+        self.artifacts
+            .iter()
+            .chain(self.symlinks.values())
+            .chain(self.root_symlinks.values())
+            .chain(self.symlink_entries.iter().map(|(_, a)| a))
+            .chain(self.root_symlink_entries.iter().map(|(_, a)| a))
+            .filter(|a| a.is_unresolved_symlink)
+            .map(|a| a.exec_path.path_string().to_string())
+            .collect()
+    }
 }
 
 /// `RunfilesSupport`: the `<binary>.runfiles` tree, its manifest, and the runner.
@@ -511,5 +525,40 @@ mod tests {
             m3.ordered_symlinks(),
             vec![("map_sym".to_string(), a1), ("map_sym_2".to_string(), a2),]
         );
+    }
+
+    #[test]
+    fn unresolved_symlink_exec_paths_collects_only_unresolved_symlinks() {
+        let regular = art("pkg/regular.txt");
+        let mut unres_art = Artifact::derived(
+            "k8-opt-exec",
+            PathFragment::create("pkg/_venv/bin/python3"),
+            Label::parse_canonical("//pkg:t").unwrap(),
+        );
+        unres_art.is_unresolved_symlink = true;
+        let mut unres_sym = Artifact::derived(
+            "k8-opt-exec",
+            PathFragment::create("pkg/sym_link"),
+            Label::parse_canonical("//pkg:t").unwrap(),
+        );
+        unres_sym.is_unresolved_symlink = true;
+        let mut unres_root = Artifact::derived(
+            "k8-opt-exec",
+            PathFragment::create("pkg/root_link"),
+            Label::parse_canonical("//pkg:t").unwrap(),
+        );
+        unres_root.is_unresolved_symlink = true;
+
+        let mut rf = Runfiles::default();
+        rf.artifacts.push(regular);
+        rf.artifacts.push(unres_art.clone());
+        rf.symlinks.insert("s".into(), unres_sym.clone());
+        rf.root_symlinks.insert("r".into(), unres_root.clone());
+
+        let got = rf.unresolved_symlink_exec_paths();
+        assert_eq!(got.len(), 3);
+        assert!(got.contains(unres_art.exec_path.path_string()));
+        assert!(got.contains(unres_sym.exec_path.path_string()));
+        assert!(got.contains(unres_root.exec_path.path_string()));
     }
 }
