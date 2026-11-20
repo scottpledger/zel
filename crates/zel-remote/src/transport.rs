@@ -43,8 +43,22 @@ pub trait Connector: Send + Sync {
     fn connect_with_timeout(&self, _timeout: Duration) -> io::Result<Transport> {
         self.connect()
     }
+    /// Opens a transport applying `timeout` only to connection establishment (TCP connect / TLS
+    /// handshake), without setting socket read/write idle timeouts. Persistent pooled HTTP/2
+    /// channels use this so idle connections are not torn down by a single RPC's short timeout.
+    fn connect_with_dial_timeout(&self, _timeout: Duration) -> io::Result<Transport> {
+        self.connect()
+    }
     /// Value used for the HTTP/2 `:authority` pseudo-header (or HTTP/1.1 `Host`).
     fn authority(&self) -> String;
+}
+
+fn effective_dial_timeout(configured: Duration, caller: Duration) -> Duration {
+    match (configured.is_zero(), caller.is_zero()) {
+        (true, _) => caller,
+        (_, true) => configured,
+        (false, false) => configured.min(caller),
+    }
 }
 
 /// Plaintext TCP.
@@ -149,6 +163,11 @@ impl Connector for TcpConnector {
 
     fn connect_with_timeout(&self, timeout: Duration) -> io::Result<Transport> {
         self.connect_internal(timeout, Some(timeout))
+    }
+
+    fn connect_with_dial_timeout(&self, timeout: Duration) -> io::Result<Transport> {
+        let effective = effective_dial_timeout(self.connect_timeout, timeout);
+        self.connect_internal(effective, None)
     }
 
     fn authority(&self) -> String {
@@ -1003,6 +1022,11 @@ impl Connector for TlsConnector {
         let openssl = resolve_default_openssl()
             .map_err(|msg| io::Error::new(io::ErrorKind::Unsupported, msg))?;
         self.connect_with_binary(timeout, openssl)
+    }
+
+    fn connect_with_dial_timeout(&self, timeout: Duration) -> io::Result<Transport> {
+        let effective = effective_dial_timeout(self.connect_timeout, timeout);
+        self.connect_with_timeout(effective)
     }
 
     fn authority(&self) -> String {

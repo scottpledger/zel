@@ -365,6 +365,7 @@ impl BidiStream {
 #[derive(Default)]
 struct ConnPool {
     conns: Vec<Conn>,
+    /// In-flight dials belonging to the current `close_gen`.
     dialing: usize,
     close_gen: u64,
 }
@@ -372,31 +373,39 @@ struct ConnPool {
 struct DialGuard<'a> {
     pool: &'a Mutex<ConnPool>,
     cv: &'a Condvar,
+    dial_gen: u64,
     active: bool,
 }
 
 impl<'a> DialGuard<'a> {
-    fn new(pool: &'a Mutex<ConnPool>, cv: &'a Condvar) -> Self {
+    fn new(pool: &'a Mutex<ConnPool>, cv: &'a Condvar, dial_gen: u64) -> Self {
         Self {
             pool,
             cv,
+            dial_gen,
             active: true,
         }
     }
 
-    fn complete(mut self, conn: Conn, dial_gen: u64) -> Result<Conn, GrpcStatus> {
+    fn complete(
+        mut self,
+        conn: Conn,
+        connections_opened: &AtomicUsize,
+    ) -> Result<Conn, GrpcStatus> {
         self.active = false;
         let mut p = self.pool.lock().unwrap();
-        p.dialing -= 1;
-        if p.close_gen != dial_gen {
+        if p.close_gen != self.dial_gen {
+            // `Channel::close()` already advanced `close_gen` and reset `dialing` for the
+            // new generation; discard the stale connection without affecting newer dials.
             drop(p);
-            self.cv.notify_all();
             conn.close();
             return Err(GrpcStatus::new(
                 code::UNAVAILABLE,
                 "channel closed while connecting",
             ));
         }
+        p.dialing -= 1;
+        connections_opened.fetch_add(1, Ordering::SeqCst);
         p.conns.push(conn.clone());
         drop(p);
         self.cv.notify_all();
@@ -407,10 +416,16 @@ impl<'a> DialGuard<'a> {
 impl Drop for DialGuard<'_> {
     fn drop(&mut self) {
         if self.active {
+            let mut should_notify = false;
             if let Ok(mut p) = self.pool.lock() {
-                p.dialing = p.dialing.saturating_sub(1);
+                if p.close_gen == self.dial_gen {
+                    p.dialing = p.dialing.saturating_sub(1);
+                    should_notify = true;
+                }
             }
-            self.cv.notify_all();
+            if should_notify {
+                self.cv.notify_all();
+            }
         }
     }
 }
@@ -510,7 +525,7 @@ impl Channel {
         Ok(())
     }
 
-    fn pick_conn(&self) -> Result<Conn, GrpcStatus> {
+    fn pick_conn(&self, deadline: Option<Instant>) -> Result<Conn, GrpcStatus> {
         let dial_gen = {
             let mut p = self.pool.lock().unwrap();
             let initial_gen = p.close_gen;
@@ -528,30 +543,70 @@ impl Channel {
                     }
                 }
                 if p.conns.len().saturating_add(p.dialing) < self.max_connections {
+                    if let Some(dl) = deadline {
+                        if Instant::now() >= dl {
+                            return Err(GrpcStatus::new(
+                                code::DEADLINE_EXCEEDED,
+                                "deadline exceeded",
+                            ));
+                        }
+                    }
                     p.dialing += 1;
                     break initial_gen;
                 }
                 // No open connection yet and in-flight dials already occupy `max_connections`;
-                // wait for an in-flight dial to publish a connection or free a slot.
-                p = self.pool_cv.wait(p).unwrap();
+                // wait for an in-flight dial to publish a connection or free a slot, bounded by
+                // the caller's deadline.
+                if let Some(dl) = deadline {
+                    let now = Instant::now();
+                    if now >= dl {
+                        return Err(GrpcStatus::new(
+                            code::DEADLINE_EXCEEDED,
+                            "deadline exceeded",
+                        ));
+                    }
+                    let (next_p, _) = self.pool_cv.wait_timeout(p, dl - now).unwrap();
+                    p = next_p;
+                } else {
+                    p = self.pool_cv.wait(p).unwrap();
+                }
             }
         };
 
-        let guard = DialGuard::new(&self.pool, &self.pool_cv);
-        let t = self
-            .connector
-            .connect()
-            .map_err(|e| GrpcStatus::new(code::UNAVAILABLE, format!("connection failed: {e}")))?;
+        let guard = DialGuard::new(&self.pool, &self.pool_cv, dial_gen);
+        let t = match deadline {
+            Some(dl) => {
+                let remaining = dl.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(GrpcStatus::new(
+                        code::DEADLINE_EXCEEDED,
+                        "deadline exceeded",
+                    ));
+                }
+                self.connector
+                    .connect_with_dial_timeout(remaining)
+                    .map_err(|e| {
+                        if e.kind() == std::io::ErrorKind::TimedOut {
+                            GrpcStatus::new(code::DEADLINE_EXCEEDED, "deadline exceeded")
+                        } else {
+                            GrpcStatus::new(code::UNAVAILABLE, format!("connection failed: {e}"))
+                        }
+                    })?
+            }
+            None => self.connector.connect().map_err(|e| {
+                GrpcStatus::new(code::UNAVAILABLE, format!("connection failed: {e}"))
+            })?,
+        };
         let conn = Conn::client_from(t, self.settings.clone())
             .map_err(|e| GrpcStatus::new(code::UNAVAILABLE, format!("h2 handshake failed: {e}")))?;
-        self.connections_opened.fetch_add(1, Ordering::SeqCst);
-        guard.complete(conn, dial_gen)
+        guard.complete(conn, &self.connections_opened)
     }
 
     pub fn close(&self) {
         let to_close: Vec<Conn> = {
             let mut p = self.pool.lock().unwrap();
             p.close_gen = p.close_gen.wrapping_add(1);
+            p.dialing = 0;
             p.conns.drain(..).collect()
         };
         self.pool_cv.notify_all();
@@ -605,7 +660,7 @@ impl Channel {
     ) -> Result<(BidiStream, Option<Instant>), GrpcStatus> {
         let deadline = opts.timeout.map(|t| Instant::now() + t);
         let headers = self.build_request_headers(method, opts)?;
-        let conn = self.pick_conn()?;
+        let conn = self.pick_conn(deadline)?;
         let stream = conn
             .open_stream(&headers, false)
             .map_err(|e| io_to_status(&e))?;
@@ -639,7 +694,7 @@ impl Channel {
     ) -> Result<(), GrpcStatus> {
         let deadline = opts.timeout.map(|t| Instant::now() + t);
         let headers = self.build_request_headers(method, opts)?;
-        let conn = self.pick_conn()?;
+        let conn = self.pick_conn(deadline)?;
         let stream = conn
             .open_stream(&headers, false)
             .map_err(|e| io_to_status(&e))?;
@@ -1131,6 +1186,31 @@ mod tests {
             Ok(spawn_in_memory_echo_conn())
         }
 
+        fn connect_with_dial_timeout(
+            &self,
+            timeout: Duration,
+        ) -> std::io::Result<crate::transport::Transport> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n == self.block_on_call {
+                if let Some(tx) = self.entered_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.release_rx.lock().unwrap().take() {
+                    match rx.recv_timeout(timeout) {
+                        Ok(()) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "dial timed out",
+                            ));
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                    }
+                }
+            }
+            Ok(spawn_in_memory_echo_conn())
+        }
+
         fn authority(&self) -> String {
             "localhost:443".into()
         }
@@ -1251,7 +1331,93 @@ mod tests {
     }
 
     #[test]
-    fn channel_close_while_dialing_closes_new_conn_and_wakes_waiters() {
+    fn channel_close_while_dialing_closes_new_conn_and_allows_subsequent_rpc() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let connector = Arc::new(GatedConnector {
+            calls: AtomicUsize::new(0),
+            block_on_call: 1,
+            entered_tx: Mutex::new(Some(entered_tx)),
+            release_rx: Mutex::new(Some(release_rx)),
+        });
+        let ch = Arc::new(Channel::with_config(
+            connector.clone(),
+            ChannelConfig {
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                ..Default::default()
+            },
+        ));
+
+        let ch1 = ch.clone();
+        let t1 = std::thread::spawn(move || ch1.pick_conn(None));
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("dial 1 should start");
+
+        let ch2 = ch.clone();
+        let t2 = std::thread::spawn(move || ch2.pick_conn(None));
+        std::thread::sleep(Duration::from_millis(30));
+
+        // Closing the channel wakes the pre-close waiter immediately.
+        ch.close();
+        let err2 = match t2.join().unwrap() {
+            Ok(_) => panic!("expected pre-close waiter to fail with channel closed"),
+            Err(e) => e,
+        };
+        assert_eq!(err2.code, code::UNAVAILABLE);
+        assert!(err2.message.contains("closed"), "{err2}");
+
+        // A subsequent RPC started AFTER `close()` succeeds immediately by opening a fresh
+        // connection, even while the stale pre-close dial is still blocked.
+        let reply = ch
+            .unary(
+                "/test.Svc/AfterClose",
+                b"fresh",
+                &CallOptions {
+                    timeout: Some(Duration::from_secs(2)),
+                    ..Default::default()
+                },
+            )
+            .expect("post-close RPC must succeed on a fresh connection");
+        assert_eq!(reply, b"fresh");
+        assert_eq!(ch.connections_opened.load(Ordering::SeqCst), 1);
+
+        // Once the stale pre-close dial unblocks, it discards its connection without disrupting
+        // the post-close pool or its active connection.
+        release_tx.send(()).unwrap();
+        let err1 = match t1.join().unwrap() {
+            Ok(_) => panic!("expected stale pre-close dial to fail after close"),
+            Err(e) => e,
+        };
+        assert_eq!(err1.code, code::UNAVAILABLE);
+        assert!(err1.message.contains("closed"), "{err1}");
+
+        // Pool still holds the healthy post-close connection and serves subsequent RPCs on it.
+        let reply2 = ch
+            .unary(
+                "/test.Svc/ReuseAfterClose",
+                b"still-good",
+                &CallOptions {
+                    timeout: Some(Duration::from_secs(2)),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(reply2, b"still-good");
+        assert_eq!(connector.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(ch.connections_opened.load(Ordering::SeqCst), 1);
+        {
+            let p = ch.pool.lock().unwrap();
+            assert_eq!(p.conns.len(), 1);
+            assert_eq!(p.dialing, 0);
+        }
+        ch.close();
+    }
+
+    #[test]
+    fn pick_conn_honors_deadline_while_waiting_and_dialing() {
+        // 1. Caller waiting on `pool_cv` returns DEADLINE_EXCEEDED before blocked dial finishes.
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let connector = Arc::new(GatedConnector {
@@ -1270,34 +1436,68 @@ mod tests {
         ));
 
         let ch1 = ch.clone();
-        let t1 = std::thread::spawn(move || ch1.pick_conn());
+        let t1 = std::thread::spawn(move || {
+            ch1.unary("/test.Svc/First", b"one", &CallOptions::default())
+        });
         entered_rx
             .recv_timeout(Duration::from_secs(5))
-            .expect("dial 1 should start");
+            .expect("first dial should enter connect()");
 
-        let ch2 = ch.clone();
-        let t2 = std::thread::spawn(move || ch2.pick_conn());
-        std::thread::sleep(Duration::from_millis(30));
-
-        // Closing the channel wakes the waiting caller immediately and rejects the in-flight dial.
-        ch.close();
-        let err2 = match t2.join().unwrap() {
-            Ok(_) => panic!("expected waiter to fail with channel closed"),
-            Err(e) => e,
-        };
-        assert_eq!(err2.code, code::UNAVAILABLE);
-        assert!(err2.message.contains("closed"), "{err2}");
+        let started = Instant::now();
+        let err = ch
+            .unary(
+                "/test.Svc/Waiter",
+                b"wait",
+                &CallOptions {
+                    timeout: Some(Duration::from_millis(80)),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.code, code::DEADLINE_EXCEEDED, "err={err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "waiter took too long: {:?}",
+            started.elapsed()
+        );
 
         release_tx.send(()).unwrap();
-        let err1 = match t1.join().unwrap() {
-            Ok(_) => panic!("expected in-flight dial to fail after close"),
-            Err(e) => e,
-        };
-        assert_eq!(err1.code, code::UNAVAILABLE);
-        assert!(err1.message.contains("closed"), "{err1}");
+        assert_eq!(t1.join().unwrap().unwrap(), b"one");
+        ch.close();
 
-        let p = ch.pool.lock().unwrap();
-        assert!(p.conns.is_empty());
-        assert_eq!(p.dialing, 0);
+        // 2. Direct dialer also respects caller `deadline` via `connect_with_dial_timeout`.
+        let (entered_tx2, _entered_rx2) = std::sync::mpsc::channel();
+        let (_release_tx2, release_rx2) = std::sync::mpsc::channel();
+        let connector2 = Arc::new(GatedConnector {
+            calls: AtomicUsize::new(0),
+            block_on_call: 1,
+            entered_tx: Mutex::new(Some(entered_tx2)),
+            release_rx: Mutex::new(Some(release_rx2)),
+        });
+        let ch_direct = Channel::with_config(
+            connector2,
+            ChannelConfig {
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                ..Default::default()
+            },
+        );
+        let started2 = Instant::now();
+        let err2 = ch_direct
+            .unary(
+                "/test.Svc/SlowDial",
+                b"x",
+                &CallOptions {
+                    timeout: Some(Duration::from_millis(80)),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err2.code, code::DEADLINE_EXCEEDED, "err2={err2}");
+        assert!(
+            started2.elapsed() < Duration::from_secs(2),
+            "direct dial took too long: {:?}",
+            started2.elapsed()
+        );
     }
 }
