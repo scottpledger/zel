@@ -63,6 +63,8 @@ pub struct FakeConfig {
     /// When set, Execute closes its stream (UNAVAILABLE) after sending the first operation so
     /// the client has to resume with WaitExecution.
     pub drop_execute_stream_after_first_op: bool,
+    /// When set, `GetTree` splits each page into streamed `GetTreeResponse` batches of this size.
+    pub get_tree_stream_batch_size: usize,
     pub get_tree_page_size: usize,
     pub advertise_digest_functions: Vec<i32>,
     /// When set, Execute returns an `ExecuteResponse` with `result: None` and OK status.
@@ -90,6 +92,7 @@ impl Default for FakeConfig {
             instance_name: String::new(),
             read_chunk: 64 * 1024,
             drop_execute_stream_after_first_op: false,
+            get_tree_stream_batch_size: 0,
             get_tree_page_size: 0,
             advertise_digest_functions: vec![digest_function::SHA256],
             omit_action_result: false,
@@ -503,8 +506,30 @@ impl FakeReapiServer {
                 } else {
                     String::new()
                 };
+                let slice = &dirs[start..end];
+                if cfg.get_tree_stream_batch_size > 0 && !slice.is_empty() {
+                    let chunks: Vec<&[Directory]> =
+                        slice.chunks(cfg.get_tree_stream_batch_size).collect();
+                    let last = chunks.len() - 1;
+                    let frames = chunks
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, chunk)| {
+                            GetTreeResponse {
+                                directories: chunk.to_vec(),
+                                next_page_token: if i == last {
+                                    next.clone()
+                                } else {
+                                    String::new()
+                                },
+                            }
+                            .encode_to_vec()
+                        })
+                        .collect();
+                    return Ok(frames);
+                }
                 return Ok(vec![GetTreeResponse {
-                    directories: dirs[start..end].to_vec(),
+                    directories: slice.to_vec(),
                     next_page_token: next,
                 }
                 .encode_to_vec()]);

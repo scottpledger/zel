@@ -604,6 +604,8 @@ fn command_proto_matches_bazel_conventions() {
     s.env.insert("B".into(), "2".into());
     s.env.insert("A".into(), "1".into());
     s.execution_info.insert("timeout".into(), "30".into());
+    s.execution_info
+        .insert("exec-property:Pool".into(), "large".into());
     let r = runner(
         &server,
         true,
@@ -632,9 +634,13 @@ fn command_proto_matches_bazel_conventions() {
         "REAPI 2.1+ output_paths sorted"
     );
     assert!(cmd.output_files.is_empty());
-    let props: Vec<_> = cmd
-        .platform
-        .unwrap()
+    let cmd_platform = cmd.platform.clone().expect("Command.platform set");
+    let action_platform = action.platform.clone().expect("Action.platform set");
+    assert_eq!(
+        action_platform, cmd_platform,
+        "Action.platform mirrors Command.platform for REAPI v2.2+ servers"
+    );
+    let props: Vec<_> = cmd_platform
         .properties
         .iter()
         .map(|p| (p.name.clone(), p.value.clone()))
@@ -643,7 +649,8 @@ fn command_proto_matches_bazel_conventions() {
         props,
         [
             ("Arch".to_string(), "x86".to_string()),
-            ("OSFamily".to_string(), "linux".to_string())
+            ("OSFamily".to_string(), "linux".to_string()),
+            ("Pool".to_string(), "large".to_string()),
         ]
     );
     assert_eq!(action.timeout.unwrap().seconds, 30);
@@ -651,7 +658,8 @@ fn command_proto_matches_bazel_conventions() {
     let salt = CacheSalt::decode(&action.salt).unwrap();
     assert!(salt.may_be_executed_remotely);
 
-    // Older servers (< 2.1) get output_files / output_directories instead.
+    // Older servers (< 2.1) get output_files / output_directories instead; with no platform
+    // properties at all, both Command.platform and Action.platform remain None.
     server.configure(|c| {
         c.high_api_version = SemVer {
             major: 2,
@@ -661,11 +669,14 @@ fn command_proto_matches_bazel_conventions() {
     });
     let r = runner(&server, true, &[], counting());
     let mut s2 = s.clone();
+    s2.execution_info.remove("exec-property:Pool");
     s2.env.insert("C".into(), "3".into());
     let _ = run(&r, &s2, &ws);
-    let (cmd, _) = seen.lock().unwrap().clone().unwrap();
+    let (cmd, action2) = seen.lock().unwrap().clone().unwrap();
     assert_eq!(cmd.output_files, ["a.out", "z.out"]);
     assert!(cmd.output_paths.is_empty());
+    assert!(cmd.platform.is_none());
+    assert!(action2.platform.is_none());
 }
 
 #[test]

@@ -728,6 +728,12 @@ impl Action {
                     });
                     inputs.push(art);
                 }
+                let mut execution_info = self.execution_requirements.clone();
+                for (k, v) in &self.exec_properties {
+                    execution_info
+                        .entry(format!("exec-property:{k}"))
+                        .or_insert_with(|| v.clone());
+                }
                 out.push(ActionAnalysisMetadata::SpawnAction {
                     owner: self.owner.clone(),
                     mnemonic: self.mnemonic.clone(),
@@ -756,7 +762,7 @@ impl Action {
                         .unwrap_or_default(),
                     inputs,
                     outputs: self.outputs.clone(),
-                    execution_info: self.execution_requirements.clone(),
+                    execution_info,
                     tools: self.tools.clone(),
                     java_compile: java_compile.map(Box::new),
                 });
@@ -1499,5 +1505,35 @@ mod tests {
         let mut g = ActionGraph::new();
         g.register(&multi).unwrap();
         assert!(g.register(&flag_grouped).is_err());
+    }
+
+    #[test]
+    fn spawn_action_lowering_propagates_exec_properties() {
+        let mut act = Action::new(
+            Label::parse_canonical("//a:b").unwrap(),
+            "Spawn",
+            ActionKind::Spawn {
+                executable: "tool".to_string(),
+                arguments: Vec::new(),
+                shell_command: None,
+            },
+        );
+        act.outputs.push(art("a/out"));
+        act.exec_properties
+            .insert("OSFamily".to_string(), "linux".to_string());
+        act.execution_requirements
+            .insert("no-sandbox".to_string(), String::new());
+        let lowered = act.lower();
+        let Some(ActionAnalysisMetadata::SpawnAction { execution_info, .. }) = lowered.first()
+        else {
+            panic!("expected SpawnAction");
+        };
+        assert_eq!(
+            execution_info
+                .get("exec-property:OSFamily")
+                .map(String::as_str),
+            Some("linux")
+        );
+        assert!(execution_info.contains_key("no-sandbox"));
     }
 }

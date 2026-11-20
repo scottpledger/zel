@@ -1448,10 +1448,12 @@ pub mod remote_execution {
         pub command_digest: Option<Digest>,
         pub input_root_digest: Option<Digest>,
         pub do_not_cache: bool,
+        pub platform: Option<crate::reapi::Platform>,
     }
 
     impl Action {
         pub fn encode_to_vec(&self) -> Vec<u8> {
+            use crate::reapi::Message as _;
             let mut buf = Vec::new();
             if let Some(ref cd) = self.command_digest {
                 wire::encode_bytes_always(1, &cd.encode_to_vec(), &mut buf);
@@ -1459,11 +1461,15 @@ pub mod remote_execution {
             if let Some(ref ir) = self.input_root_digest {
                 wire::encode_bytes_always(2, &ir.encode_to_vec(), &mut buf);
             }
-            wire::encode_bool(6, self.do_not_cache, &mut buf);
+            wire::encode_bool(7, self.do_not_cache, &mut buf);
+            if let Some(ref p) = self.platform {
+                wire::encode_bytes_always(10, &p.encode_to_vec(), &mut buf);
+            }
             buf
         }
 
         pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+            use crate::reapi::Message as _;
             let mut msg = Self::default();
             let mut pos = 0;
             while pos < buf.len() {
@@ -1477,8 +1483,12 @@ pub mod remote_execution {
                         let sub = wire::decode_bytes(buf, &mut pos)?;
                         msg.input_root_digest = Some(Digest::decode(sub)?);
                     }
-                    (6, wire::WIRE_TYPE_VARINT) => {
+                    (7, wire::WIRE_TYPE_VARINT) => {
                         msg.do_not_cache = wire::decode_varint(buf, &mut pos)? != 0;
+                    }
+                    (10, wire::WIRE_TYPE_LENGTH_DELIMITED) => {
+                        let sub = wire::decode_bytes(buf, &mut pos)?;
+                        msg.platform = Some(crate::reapi::Platform::decode(sub)?);
                     }
                     _ => wire::skip_field(w, buf, &mut pos)?,
                 }
@@ -1631,5 +1641,35 @@ mod tests {
         let encoded_resp = resp.encode_to_vec();
         let decoded_resp = RunResponse::decode(&encoded_resp).unwrap();
         assert_eq!(resp, decoded_resp);
+    }
+
+    #[test]
+    fn test_remote_execution_action_matches_reapi_wire_tags() {
+        use crate::reapi::{self, Message as _};
+        let plat = reapi::Platform {
+            properties: vec![reapi::PlatformProperty {
+                name: "OSFamily".into(),
+                value: "linux".into(),
+            }],
+        };
+        let reapi_action = reapi::Action {
+            command_digest: Some(reapi::Digest {
+                hash: "aa".into(),
+                size_bytes: 10,
+            }),
+            input_root_digest: Some(reapi::Digest {
+                hash: "bb".into(),
+                size_bytes: 20,
+            }),
+            do_not_cache: true,
+            platform: Some(plat.clone()),
+            ..Default::default()
+        };
+        let bytes = reapi_action.encode_to_vec();
+        let decoded = super::remote_execution::Action::decode(&bytes).unwrap();
+        assert!(decoded.do_not_cache);
+        assert_eq!(decoded.platform.as_ref(), Some(&plat));
+        let roundtrip = reapi::Action::decode(&decoded.encode_to_vec()).unwrap();
+        assert_eq!(roundtrip, reapi_action);
     }
 }
