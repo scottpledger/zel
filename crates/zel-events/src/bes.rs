@@ -1344,6 +1344,9 @@ fn run_bidi_stream(
         let (bidi, deadline) = match channel.open_bidi(PUBLISH_STREAM, &opts) {
             Ok(b) => b,
             Err(st) => {
+                if try_refresh_auth_on_unauthenticated(&st, &mut refreshed_auth, channel)? {
+                    continue;
+                }
                 if !is_bes_stream_retriable(&st) || attempt >= BES_MAX_RETRIES {
                     return Err(BesUploadError::from_grpc(&st));
                 }
@@ -1499,15 +1502,7 @@ fn run_bidi_stream(
                     delay = Duration::from_millis(100);
                     refreshed_auth = false;
                 }
-                if !refreshed_auth
-                    && st.code == code::UNAUTHENTICATED
-                    && !st.credential_helper_error
-                    && channel.has_refreshable_credentials()
-                {
-                    refreshed_auth = true;
-                    if let Err(refresh_err) = channel.refresh_credentials() {
-                        return Err(BesUploadError::from_grpc(&refresh_err));
-                    }
+                if try_refresh_auth_on_unauthenticated(&st, &mut refreshed_auth, channel)? {
                     continue;
                 }
                 if !is_bes_stream_retriable(&st) || attempt >= BES_MAX_RETRIES {
@@ -1521,6 +1516,26 @@ fn run_bidi_stream(
             return Err(BesUploadError::timeout());
         }
         delay = Duration::from_secs_f64((delay.as_secs_f64() * 1.6).min(30.0));
+    }
+}
+
+fn try_refresh_auth_on_unauthenticated(
+    st: &GrpcStatus,
+    refreshed_auth: &mut bool,
+    channel: &Channel,
+) -> Result<bool, BesUploadError> {
+    if !*refreshed_auth
+        && st.code == code::UNAUTHENTICATED
+        && !st.credential_helper_error
+        && channel.has_refreshable_credentials()
+    {
+        *refreshed_auth = true;
+        channel
+            .refresh_credentials()
+            .map_err(|e| BesUploadError::from_grpc(&e))?;
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
@@ -3803,5 +3818,278 @@ mod tests {
         assert!(t4.close().is_err());
         assert_eq!(attempts4.load(Ordering::SeqCst), 1);
         assert_eq!(t4.last_error().unwrap().kind, BesErrorKind::Persistent);
+    }
+
+    #[test]
+    fn bes_bidi_open_refreshes_dynamic_credentials_on_auth_error() {
+        use std::sync::atomic::AtomicUsize;
+        use zel_remote::credentials::CredentialError;
+
+        struct SimpleAuthBesConn {
+            accepted_auth: String,
+            stream_attempts: Arc<AtomicUsize>,
+            seen_auths: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Connector for SimpleAuthBesConn {
+            fn authority(&self) -> String {
+                "bes.open-auth.local".into()
+            }
+
+            fn connect(&self) -> io::Result<Transport> {
+                let (c, s) = memory_pair();
+                let accepted_auth = self.accepted_auth.clone();
+                let stream_attempts = self.stream_attempts.clone();
+                let seen_auths = self.seen_auths.clone();
+                std::thread::spawn(move || {
+                    let Ok((_conn, rx)) = Conn::server_from(s, LocalSettings::default()) else {
+                        return;
+                    };
+                    while let Ok(st) = rx.recv() {
+                        let accepted_auth = accepted_auth.clone();
+                        let stream_attempts = stream_attempts.clone();
+                        let seen_auths = seen_auths.clone();
+                        std::thread::spawn(move || {
+                            let mut parser = MessageParser::default();
+                            let mut msgs = Vec::new();
+                            loop {
+                                match st.recv(None) {
+                                    Ok(Event::Headers(h)) => {
+                                        let path = h
+                                            .iter()
+                                            .find(|kv| kv.0 == ":path")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        let auth = h
+                                            .iter()
+                                            .find(|kv| kv.0 == "authorization")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        if path == PUBLISH_STREAM {
+                                            stream_attempts.fetch_add(1, Ordering::SeqCst);
+                                            seen_auths.lock().unwrap().push(auth.clone());
+                                            if auth != accepted_auth {
+                                                let _ = st.send_headers(
+                                                    &[
+                                                        (":status".to_string(), "200".to_string()),
+                                                        (
+                                                            "content-type".to_string(),
+                                                            "application/grpc".to_string(),
+                                                        ),
+                                                        (
+                                                            "grpc-status".to_string(),
+                                                            code::UNAUTHENTICATED.to_string(),
+                                                        ),
+                                                        (
+                                                            "grpc-message".to_string(),
+                                                            "rejected".to_string(),
+                                                        ),
+                                                    ],
+                                                    true,
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Ok(Event::Data(d)) => {
+                                        parser.push(&d);
+                                        while let Ok(Some(m)) = parser.next() {
+                                            msgs.push(m);
+                                        }
+                                    }
+                                    Ok(Event::End) => break,
+                                    _ => return,
+                                }
+                            }
+                            let _ = st.send_headers(
+                                &[
+                                    (":status".to_string(), "200".to_string()),
+                                    ("content-type".to_string(), "application/grpc".to_string()),
+                                ],
+                                false,
+                            );
+                            for m in &msgs {
+                                let r = Msg::decode(
+                                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                                    m,
+                                )
+                                .unwrap();
+                                let o = r.get_msg("ordered_build_event").unwrap();
+                                let mut resp = Msg::new(
+                                    "google.devtools.build.v1.PublishBuildToolEventStreamResponse",
+                                );
+                                resp.set_int("sequence_number", o.get_i64("sequence_number"));
+                                if let Some(sid) = o.get_msg("stream_id") {
+                                    resp.set_msg("stream_id", sid.clone());
+                                }
+                                let _ = st.send_data(
+                                    &frame_message(&resp.encode_to_vec()),
+                                    false,
+                                    None,
+                                );
+                            }
+                            let _ = st.send_headers(
+                                &[("grpc-status".to_string(), "0".to_string())],
+                                true,
+                            );
+                        });
+                    }
+                });
+                Ok(c)
+            }
+        }
+
+        enum OpenErrorMode {
+            Auth,
+            Helper,
+        }
+
+        struct OpenFailingCreds {
+            mode: OpenErrorMode,
+            refreshed: AtomicBool,
+            get_calls: Arc<AtomicUsize>,
+            refreshes: Arc<AtomicUsize>,
+            token_after_refresh: String,
+        }
+
+        impl CallCredentialsProvider for OpenFailingCreds {
+            fn get_credentials(
+                &self,
+                _uri: &str,
+            ) -> Result<Vec<(String, String)>, CredentialError> {
+                self.get_calls.fetch_add(1, Ordering::SeqCst);
+                if !self.refreshed.load(Ordering::SeqCst) {
+                    return match self.mode {
+                        OpenErrorMode::Auth => {
+                            Err(CredentialError::Auth("expired adc token".into()))
+                        }
+                        OpenErrorMode::Helper => {
+                            Err(CredentialError::Helper("helper exited 1".into()))
+                        }
+                    };
+                }
+                Ok(vec![(
+                    "authorization".into(),
+                    self.token_after_refresh.clone(),
+                )])
+            }
+
+            fn refresh(&self) -> Result<(), CredentialError> {
+                self.refreshes.fetch_add(1, Ordering::SeqCst);
+                self.refreshed.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        // 1. Non-helper CredentialError::Auth during open_bidi refreshes once and succeeds.
+        let get1 = Arc::new(AtomicUsize::new(0));
+        let ref1 = Arc::new(AtomicUsize::new(0));
+        let att1 = Arc::new(AtomicUsize::new(0));
+        let seen1 = Arc::new(Mutex::new(Vec::new()));
+        let ch1 = Arc::new(Channel::with_config(
+            Arc::new(SimpleAuthBesConn {
+                accepted_auth: "Bearer fresh-open".into(),
+                stream_attempts: att1.clone(),
+                seen_auths: seen1.clone(),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(Arc::new(OpenFailingCreds {
+                    mode: OpenErrorMode::Auth,
+                    refreshed: AtomicBool::new(false),
+                    get_calls: get1.clone(),
+                    refreshes: ref1.clone(),
+                    token_after_refresh: "Bearer fresh-open".into(),
+                })),
+                auth_uri: "https://bes.open-auth.local".into(),
+            },
+        ));
+        let mut c1 = cfg();
+        c1.lifecycle_events = false;
+        let t1 = BesTransport::start(c1, ch1);
+        t1.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        t1.close()
+            .expect("open_bidi should refresh once on non-helper Auth error and succeed");
+        assert_eq!(get1.load(Ordering::SeqCst), 2);
+        assert_eq!(ref1.load(Ordering::SeqCst), 1);
+        assert_eq!(att1.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *seen1.lock().unwrap(),
+            vec!["Bearer fresh-open".to_string()]
+        );
+
+        // 2. Shared `refreshed_auth`: if open_bidi already refreshed once and the server still
+        //    rejects the reopened stream with UNAUTHENTICATED, do not refresh a second time.
+        let get2 = Arc::new(AtomicUsize::new(0));
+        let ref2 = Arc::new(AtomicUsize::new(0));
+        let att2 = Arc::new(AtomicUsize::new(0));
+        let ch2 = Arc::new(Channel::with_config(
+            Arc::new(SimpleAuthBesConn {
+                accepted_auth: "Bearer other".into(),
+                stream_attempts: att2.clone(),
+                seen_auths: Arc::new(Mutex::new(Vec::new())),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(Arc::new(OpenFailingCreds {
+                    mode: OpenErrorMode::Auth,
+                    refreshed: AtomicBool::new(false),
+                    get_calls: get2.clone(),
+                    refreshes: ref2.clone(),
+                    token_after_refresh: "Bearer still-wrong".into(),
+                })),
+                auth_uri: "https://bes.open-auth.local".into(),
+            },
+        ));
+        let mut c2 = cfg();
+        c2.lifecycle_events = false;
+        let t2 = BesTransport::start(c2, ch2);
+        t2.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        assert!(t2.close().is_err());
+        assert_eq!(get2.load(Ordering::SeqCst), 2);
+        assert_eq!(ref2.load(Ordering::SeqCst), 1);
+        assert_eq!(att2.load(Ordering::SeqCst), 1);
+        assert_eq!(t2.last_error().unwrap().kind, BesErrorKind::Persistent);
+
+        // 3. CredentialError::Helper during open_bidi fails immediately without calling refresh().
+        let get3 = Arc::new(AtomicUsize::new(0));
+        let ref3 = Arc::new(AtomicUsize::new(0));
+        let att3 = Arc::new(AtomicUsize::new(0));
+        let ch3 = Arc::new(Channel::with_config(
+            Arc::new(SimpleAuthBesConn {
+                accepted_auth: "Bearer fresh-open".into(),
+                stream_attempts: att3.clone(),
+                seen_auths: Arc::new(Mutex::new(Vec::new())),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(Arc::new(OpenFailingCreds {
+                    mode: OpenErrorMode::Helper,
+                    refreshed: AtomicBool::new(false),
+                    get_calls: get3.clone(),
+                    refreshes: ref3.clone(),
+                    token_after_refresh: "Bearer fresh-open".into(),
+                })),
+                auth_uri: "https://bes.open-auth.local".into(),
+            },
+        ));
+        let mut c3 = cfg();
+        c3.lifecycle_events = false;
+        let t3 = BesTransport::start(c3, ch3);
+        t3.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        assert!(t3.close().is_err());
+        assert_eq!(get3.load(Ordering::SeqCst), 1);
+        assert_eq!(ref3.load(Ordering::SeqCst), 0);
+        assert_eq!(att3.load(Ordering::SeqCst), 0);
+        assert_eq!(t3.last_error().unwrap().kind, BesErrorKind::Persistent);
     }
 }
