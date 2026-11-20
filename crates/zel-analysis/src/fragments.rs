@@ -1248,7 +1248,6 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
                 None
             }
         }
-        ("java", "launcher") => opt("java_launcher"),
         ("py", "native_rules_allowlist") => opt("python_native_rules_allowlist"),
         ("coverage", "output_generator") => {
             if o.b("collect_code_coverage", false) {
