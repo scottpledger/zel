@@ -137,27 +137,34 @@ impl Url {
 
     /// Resolve a (possibly relative) redirect location against this URL.
     pub fn join(&self, loc: &str) -> Result<Url, String> {
-        if loc.contains("://") {
-            return Url::parse(loc);
-        }
-        if let Some(rest) = loc.strip_prefix("//") {
-            return Url::parse(&format!("{}://{}", self.scheme, rest));
-        }
-        let mut u = self.clone();
-        u.userinfo = None;
-        if loc.starts_with('/') {
-            u.path_and_query = loc.to_string();
-        } else if loc.starts_with('?') {
-            u.path_and_query = format!("{}{}", self.path(), loc);
+        let mut u = if loc.contains("://") {
+            Url::parse(loc)?
+        } else if let Some(rest) = loc.strip_prefix("//") {
+            Url::parse(&format!("{}://{}", self.scheme, rest))?
         } else {
-            let dir = match self.path().rfind('/') {
-                Some(i) => &self.path()[..=i],
-                None => "/",
-            };
-            u.path_and_query = format!("{}{}", dir, loc);
-        }
-        if let Some(h) = u.path_and_query.find('#') {
-            u.path_and_query.truncate(h);
+            let mut u = self.clone();
+            if loc.starts_with('/') {
+                u.path_and_query = loc.to_string();
+            } else if loc.starts_with('?') {
+                u.path_and_query = format!("{}{}", self.path(), loc);
+            } else {
+                let dir = match self.path().rfind('/') {
+                    Some(i) => &self.path()[..=i],
+                    None => "/",
+                };
+                u.path_and_query = format!("{}{}", dir, loc);
+            }
+            if let Some(h) = u.path_and_query.find('#') {
+                u.path_and_query.truncate(h);
+            }
+            return Ok(u);
+        };
+        if u.userinfo.is_none()
+            && u.scheme.eq_ignore_ascii_case(&self.scheme)
+            && u.host == self.host
+            && u.port == self.port
+        {
+            u.userinfo = self.userinfo.clone();
         }
         Ok(u)
     }
@@ -2931,6 +2938,161 @@ mod tests {
             "foo.example.com",
             &env_literal_and_sub
         ));
+    }
+
+    #[test]
+    fn redirect_headers_and_credentials_match_bazel_multiplexer() {
+        if !net_ok() {
+            return;
+        }
+        let d = tmpdir("redirect-hdrs");
+
+        // 1. `baseHeaders` (`req.headers`) apply across redirect hops, and URL-specific `req.auth`
+        // overwrites matching header names (`HttpConnectorMultiplexer.getHeaderFunction` /
+        // `HttpConnectorMultiplexerTest.testHeaderComputationFunction`).
+        let (port_h3, seen_h3) = serve(1, |_, _| ok(b"hop3-ok"));
+        let h3_url = format!("http://127.0.0.1:{port_h3}/final");
+        let h3_loc = h3_url.clone();
+        let (port_h2, seen_h2) = serve(1, move |_, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: {h3_loc}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let h2_url = format!("http://127.0.0.1:{port_h2}/mid");
+        let h2_loc = h2_url.clone();
+        let (port_h1, seen_h1) = serve(1, move |_, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: {h2_loc}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let h1_url = format!("http://127.0.0.1:{port_h1}/start");
+        let mut r1 = req(vec![h1_url], d.join("out-base"));
+        r1.headers
+            .insert("Authorization".to_string(), "Basic anon-base".to_string());
+        r1.headers.insert("Cookie".to_string(), "sid=1".to_string());
+        let mut h3_auth = BTreeMap::new();
+        h3_auth.insert("type".to_string(), "pattern".to_string());
+        h3_auth.insert("pattern".to_string(), "Bearer <password>".to_string());
+        h3_auth.insert("password".to_string(), "specific-tok".to_string());
+        r1.auth.insert(h3_url, h3_auth);
+        quick().download(&r1).unwrap();
+
+        let req_h1 = &seen_h1.lock().unwrap()[0];
+        let req_h2 = &seen_h2.lock().unwrap()[0];
+        let req_h3 = &seen_h3.lock().unwrap()[0];
+        assert!(
+            req_h1.contains("Authorization: Basic anon-base\r\n"),
+            "{req_h1}"
+        );
+        assert!(req_h1.contains("Cookie: sid=1\r\n"), "{req_h1}");
+        assert!(
+            req_h2.contains("Authorization: Basic anon-base\r\n"),
+            "{req_h2}"
+        );
+        assert!(req_h2.contains("Cookie: sid=1\r\n"), "{req_h2}");
+        assert!(
+            req_h3.contains("Authorization: Bearer specific-tok\r\n"),
+            "{req_h3}"
+        );
+        assert!(!req_h3.contains("anon-base"), "{req_h3}");
+        assert_eq!(
+            req_h3
+                .lines()
+                .filter(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                .count(),
+            1,
+            "{req_h3}"
+        );
+        assert!(req_h3.contains("Cookie: sid=1\r\n"), "{req_h3}");
+
+        // 2. Per-URL `req.auth` on initial hop is NOT leaked to redirect target.
+        let (port_only2, seen_only2) = serve(1, |_, _| ok(b"done"));
+        let only2_url = format!("http://127.0.0.1:{port_only2}/dest");
+        let only2_loc = only2_url.clone();
+        let (port_only1, seen_only1) = serve(1, move |_, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: {only2_loc}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let only1_url = format!("http://127.0.0.1:{port_only1}/src");
+        let mut r2 = req(vec![only1_url.clone()], d.join("out-per-url"));
+        let mut only1_auth = BTreeMap::new();
+        only1_auth.insert("type".to_string(), "pattern".to_string());
+        only1_auth.insert("pattern".to_string(), "Bearer <password>".to_string());
+        only1_auth.insert("password".to_string(), "hop1-only".to_string());
+        r2.auth.insert(only1_url, only1_auth);
+        quick().download(&r2).unwrap();
+        assert!(seen_only1.lock().unwrap()[0].contains("Authorization: Bearer hop1-only\r\n"));
+        assert!(!seen_only2.lock().unwrap()[0]
+            .to_ascii_lowercase()
+            .contains("authorization:"));
+
+        // 3. URL `userinfo` is forwarded on same-origin redirects and dropped on cross-origin redirects
+        // (`HttpUtils.mergeUrls`).
+        let (port_ui2, seen_ui2) = serve(1, |_, _| ok(b"ui-done"));
+        let ui2_url = format!("http://127.0.0.1:{port_ui2}/cross");
+        let ui2_loc = ui2_url.clone();
+        let (port_ui1, seen_ui1) = serve(2, move |path, _| {
+            if path == "/start" {
+                b"HTTP/1.1 302 Found\r\nLocation: /same\r\nContent-Length: 0\r\n\r\n".to_vec()
+            } else {
+                format!("HTTP/1.1 302 Found\r\nLocation: {ui2_loc}\r\nContent-Length: 0\r\n\r\n")
+                    .into_bytes()
+            }
+        });
+        let ui_start = format!("http://alice:secret@127.0.0.1:{port_ui1}/start");
+        quick()
+            .download(&req(vec![ui_start], d.join("out-ui")))
+            .unwrap();
+        let expected_basic = format!(
+            "Authorization: Basic {}\r\n",
+            base64_encode(b"alice:secret")
+        );
+        let ui1_reqs = seen_ui1.lock().unwrap().clone();
+        assert!(ui1_reqs[0].contains(&expected_basic), "{}", ui1_reqs[0]);
+        assert!(ui1_reqs[1].contains(&expected_basic), "{}", ui1_reqs[1]);
+        assert!(!seen_ui2.lock().unwrap()[0]
+            .to_ascii_lowercase()
+            .contains("authorization:"));
+
+        // 4. `--credential_helper` takes precedence over both `req.headers` and `req.auth`
+        // (`CredentialHelperCredentials` wrapping `StaticCredentials`).
+        #[cfg(unix)]
+        {
+            let helper = d.join("cred-helper.sh");
+            fs::write(
+                &helper,
+                b"#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer from-helper\"]}}'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            let (port_ch, seen_ch) = serve(1, |_, _| ok(b"helper-ok"));
+            let ch_url = format!("http://127.0.0.1:{port_ch}/pkg");
+            let mut r_ch = req(vec![ch_url.clone()], d.join("out-ch"));
+            r_ch.headers.insert(
+                "authorization".to_string(),
+                "Basic from-headers".to_string(),
+            );
+            let mut ch_auth = BTreeMap::new();
+            ch_auth.insert("type".to_string(), "basic".to_string());
+            ch_auth.insert("login".to_string(), "u".to_string());
+            ch_auth.insert("password".to_string(), "p".to_string());
+            r_ch.auth.insert(ch_url, ch_auth);
+            let mut dl_ch = quick();
+            dl_ch.credential_helpers = vec![("127.0.0.1".to_string(), helper)];
+            dl_ch.download(&r_ch).unwrap();
+            let req_ch = &seen_ch.lock().unwrap()[0];
+            assert!(
+                req_ch.contains("Authorization: Bearer from-helper\r\n"),
+                "{req_ch}"
+            );
+            assert!(!req_ch.contains("from-headers"), "{req_ch}");
+            assert_eq!(
+                req_ch
+                    .lines()
+                    .filter(|l| l.to_ascii_lowercase().starts_with("authorization:"))
+                    .count(),
+                1,
+                "{req_ch}"
+            );
+        }
     }
 }
 
