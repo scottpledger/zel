@@ -1092,23 +1092,11 @@ impl BlazeRuntime {
                 return ExitCode::COMMAND_LINE_ERROR;
             }
         };
-        // `--long`/`-l`/`--short` expand to `--help_verbosity`; the last one wins.
-        let mut verbosity = HelpVerbosity::Medium;
-        for a in args.iter().take_while(|a| *a != "--") {
-            match a.as_str() {
-                "--long" | "-l" => verbosity = HelpVerbosity::Long,
-                "--short" => verbosity = HelpVerbosity::Short,
-                other => {
-                    if let Some(v) = other.strip_prefix("--help_verbosity=") {
-                        verbosity = match v {
-                            "long" => HelpVerbosity::Long,
-                            "short" => HelpVerbosity::Short,
-                            _ => HelpVerbosity::Medium,
-                        };
-                    }
-                }
-            }
-        }
+        let verbosity = match parsed.get_str("help_verbosity") {
+            Some(v) if v.eq_ignore_ascii_case("long") => HelpVerbosity::Long,
+            Some(v) if v.eq_ignore_ascii_case("short") => HelpVerbosity::Short,
+            _ => HelpVerbosity::Medium,
+        };
         let residue = &parsed.targets;
         let put = |out: &mut Vec<u8>, s: &str| out.extend_from_slice(s.as_bytes());
         if residue.is_empty() {

@@ -1214,4 +1214,97 @@ filegroup(
             "https://mirrors.example.com/foo%20bar%2Bbaz.tar.gz"
         );
     }
+
+    #[test]
+    fn fetch_and_vendor_repo_validation_and_vendor_file_semantics() {
+        let f = fixture("cmd_fetch_vendor_parity", ROOT);
+        // Invalid canonical repo name in `fetch --repo` is rejected up front.
+        let out = run(&f, "fetch", &["--repo=@@bad!repo"]);
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
+        assert!(out.stderr.contains("Invalid repo name:"), "{}", out.stderr);
+        let out = run(&f, "fetch", &["--repo=@@.."]);
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
+
+        // `fetch --target_pattern_file` reads patterns from file.
+        write(&f.ws, "BUILD.bazel", "filegroup(name = 'ok')\n");
+        write(&f.ws, "patterns.txt", "//:ok\n");
+        let out = run(&f, "fetch", &["--target_pattern_file=patterns.txt"]);
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+
+        // `vendor --repo` collects multiple resolution errors instead of stopping at the first.
+        let vd = f.base.join("vendor_multi_err");
+        let out = run(
+            &f,
+            "vendor",
+            &[
+                &format!("--vendor_dir={}", vd.display()),
+                "--repo=@missing_one",
+                "--repo=@missing_two",
+            ],
+        );
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
+        assert!(
+            out.stderr.contains("missing_one") && out.stderr.contains("missing_two"),
+            "got: {}",
+            out.stderr
+        );
+
+        // `VENDOR.bazel` `pin('@@a+')` errors when the pinned repo does not exist in vendor_dir.
+        let vd_pin = f.base.join("vendor_pinned_missing");
+        std::fs::create_dir_all(&vd_pin).unwrap();
+        std::fs::write(vd_pin.join("VENDOR.bazel"), "pin('@@a+')\n").unwrap();
+        let out = run(
+            &f,
+            "vendor",
+            &[&format!("--vendor_dir={}", vd_pin.display()), "--repo=@a"],
+        );
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
+        assert!(
+            out.stderr
+                .contains("Pinned repo 'a+' does not exist under the vendor directory"),
+            "got: {}",
+            out.stderr
+        );
+    }
+
+    #[test]
+    fn fetch_and_vendor_resolve_target_pattern_file_against_client_cwd() {
+        let f = fixture("cmd_fetch_vendor_client_cwd", ROOT);
+        // Place a broken pattern file at workspace root so resolving against `cfg.workspace`
+        // instead of `--client_cwd` would fail.
+        write(&f.ws, "BUILD.bazel", "filegroup(name = 'root_only')\n");
+        write(&f.ws, "patterns.txt", "//:does_not_exist_at_root\n");
+        write(&f.ws, "sub/BUILD.bazel", "filegroup(name = 'sub_app')\n");
+        write(&f.ws, "sub/patterns.txt", ":sub_app\n");
+
+        let out = run(
+            &f,
+            "fetch",
+            &["--client_cwd=sub", "--target_pattern_file=patterns.txt"],
+        );
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+
+        let abs_sub = f.ws.join("sub");
+        let out_abs = run(
+            &f,
+            "fetch",
+            &[
+                &format!("--client_cwd={}", abs_sub.display()),
+                "--target_pattern_file=patterns.txt",
+            ],
+        );
+        assert_eq!(out_abs.exit_code, 0, "{}", out_abs.stderr);
+
+        let vd = f.base.join("vendor_sub_cwd");
+        let out_vendor = run(
+            &f,
+            "vendor",
+            &[
+                &format!("--vendor_dir={}", vd.display()),
+                "--client_cwd=sub",
+                "--target_pattern_file=patterns.txt",
+            ],
+        );
+        assert_eq!(out_vendor.exit_code, 0, "{}", out_vendor.stderr);
+    }
 }

@@ -308,7 +308,22 @@ impl BlazeRuntime {
         } else {
             command
         };
-        let cmd_args = if args.len() > 1 { &args[1..] } else { &[] };
+        let raw_cmd_args = if args.len() > 1 { &args[1..] } else { &[] };
+        let mut augmented_args: Vec<String>;
+        let cmd_args: &[String] = if req.quiet || !req.invocation_policy.is_empty() {
+            augmented_args = Vec::with_capacity(raw_cmd_args.len() + 3);
+            if req.quiet {
+                augmented_args.push("--noshow_progress".to_string());
+                augmented_args.push("--ui_event_filters=-info,-debug,-progress".to_string());
+            }
+            if !req.invocation_policy.is_empty() && command != "canonicalize-flags" {
+                augmented_args.push(format!("--invocation_policy={}", req.invocation_policy));
+            }
+            augmented_args.extend(raw_cmd_args.iter().cloned());
+            &augmented_args
+        } else {
+            raw_cmd_args
+        };
         // `ClientOptions.clientEnv` / `CommandEnvironment`: only the parsed `--client_env`
         // assignments (both `--client_env=K=V` and `--client_env K=V` forms, last value wins).
         // When omitted, the client environment map is empty (never copies server process env).
@@ -347,6 +362,116 @@ impl BlazeRuntime {
         let mut termination_expected = false;
         let mut failure_detail: Option<FailureDetail> = None;
         let mut command_extensions: Vec<zel_proto::Any> = Vec::new();
+
+        if !req.invocation_policy.is_empty()
+            && zel_options::InvocationPolicy::parse(&req.invocation_policy).is_err()
+        {
+            let msg = format!(
+                "Malformed value of --invocation_policy: {}",
+                req.invocation_policy
+            );
+            writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
+            return RunResponse {
+                cookie: response_cookie.to_string(),
+                standard_output: Vec::new(),
+                standard_error: stderr,
+                finished: true,
+                exit_code: ExitCode::COMMAND_LINE_ERROR.numeric_exit_code(),
+                command_id: "cmd-0".to_string(),
+                termination_expected: false,
+                exec_request: None,
+                failure_detail: Category::named("command", "INVOCATION_POLICY_PARSE_FAILURE")
+                    .map(|c| FailureDetail::new(msg, c)),
+                command_extensions: Vec::new(),
+            };
+        }
+        if self.in_workspace() {
+            if let Some(raw_cwd) = cmd_args
+                .iter()
+                .rev()
+                .find_map(|a| a.strip_prefix("--client_cwd="))
+            {
+                let ws = self.dirs.workspace_dir.path_string();
+                let escapes = if raw_cwd.starts_with('/') {
+                    let norm = zel_vfs::PathFragment::create(raw_cwd);
+                    let ws_pf = zel_vfs::PathFragment::create(ws);
+                    !norm.starts_with(&ws_pf)
+                } else {
+                    let mut depth = 0i32;
+                    let mut bad = false;
+                    for seg in raw_cwd.split('/') {
+                        match seg {
+                            "" | "." => {}
+                            ".." => {
+                                depth -= 1;
+                                if depth < 0 {
+                                    bad = true;
+                                    break;
+                                }
+                            }
+                            _ => depth += 1,
+                        }
+                    }
+                    bad
+                };
+                if escapes {
+                    let msg = format!("Client cwd '{raw_cwd}' is not inside workspace '{ws}'");
+                    writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
+                    return RunResponse {
+                        cookie: response_cookie.to_string(),
+                        standard_output: Vec::new(),
+                        standard_error: stderr,
+                        finished: true,
+                        exit_code: ExitCode::COMMAND_LINE_ERROR.numeric_exit_code(),
+                        command_id: "cmd-0".to_string(),
+                        termination_expected: false,
+                        exec_request: None,
+                        failure_detail: Category::named("command", "CLIENT_CWD_MALFORMED")
+                            .map(|c| FailureDetail::new(msg, c)),
+                        command_extensions: Vec::new(),
+                    };
+                }
+            }
+        }
+        if let Some(v) = cmd_args
+            .iter()
+            .rev()
+            .find_map(|a| a.strip_prefix("--http_max_parallel_downloads="))
+        {
+            if v.parse::<i64>().is_ok_and(|n| n <= 0) {
+                let msg = format!(
+                    "Invalid value '{v}' for --http_max_parallel_downloads: max parallel downloads must be positive"
+                );
+                writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
+                return RunResponse {
+                    cookie: response_cookie.to_string(),
+                    standard_output: Vec::new(),
+                    standard_error: stderr,
+                    finished: true,
+                    exit_code: ExitCode::COMMAND_LINE_ERROR.numeric_exit_code(),
+                    command_id: "cmd-0".to_string(),
+                    termination_expected: false,
+                    exec_request: None,
+                    failure_detail: Category::named("repository_options", "BAD_DOWNLOADER_CONFIG")
+                        .map(|c| FailureDetail::new(msg, c)),
+                    command_extensions: Vec::new(),
+                };
+            }
+        }
+        if let Some(v) = cmd_args
+            .iter()
+            .rev()
+            .find_map(|a| a.strip_prefix("--http_timeout_scaling="))
+        {
+            if v.parse::<f64>().is_ok_and(|x| x <= 0.0) {
+                writeln_bytes(
+                    &mut stderr,
+                    &format!(
+                        "WARNING: --http_timeout_scaling={v} is not positive; clamping to 1.0"
+                    ),
+                );
+            }
+        }
 
         // External repositories (Bzlmod) are resolved lazily for commands that load packages.
         let uses_external_repos = matches!(
@@ -523,6 +648,26 @@ impl BlazeRuntime {
             }
         }
 
+        // `--nokeep_state_after_build`: discard in-memory Skyframe/analysis state after the command.
+        let mut keep_state = true;
+        for a in cmd_args {
+            if a == "--nokeep_state_after_build" {
+                keep_state = false;
+            } else if a == "--keep_state_after_build" {
+                keep_state = true;
+            } else if let Some(v) = a.strip_prefix("--keep_state_after_build=") {
+                if let Ok(b) = zel_options::convert_boolean(v) {
+                    keep_state = b;
+                }
+            }
+        }
+        if !keep_state {
+            self.skyframe.evaluator.clear();
+            *self.last_resolver.lock().unwrap() = None;
+            *self.last_build_options.lock().unwrap() = None;
+            *self.eval_memo.lock().unwrap() = (String::new(), Default::default(), false);
+        }
+
         // Output base bookkeeping: `command.log` (output of the last command) and the server log
         // analog of `java.log`.
         // `clean` does not write a command log (otherwise it could not delete the output base),
@@ -618,11 +763,27 @@ impl BlazeRuntime {
             .as_ref()
             .and_then(|p| p.get_bool("experimental_ui_debug_all_events"))
             .unwrap_or(false);
-        let obs = observability::BuildObserver::new(
+        let env_inv_id = self
+            .client_env()
+            .get("BAZEL_INTERNAL_INVOCATION_ID")
+            .cloned()
+            .filter(|s| !s.is_empty());
+        let has_explicit_inv_id = parsed
+            .as_ref()
+            .and_then(|p| p.get_str("invocation_id"))
+            .is_some_and(|s| !s.is_empty());
+        let obs = observability::BuildObserver::new_with_fallback_invocation_id(
             parsed.as_ref(),
             command,
             &self.dirs.output_base.to_string(),
+            env_inv_id.as_deref(),
         );
+        if !has_explicit_inv_id && env_inv_id.is_some() {
+            writeln_bytes(
+                stderr,
+                "WARNING: BAZEL_INTERNAL_INVOCATION_ID is set. This will soon be deprecated in favor of --invocation_id. Please switch to using the flag.",
+            );
+        }
         obs.reporter.set_deferred_finish(true);
         let code = self.cmd_build_or_test_inner(command, args, stdout, stderr, &obs);
         let failure = failure::default_for(code, command, stderr);
@@ -792,16 +953,15 @@ impl BlazeRuntime {
             // `RemoteModule.beforeCommand` reports the invocation id once a cache/executor is set.
             if ["remote_cache", "remote_executor", "disk_cache"]
                 .iter()
-                .any(|f| exec_phase::opt_last(&parsed, f).is_some_and(|v| !v.is_empty()))
+                .any(|f| parsed.get_str(f).is_some_and(|v| !v.is_empty()))
             {
                 writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
             }
-            if let Some(dc) = exec_phase::opt_last(&parsed, "disk_cache").filter(|s| !s.is_empty())
-            {
-                let abs = if std::path::Path::new(&dc).is_absolute() {
-                    std::path::PathBuf::from(&dc)
+            if let Some(dc) = parsed.get_str("disk_cache").filter(|s| !s.is_empty()) {
+                let abs = if std::path::Path::new(dc).is_absolute() {
+                    std::path::PathBuf::from(dc)
                 } else {
-                    std::path::PathBuf::from(self.dirs.workspace_dir.path_string()).join(&dc)
+                    std::path::PathBuf::from(self.dirs.workspace_dir.path_string()).join(dc)
                 };
                 if let Err(e) = std::fs::create_dir_all(&abs) {
                     let why = match e.raw_os_error() {
@@ -968,11 +1128,12 @@ impl BlazeRuntime {
 
         let reporter = &obs.reporter;
         obs.mark_phase(zel_events::profiler::ProfilePhase::TARGET_PATTERN_EVAL);
+        let working_dir = self.command_cwd(&parsed).to_string_lossy().into_owned();
         obs.begin_build(
             &patterns,
             args,
             &self.dirs.workspace_dir.to_string(),
-            &self.dirs.workspace_dir.to_string(),
+            &working_dir,
             self.server_pid,
             args,
         );
@@ -1352,7 +1513,7 @@ impl BlazeRuntime {
 
         // Analysis: dependency-aware configured-target analysis of the requested targets.
         let build_loader = Arc::clone(resolver.loader());
-        let config = match self.build_config_key(&parsed, &build_loader) {
+        let mut config = match self.build_config_key(&parsed, &build_loader) {
             Ok(c) => c,
             Err(e) => {
                 writeln_bytes(stderr, &format!("ERROR: {e}"));
@@ -1369,6 +1530,25 @@ impl BlazeRuntime {
                 return ExitCode::COMMAND_LINE_ERROR;
             }
         };
+        let mut default_inst_filter_msgs: Option<String> = None;
+        if (command == "coverage"
+            || (command == "test" && exec_phase::opt_bool(&parsed, "collect_code_coverage", false)))
+            && !parsed.parsed_options.contains_key("instrumentation_filter")
+        {
+            if let Some(f) = default_instrumentation_filter(&resolved_targets) {
+                config
+                    .options
+                    .insert("instrumentation_filter".to_string(), f.clone());
+                config.native.insert(
+                    "instrumentation_filter".to_string(),
+                    zel_analysis::NativeSetting {
+                        raw: f.clone(),
+                        value: zel_analysis::build_options::ConfigValue::Scalar(f.clone()),
+                    },
+                );
+                default_inst_filter_msgs = Some(f);
+            }
+        }
         if let Err(code) = self.check_analysis_cache(&parsed, &config, stderr) {
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return code;
@@ -1377,24 +1557,17 @@ impl BlazeRuntime {
         if !parsed.get_bool("check_visibility").unwrap_or(true) {
             writeln_bytes(stderr, "WARNING: This build has globally disabled target visibility checking (--nocheck_visibility).");
         }
-        if (command == "coverage"
-            || (command == "test" && exec_phase::opt_bool(&parsed, "collect_code_coverage", false)))
-            && !parsed.parsed_options.contains_key("instrumentation_filter")
-        {
-            if let Some(f) = default_instrumentation_filter(&resolved_targets) {
-                writeln_bytes(
-                    stderr,
-                    &format!("INFO: Using default value for --instrumentation_filter: \"{f}\"."),
-                );
-                writeln_bytes(
-                    stderr,
-                    "INFO: Override the above default with --instrumentation_filter",
-                );
-            }
+        if let Some(f) = default_inst_filter_msgs {
+            writeln_bytes(
+                stderr,
+                &format!("INFO: Using default value for --instrumentation_filter: \"{f}\"."),
+            );
+            writeln_bytes(
+                stderr,
+                "INFO: Override the above default with --instrumentation_filter",
+            );
         }
-        if (command == "test" || command == "coverage")
-            && !exec_phase::opt_bool(&parsed, "analyze", true)
-        {
+        if !exec_phase::opt_bool(&parsed, "analyze", true) {
             writeln_bytes(
                 stderr,
                 &format!(
@@ -1407,11 +1580,18 @@ impl BlazeRuntime {
                 stderr,
                 "INFO: Build completed successfully, 0 total actions",
             );
-            writeln_bytes(
-                stderr,
-                "ERROR: Couldn't start the build. Unable to run tests",
-            );
-            return ExitCode::BUILD_FAILURE;
+            if command == "test" || command == "coverage" {
+                writeln_bytes(
+                    stderr,
+                    "ERROR: Couldn't start the build. Unable to run tests",
+                );
+                return ExitCode::BUILD_FAILURE;
+            }
+            reporter.post_bep(BepEvent::Finished {
+                exit_code_name: ExitCode::SUCCESS.name.to_string(),
+                exit_code: ExitCode::SUCCESS.numeric_exit_code(),
+            });
+            return ExitCode::SUCCESS;
         }
         let pre_analysis_len = stderr.len();
         let analysis =
@@ -2091,27 +2271,28 @@ impl BlazeRuntime {
                 .unwrap_or(Some(5000)),
             &test_units,
         );
-        if exec_phase::opt_bool(&parsed, "build", true) {
+        {
             let genfiles = self.dirs.bazel_genfiles(cpu, &parsed.compilation_mode);
-            let prefix = exec_phase::opt_last(&parsed, "symlink_prefix");
+            let prefix = parsed.get_str("symlink_prefix");
             let mode = exec_phase::opt_last(&parsed, "experimental_convenience_symlinks")
                 .and_then(|v| zel_exec::symlinks::ConvenienceSymlinksMode::parse(&v))
                 .unwrap_or_default();
             let skip_genfiles =
                 exec_phase::opt_bool(&parsed, "incompatible_skip_genfiles_symlink", true);
-            let msgs = zel_exec::symlinks::create_convenience_symlinks(
-                &zel_exec::symlinks::SymlinkRequest {
-                    workspace_dir: self.dirs.workspace_dir.path_string(),
-                    execroot: execroot.path_string(),
-                    bin_dir: bin_dir.path_string(),
-                    testlogs_dir: testlogs_dir.path_string(),
-                    genfiles_dir: genfiles.path_string(),
-                    symlink_prefix: prefix.as_deref(),
-                    mode,
-                    product_name: "bazel",
-                    skip_genfiles,
-                },
-            );
+            let prod = commands::product_name();
+            let sym_req = zel_exec::symlinks::SymlinkRequest {
+                workspace_dir: self.dirs.workspace_dir.path_string(),
+                execroot: execroot.path_string(),
+                bin_dir: bin_dir.path_string(),
+                testlogs_dir: testlogs_dir.path_string(),
+                genfiles_dir: genfiles.path_string(),
+                symlink_prefix: prefix,
+                mode,
+                product_name: prod,
+                skip_genfiles,
+            };
+            obs.set_convenience_symlinks(zel_exec::symlinks::bep_convenience_symlinks(&sym_req));
+            let msgs = zel_exec::symlinks::create_convenience_symlinks(&sym_req);
             for m in msgs {
                 writeln_bytes(stderr, &m);
             }
@@ -2888,13 +3069,11 @@ impl BlazeRuntime {
             }
         }
         let (run_under_label, run_under_opts) = if let Some(ru) = &run_under_str {
-            let mut words = ru.split_whitespace();
-            if let Some(first) = words.next() {
+            let toks = zel_analysis::location::shell_tokenize(ru)
+                .unwrap_or_else(|_| ru.split_whitespace().map(str::to_string).collect());
+            if let Some((first, rest)) = toks.split_first() {
                 if first.starts_with("//") || first.starts_with('@') {
-                    (
-                        Some(first.to_string()),
-                        words.map(|s| s.to_string()).collect::<Vec<_>>(),
-                    )
+                    (Some(first.clone()), rest.to_vec())
                 } else {
                     (None, Vec::new())
                 }
@@ -3176,11 +3355,7 @@ impl BlazeRuntime {
                 return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
             }
         };
-        let client_cwd = args
-            .iter()
-            .find_map(|a| a.strip_prefix("--client_cwd="))
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| self.dirs.workspace_dir.path_string().to_string());
+        let client_cwd = self.command_cwd(&parsed).to_string_lossy().into_owned();
         let run_in_cwd = exec_phase::opt_bool(&parsed, "run_in_cwd", false);
         let cwd = if run_in_cwd {
             client_cwd.clone()
@@ -3192,7 +3367,7 @@ impl BlazeRuntime {
                 .map(|d| d.join(self.dirs.execroot_workspace_name()))
                 .filter(|d| d.is_dir())
                 .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.dirs.workspace_dir.path_string().to_string())
+                .unwrap_or_else(|| client_cwd.clone())
         };
         let effective_target = if matches!(&target, zel_packages::Target::Rule(r) if r.rule_class == "alias")
         {
@@ -3286,7 +3461,9 @@ impl BlazeRuntime {
                     }
                 }
             } else if let Some(ru) = &run_under_str {
-                argv_s.extend(ru.split_whitespace().map(|s| s.to_string()));
+                let toks = zel_analysis::location::shell_tokenize(ru)
+                    .unwrap_or_else(|_| ru.split_whitespace().map(str::to_string).collect());
+                argv_s.extend(toks);
             }
             argv_s.push(test_binary_rel.clone());
             // `RunfilesSupport.getArgs()` (the rule's `args`) come first, then `--test_arg`s.
@@ -3335,16 +3512,7 @@ impl BlazeRuntime {
             argv_s.extend(expanded_rule_args.iter().cloned());
             argv_s.extend(run_args.iter().cloned());
             if let Some(ru) = shell_run_under {
-                let q = |s: &str| {
-                    if !s.is_empty()
-                        && s.chars()
-                            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
-                    {
-                        s.to_string()
-                    } else {
-                        format!("'{}'", s.replace('\'', "'\\''"))
-                    }
-                };
+                let q = |s: &str| shell_escape_word(s);
                 let cmd = format!(
                     "{ru} {}",
                     argv_s.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")
@@ -3382,17 +3550,29 @@ impl BlazeRuntime {
         let script_path = exec_phase::opt_last(&parsed, "script_path");
         let emit_script_in_exec_req =
             exec_phase::opt_bool(&parsed, "emit_script_path_in_exec_request", false);
+        let needs_shell = script_path.is_some()
+            || (!ct.is_test && run_under_label.is_none() && run_under_str.is_some());
         let sh_executable = match exec_phase::opt_last(&parsed, "shell_executable") {
-            Some(s) if s.is_empty() && script_path.is_some() => {
+            Some(s) if s.is_empty() && needs_shell => {
+                let reason = if script_path.is_some() {
+                    "\"--script_path\""
+                } else {
+                    "\"--run_under\""
+                };
                 writeln_bytes(
                     stderr,
-                    "ERROR: the \"run\" command needs a shell with \"--script_path\"; use the --shell_executable=<path> flag to specify the shell's path, e.g. --shell_executable=/bin/bash",
+                    &format!("ERROR: the \"run\" command needs a shell with {reason}; use the --shell_executable=<path> flag to specify the shell's path, e.g. --shell_executable=/bin/bash"),
                 );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
             Some(s) if !s.is_empty() => s,
             _ => "/bin/bash".to_string(),
         };
+        if !ct.is_test && run_under_label.is_none() && run_under_str.is_some() {
+            if let Some(first) = argv_s.first_mut() {
+                *first = sh_executable.clone();
+            }
+        }
         if let Some(ref sp) = script_path {
             if sp.trim().is_empty() {
                 writeln_bytes(
@@ -3418,6 +3598,17 @@ impl BlazeRuntime {
         } else {
             display
         };
+        let run_build_id = parsed
+            .get_str("invocation_id")
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                self.client_env()
+                    .get("BAZEL_INTERNAL_INVOCATION_ID")
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+            })
+            .unwrap_or_else(pseudo_uuid);
         if script_path.is_none() {
             if parsed.subcommands {
                 writeln_bytes(stderr, "INFO: Running command line:");
@@ -3435,7 +3626,7 @@ impl BlazeRuntime {
                     "    BUILD_EXECROOT={} \\\n",
                     self.dirs.execroot().path_string()
                 ));
-                cmd_lines.push_str(&format!("    BUILD_ID={} \\\n", pseudo_uuid()));
+                cmd_lines.push_str(&format!("    BUILD_ID={} \\\n", run_build_id));
                 cmd_lines.push_str(&format!("    BUILD_WORKING_DIRECTORY={} \\\n", client_cwd));
                 cmd_lines.push_str(&format!(
                     "    BUILD_WORKSPACE_DIRECTORY={} \\\n",
@@ -3448,15 +3639,7 @@ impl BlazeRuntime {
                     full.push(' ');
                     full.push_str(a);
                 }
-                let safe = !full.is_empty()
-                    && full
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c));
-                let shown = if safe {
-                    full
-                } else {
-                    format!("'{}'", full.replace('\'', "'\\''"))
-                };
+                let shown = shell_escape_word(&full);
                 cmd_lines.push_str(&format!("  /bin/bash -c {shown})"));
                 writeln_bytes(stderr, &cmd_lines);
             } else {
@@ -3488,7 +3671,7 @@ impl BlazeRuntime {
         );
         run_base.insert("BUILD_WORKING_DIRECTORY".into(), client_cwd.clone());
         run_base.insert("BUILD_EXECROOT".into(), execroot.path_string().to_string());
-        run_base.insert("BUILD_ID".into(), pseudo_uuid());
+        run_base.insert("BUILD_ID".into(), run_build_id);
         if ct.is_test {
             run_base.insert("TEST_TARGET".into(), label.canonical_form());
             run_base.insert("TEST_WORKSPACE".into(), self.dirs.execroot_workspace_name());
@@ -3689,15 +3872,7 @@ impl BlazeRuntime {
         };
         let mut write_failure: Option<String> = None;
         let script = script_path.map(|sp| {
-            let q = |s: &str| {
-                if !s.is_empty()
-                    && s.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
-                {
-                    s.to_string()
-                } else {
-                    format!("'{}'", s.replace('\'', "'\\''"))
-                }
-            };
+            let q = |s: &str| shell_escape_word(s);
             let to_iso_8859_1 = |s: &str| -> Vec<u8> {
                 s.chars()
                     .map(|ch| if (ch as u32) <= 0xFF { ch as u8 } else { b'?' })
@@ -3827,10 +4002,6 @@ impl BlazeRuntime {
             }
             return ExitCode::SUCCESS;
         }
-        if !run_built_target {
-            *exec_request = None;
-            return ExitCode::SUCCESS;
-        }
         *exec_request = Some(ExecRequest {
             working_directory: cwd.into_bytes(),
             argv: argv_s.iter().map(|a| a.as_bytes().to_vec()).collect(),
@@ -3842,7 +4013,7 @@ impl BlazeRuntime {
                 })
                 .collect(),
             environment_variable_to_clear: to_clear.iter().map(|n| n.as_bytes().to_vec()).collect(),
-            should_exec: true,
+            should_exec: run_built_target,
             script_path: None,
             path_to_replace: paths_to_replace,
         });
@@ -4357,6 +4528,21 @@ fn default_instrumentation_filter(targets: &[zel_packages::Target]) -> Option<St
         f = "^//".to_string();
     }
     Some(f)
+}
+
+/// Bazel `ShellEscaper.escapeString`: quotes empty strings, strings containing `=` (so leading
+/// `VAR=val` argv words cannot be interpreted as shell variable assignments), leading `~`, or
+/// characters outside `@%+:,./-_~` and ASCII alphanumerics.
+fn shell_escape_word(s: &str) -> String {
+    if !s.is_empty()
+        && !s.starts_with('~')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@%+:,./-_~".contains(c))
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 #[cfg(test)]

@@ -2302,3 +2302,57 @@ priv_m = macro(
         errors(&p_bad)
     );
 }
+
+#[test]
+fn ignored_below_directory_warns_and_invalid_bazelignore_errors() {
+    let ws = Ws::new(&[
+        ("BUILD", "filegroup(name = 'root_fg')"),
+        ("ignored/BUILD", "filegroup(name = 'bad')"),
+        (
+            "sub/BUILD",
+            "sh_test(name = 't', srcs = ['t.sh'])\nfilegroup(name = 'fg')",
+        ),
+        ("sub/t.sh", ""),
+        (".bazelignore", "ignored\n"),
+    ]);
+    let r = resolver(&ws, "");
+
+    // `//ignored/...` warns and returns zero targets without error.
+    let o = r.resolve_patterns(&["//ignored/...".into()]);
+    assert!(o.errors.is_empty(), "unexpected errors: {:?}", o.errors);
+    assert!(o.targets.is_empty());
+    assert!(
+        o.events.iter().any(|e| e
+            .message
+            .contains("Pattern '//ignored/...' was filtered out by ignored directory 'ignored'")),
+        "expected ignored warning, got {:?}",
+        o.events
+    );
+
+    // Subtracting the entire tree (`//sub/... -//sub/...`) yields empty targets without error.
+    let o = r.resolve_patterns(&["//sub/...".into(), "-//sub/...".into()]);
+    assert!(o.errors.is_empty(), "unexpected errors: {:?}", o.errors);
+    assert!(o.targets.is_empty());
+
+    // `FilteringPolicy::FilterTests` records excluded targets in `filtered_targets`.
+    let o = r.resolve_patterns_with_policy(
+        &["//sub:all".into()],
+        &crate::resolve::FilteringPolicy::FilterTests,
+    );
+    assert_eq!(o.targets.len(), 1);
+    assert_eq!(o.targets[0].label().name(), "t");
+    assert_eq!(o.filtered_targets.len(), 1);
+    assert_eq!(o.filtered_targets[0].label().name(), "fg");
+
+    // Invalid absolute path in `.bazelignore` fails lookup instead of silently dropping `.bazelignore`.
+    let bad_ws = Ws::new(&[
+        ("BUILD", "filegroup(name = 'x')"),
+        (".bazelignore", "/abs/path\n"),
+    ]);
+    let err = bad_ws.try_load("").unwrap_err();
+    assert!(
+        err.message.contains("cannot be an absolute path"),
+        "got: {}",
+        err.message
+    );
+}

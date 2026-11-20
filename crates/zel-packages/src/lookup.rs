@@ -246,6 +246,28 @@ impl IgnoredSubdirectories {
     pub fn is_ignored(&self, frag: &PathFragment) -> bool {
         self.ignored_reason(frag).is_some()
     }
+
+    /// Returns the matching ignore entry (`IgnoredSubdirectories.matchingEntry`) if `frag` is
+    /// covered by `.bazelignore` or `REPO.bazel` `ignore_directories()`.
+    pub fn matching_entry(&self, frag: &PathFragment) -> Option<String> {
+        for e in &self.prefixes {
+            if !e.is_empty() && frag.starts_with(e) {
+                return Some(e.path_string().to_string());
+            }
+        }
+        if !self.patterns.is_empty() {
+            let segs: Vec<&str> = frag.segments();
+            for p in &self.patterns {
+                let psegs: Vec<&str> = p.split('/').collect();
+                for k in 0..=segs.len() {
+                    if glob::path_matches(&psegs, &segs[..k]) {
+                        return Some(p.clone());
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Everything needed to decide whether a directory is a package.
@@ -256,16 +278,22 @@ pub struct PackageLookupConfig {
 }
 
 impl PackageLookupConfig {
-    /// Entries of `.bazelignore` in `repo_root` (main repository only in Bazel; applied to every
-    /// repo here since external repos may also ship one).
-    pub fn bazelignore(&self, repo_root: &PathFragment) -> Vec<PathFragment> {
+    /// Validates `.bazelignore` in `repo_root`, returning an error when it contains an invalid
+    /// (e.g. absolute) path entry (`IgnoredSubdirectoriesFunction`).
+    pub fn check_bazelignore(&self, repo_root: &PathFragment) -> Result<Vec<PathFragment>, String> {
         match self
             .fs
             .read_file(&repo_root.get_relative_str(".bazelignore"))
         {
-            Ok(bytes) => parse_bazelignore(&String::from_utf8_lossy(&bytes)).unwrap_or_default(),
-            Err(_) => Vec::new(),
+            Ok(bytes) => parse_bazelignore(&String::from_utf8_lossy(&bytes)),
+            Err(_) => Ok(Vec::new()),
         }
+    }
+
+    /// Entries of `.bazelignore` in `repo_root` (main repository only in Bazel; applied to every
+    /// repo here since external repos may also ship one).
+    pub fn bazelignore(&self, repo_root: &PathFragment) -> Vec<PathFragment> {
+        self.check_bazelignore(repo_root).unwrap_or_default()
     }
 
     /// `ignore_directories()` patterns from `REPO.bazel`, if any.
@@ -295,19 +323,34 @@ impl PackageLookupConfig {
 
     pub fn lookup(&self, pkg: &PackageIdentifier) -> PackageLookup {
         let Some(root) = self.resolver.repo_root(pkg.repository()) else {
+            let main_map = self.resolver.mapping(&RepositoryName::main());
+            let dym = main_map.did_you_mean(pkg.repository().name());
             let repo_display = if pkg.repository().is_main() {
                 pkg.repository().canonical_form()
+            } else if !pkg.repository().is_visible() {
+                pkg.repository().name_with_at()
             } else {
                 format!(
-                    "@@[unknown repo '{}' requested from @@]",
+                    "@@[unknown repo '{}' requested from @@{dym}]",
                     pkg.repository().name()
                 )
             };
+            let not_vis = pkg
+                .repository()
+                .not_visible_error_message()
+                .unwrap_or_else(|| {
+                    format!(
+                        "No repository visible as '@{}' from main repository{dym}",
+                        pkg.repository().name()
+                    )
+                });
             return PackageLookup::RepoNotFound(format!(
-                "The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
-                pkg.repository().name()
+                "The repository '{repo_display}' could not be resolved: {not_vis}"
             ));
         };
+        if let Err(e) = self.check_bazelignore(&root) {
+            return PackageLookup::IoError(format!("Error reading .bazelignore: {e}"));
+        }
         if self.deleted_packages.contains(pkg) {
             return PackageLookup::Deleted(
                 "Package is considered deleted due to --deleted_packages".to_string(),

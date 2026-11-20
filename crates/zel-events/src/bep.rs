@@ -620,6 +620,13 @@ impl BuildEventStreamer {
     /// Posts an event, honoring ordering constraints and post-completion filtering
     /// (`BuildEventStreamer.buildEvent`).
     pub fn post(&self, node: BuildEventNode) {
+        if !self.publish_all_actions {
+            if let Some(act) = node.payload.get_msg("action") {
+                if act.get_bool("success") && act.get_str("type") != "ExtraAction" {
+                    return;
+                }
+            }
+        }
         let mut close_now = false;
         {
             let mut st = self.state.lock().unwrap();
@@ -710,10 +717,12 @@ impl BuildEventStreamer {
                     i += 1;
                 }
             }
-            if let Ok(await_id) = Msg::decode("build_event_stream.BuildEventId", &await_key) {
-                let children: Vec<Msg> = buffered.iter().map(|n| n.id.clone()).collect();
-                let node = Self::aborted_node(await_id, children, &reason);
-                self.post_locked(st, &node);
+            if !st.posted.contains(&await_key) {
+                if let Ok(await_id) = Msg::decode("build_event_stream.BuildEventId", &await_key) {
+                    let children: Vec<Msg> = buffered.iter().map(|n| n.id.clone()).collect();
+                    let node = Self::aborted_node(await_id, children, &reason);
+                    self.post_locked(st, &node);
+                }
             }
         }
         // Final progress event, carrying remaining output.
@@ -1013,10 +1022,15 @@ impl BepBuilder {
 
     pub fn build_metadata(md: &[(String, String)]) -> BuildEventNode {
         let mut b = Msg::new("build_event_stream.BuildMetadata");
+        let mut dedup = std::collections::BTreeMap::new();
         for (k, v) in md {
-            b.put_map("metadata", Value::Str(k.clone()), Value::Str(v.clone()));
+            dedup.insert(k.clone(), v.clone());
+        }
+        for (k, v) in dedup {
+            b.put_map("metadata", Value::Str(k), Value::Str(v));
         }
         BuildEventNode::new(ids::build_metadata(), vec![], "build_metadata", b)
+            .after(ids::started())
     }
 
     pub fn workspace_config(local_exec_root: &str) -> BuildEventNode {

@@ -229,6 +229,8 @@ pub struct PackageErrors {
 pub struct ResolveOutcome {
     /// Resolved targets in first-seen order, duplicates removed, negative patterns subtracted.
     pub targets: Vec<Target>,
+    /// Targets excluded by `FilteringPolicy` (`ResolvedTargets.getFilteredTargets()`).
+    pub filtered_targets: Vec<Target>,
     /// Patterns that failed (all of them are reported even without `--keep_going`; the caller
     /// decides whether to stop).
     pub errors: Vec<PatternError>,
@@ -492,8 +494,15 @@ impl PatternResolver {
 
     /// `InterpretPathAsTarget`: finds the package containing `path` and builds the label.
     fn interpret_path_as_target(&self, original: &str, path: &str) -> Result<Label, String> {
-        let frag = PathFragment::create(path);
-        let segs: Vec<String> = frag.segments().iter().map(|s| s.to_string()).collect();
+        let segs: Vec<String> = if cfg!(windows) {
+            let frag = PathFragment::create(path);
+            frag.segments().iter().map(|s| s.to_string()).collect()
+        } else {
+            path.split('/')
+                .filter(|s| !s.is_empty() && *s != ".")
+                .map(|s| s.to_string())
+                .collect()
+        };
         let lookup = &self.loader.config().lookup;
         let repo = RepositoryName::main();
         for i in (0..=segs.len()).rev() {
@@ -538,20 +547,63 @@ impl PatternResolver {
     ) -> Result<(), String> {
         let lookup = &self.loader.config().lookup;
         let Some(root) = lookup.resolver.repo_root(dir.repository()) else {
+            let main_map = lookup.resolver.mapping(&RepositoryName::main());
+            let dym = main_map.did_you_mean(dir.repository().name());
             let repo_display = if dir.repository().is_main() {
                 dir.repository().canonical_form()
+            } else if !dir.repository().is_visible() {
+                dir.repository().name_with_at()
             } else {
                 format!(
-                    "@@[unknown repo '{}' requested from @@]",
+                    "@@[unknown repo '{}' requested from @@{dym}]",
                     dir.repository().name()
                 )
             };
+            let not_vis = dir
+                .repository()
+                .not_visible_error_message()
+                .unwrap_or_else(|| {
+                    format!(
+                        "No repository visible as '@{}' from main repository{dym}",
+                        dir.repository().name()
+                    )
+                });
             return Err(format!(
-                "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
-                dir.package_fragment(),
-                dir.repository().name()
+                "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: {not_vis}",
+                dir.package_fragment()
             ));
         };
+        if let Err(e) = lookup.check_bazelignore(&root) {
+            return Err(format!("Error reading .bazelignore: {e}"));
+        }
+        if let Some(entry) = lookup
+            .ignored_subdirectories(&root)
+            .matching_entry(dir.package_fragment())
+        {
+            let pat_display = if dir.repository().is_main() {
+                if dir.package_fragment().is_empty() {
+                    "//...".to_string()
+                } else {
+                    format!("//{}/...", dir.package_fragment())
+                }
+            } else if dir.package_fragment().is_empty() {
+                format!("{}/...", dir.repository().canonical_form())
+            } else {
+                format!(
+                    "{}//{}/...",
+                    dir.repository().canonical_form(),
+                    dir.package_fragment()
+                )
+            };
+            events.push(PackageEvent {
+                kind: EventKind::Warning,
+                location: None,
+                message: format!(
+                    "Pattern '{pat_display}' was filtered out by ignored directory '{entry}'"
+                ),
+            });
+            return Ok(());
+        }
         let start = root.get_relative(dir.package_fragment());
         if !lookup
             .fs
@@ -576,6 +628,23 @@ impl PatternResolver {
             events,
         );
         if out.is_empty() {
+            if !excluded_subdirs.is_empty() {
+                let mut unexcluded = Vec::new();
+                let mut dummy_events = Vec::new();
+                let mut dummy_anc = Vec::new();
+                self.walk_dirs(
+                    dir,
+                    &root,
+                    is_root && dir.repository().is_main(),
+                    &[],
+                    &mut dummy_anc,
+                    &mut unexcluded,
+                    &mut dummy_events,
+                );
+                if !unexcluded.is_empty() {
+                    return Ok(());
+                }
+            }
             return Err(format!(
                 "no targets found beneath '{}'",
                 dir.package_fragment()
@@ -844,6 +913,7 @@ impl PatternResolver {
         }
 
         let mut acc: Vec<Target> = Vec::new();
+        let mut filtered: Vec<Target> = Vec::new();
         for (idx, item) in parsed_list.into_iter().enumerate() {
             let Some((raw, mut signed)) = item else {
                 continue;
@@ -926,10 +996,16 @@ impl PatternResolver {
                         if !explicit && !matches!(policy, FilteringPolicy::NoFilter) {
                             if let Ok(pkg) = self.package(t.label().package_identifier()) {
                                 if !policy.should_retain(&t, explicit, &pkg) {
+                                    if !acc.iter().any(|x| x.label() == t.label())
+                                        && !filtered.iter().any(|x| x.label() == t.label())
+                                    {
+                                        filtered.push(t);
+                                    }
                                     continue;
                                 }
                             }
                         }
+                        filtered.retain(|x| x.label() != t.label());
                         if !acc.iter().any(|x| x.label() == t.label()) {
                             acc.push(t);
                         }
@@ -938,10 +1014,12 @@ impl PatternResolver {
                 (PatternSign::Negative, Ok(ts)) => {
                     let remove: HashSet<Label> = ts.iter().map(|t| t.label().clone()).collect();
                     acc.retain(|t| !remove.contains(t.label()));
+                    filtered.retain(|t| !remove.contains(t.label()));
                 }
             }
         }
         outcome.targets = acc;
+        outcome.filtered_targets = filtered;
         outcome
     }
 

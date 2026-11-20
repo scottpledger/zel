@@ -92,6 +92,15 @@ impl OptionSource for ParsedSource<'_> {
         if flag == "digest_function" {
             return self.digest_function.iter().cloned().collect();
         }
+        if let Some(d) = self.parsed.parsed_options.get(flag) {
+            if !d.definition.allow_multiple {
+                match &d.value {
+                    zel_options::OptionValue::Void => return Vec::new(),
+                    zel_options::OptionValue::String(s) => return vec![s.clone()],
+                    _ => {}
+                }
+            }
+        }
         opt_all(self.parsed, flag)
     }
 }
@@ -153,7 +162,7 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
 
     // `RemoteModule.beforeCommand`: remote options are validated before anything runs. The
     // server's digest function is what the remote client must use.
-    let has_cache_flag = |name: &str| opt_last(parsed, name).is_some_and(|v| !v.is_empty());
+    let has_cache_flag = |name: &str| parsed.get_str(name).is_some_and(|v| !v.is_empty());
     let uses_remote = has_cache_flag("remote_cache")
         || has_cache_flag("remote_executor")
         || has_cache_flag("disk_cache");
@@ -397,7 +406,8 @@ pub(crate) fn validate_exec_options(parsed: &ParsedCommandOptions) -> Result<(),
             .map_err(|e| flag_err("instrumentation_filter", &v, e))?;
     }
     if let Some(v) = opt_last(parsed, "combined_report") {
-        if v != "none" && v != "lcov" {
+        let vl = v.to_ascii_lowercase();
+        if vl != "none" && vl != "lcov" {
             return Err(flag_err(
                 "combined_report",
                 &v,
@@ -1529,7 +1539,11 @@ pub(crate) fn runfiles_entries(ct: &ConfiguredTarget, workspace: &str) -> BTreeM
     if let Some(rs) = &ct.runfiles_support {
         let mut entries = rs.runfiles.manifest_entries(workspace);
         let e = &rs.executable;
-        let key = format!("{workspace}/{}", e.root_relative_path.path_string());
+        let sp = e.short_path();
+        let key = sp
+            .strip_prefix("../")
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{workspace}/{sp}"));
         entries
             .entry(key)
             .or_insert_with(|| e.exec_path.path_string().to_string());
@@ -3350,7 +3364,9 @@ pub(crate) fn run_tests(
     // generator's "no coverage found" warning.
     let mut report_failed = false;
     if input.coverage && !jobs.is_empty() && !opt_bool(parsed, "nobuild", false) {
-        let rep_mode = opt_last(parsed, "combined_report").unwrap_or_else(|| "lcov".into());
+        let rep_mode = opt_last(parsed, "combined_report")
+            .unwrap_or_else(|| "lcov".into())
+            .to_ascii_lowercase();
         let has_custom_gen = opt_last(parsed, "coverage_report_generator")
             .is_some_and(|s| s.starts_with("//") || s.starts_with('@'));
         let has_custom_support = opt_last(parsed, "coverage_support")
@@ -3386,7 +3402,9 @@ pub(crate) fn run_tests(
     }
     if input.coverage && !jobs.is_empty() && !opt_bool(parsed, "nobuild", false) && !any_split_fail
     {
-        let rep_mode = opt_last(parsed, "combined_report").unwrap_or_else(|| "lcov".into());
+        let rep_mode = opt_last(parsed, "combined_report")
+            .unwrap_or_else(|| "lcov".into())
+            .to_ascii_lowercase();
         let exroot = std::path::PathBuf::from(input.execroot.path_string());
         if rep_mode == "lcov" || rep_mode == "branch" {
             let cov_dir = exroot.join("bazel-out/_coverage");
@@ -3475,7 +3493,12 @@ pub(crate) fn run_tests(
                             .into_owned()
                     })
                     .collect();
-                let _ = std::fs::write(cov_dir.join(list_name), rels.join("\n"));
+                let list_body = if rels.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}\n", rels.join("\n"))
+                };
+                let _ = std::fs::write(cov_dir.join(list_name), list_body);
                 let out_file = cov_dir.join(rep);
                 let args = [
                     format!("--reports_file=bazel-out/_coverage/{list_name}"),
@@ -3716,7 +3739,7 @@ pub(crate) fn run_tests(
     if !is_none && !is_testcase {
         for (label, status, r) in &results {
             if is_terse
-                && (status.is_passed()
+                && (*status == TestStatus::Passed
                     || matches!(
                         status,
                         TestStatus::NoStatus | TestStatus::BlazeHaltedBeforeTesting

@@ -243,6 +243,11 @@ pub fn product_name() -> &'static str {
     PRODUCT_NAME.get().map(String::as_str).unwrap_or("bazel")
 }
 
+/// Returns `Some(name)` only when `--product_name` was explicitly set.
+pub fn explicit_product_name() -> Option<&'static str> {
+    PRODUCT_NAME.get().map(String::as_str)
+}
+
 /// Sets the product name once (first caller wins), from the server's `--product_name`.
 pub fn set_product_name(name: &str) {
     if !name.is_empty() {

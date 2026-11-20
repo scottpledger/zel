@@ -203,7 +203,7 @@ impl RepositoryName {
     }
 
     pub fn is_visible(&self) -> bool {
-        self.owner_repo_if_not_visible.is_none()
+        self.owner_repo_if_not_visible.is_none() && !self.name.starts_with("[unknown repo '")
     }
 
     pub fn owner_repo_if_not_visible(&self) -> Option<&str> {
@@ -264,6 +264,50 @@ impl RepositoryName {
         } else {
             self.name_with_at()
         }
+    }
+
+    /// Constructs a non-visible `RepositoryName` marker matching `RepositoryName.toNonVisible`.
+    pub fn to_non_visible(requested: &str, owner: &RepositoryName, dym_suffix: &str) -> Self {
+        let owner_at = if owner.is_main() {
+            "@@".to_string()
+        } else {
+            owner.name_with_at()
+        };
+        Self::create_unvalidated(format!(
+            "[unknown repo '{requested}' requested from {owner_at}{dym_suffix}]"
+        ))
+    }
+
+    /// If `!self.is_visible()`, returns Bazel's `getNotVisibleErrorMessage()` text.
+    pub fn not_visible_error_message(&self) -> Option<String> {
+        if let Some(owner) = &self.owner_repo_if_not_visible {
+            let owner_display = if owner.is_empty() {
+                "main repository".to_string()
+            } else {
+                format!("repository '@@{owner}'")
+            };
+            return Some(format!(
+                "No repository visible as '@{}' from {owner_display}",
+                self.name
+            ));
+        }
+        let rest = self
+            .name
+            .strip_prefix("[unknown repo '")?
+            .strip_suffix(']')?;
+        let (requested, after_req) = rest.split_once("' requested from ")?;
+        let (owner_at, dym) = match after_req.find(" (did you mean ") {
+            Some(idx) => (&after_req[..idx], &after_req[idx..]),
+            None => (after_req, ""),
+        };
+        let owner_display = if owner_at == "@@" {
+            "main repository".to_string()
+        } else {
+            format!("repository '{owner_at}'")
+        };
+        Some(format!(
+            "No repository visible as '@{requested}' from {owner_display}{dym}"
+        ))
     }
 }
 
@@ -345,6 +389,56 @@ impl RepositoryMapping {
         }
         RepositoryName::create_non_visible(apparent_name, &self.owner_repo)
     }
+
+    /// Suggests the closest visible apparent repository name (`SpellChecker.didYouMean`),
+    /// walking entries in insertion order and keeping the first strictly closer candidate.
+    pub fn did_you_mean(&self, requested: &str) -> String {
+        let max_dist = std::cmp::min(5, (requested.encode_utf16().count() + 1) / 2);
+        if max_dist == 0 {
+            return String::new();
+        }
+        let req_lower: Vec<char> = requested.chars().flat_map(|c| c.to_lowercase()).collect();
+        let mut best_dist = max_dist + 1;
+        let mut best: Option<&str> = None;
+        for (cand, _) in self.entries() {
+            if cand.is_empty() || cand == requested {
+                continue;
+            }
+            let cand_lower: Vec<char> = cand.chars().flat_map(|c| c.to_lowercase()).collect();
+            if req_lower.len().abs_diff(cand_lower.len()) >= best_dist {
+                continue;
+            }
+            let d = levenshtein_bounded(&req_lower, &cand_lower, best_dist);
+            if d < best_dist {
+                best_dist = d;
+                best = Some(cand.as_str());
+            }
+        }
+        match best {
+            Some(s) => format!(" (did you mean '{s}'?)"),
+            None => String::new(),
+        }
+    }
+}
+
+fn levenshtein_bounded(a: &[char], b: &[char], limit: usize) -> usize {
+    let m = b.len();
+    let mut prev: Vec<usize> = (0..=m).collect();
+    let mut curr = vec![0; m + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        curr[0] = i + 1;
+        let mut row_min = curr[0];
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j + 1] + 1).min(curr[j] + 1).min(prev[j] + cost);
+            row_min = row_min.min(curr[j + 1]);
+        }
+        if row_min >= limit {
+            return limit;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[m]
 }
 
 /// Identifies a Bazel package (`RepositoryName` + package `PathFragment`), matching `PackageIdentifier.java`.
@@ -767,7 +861,13 @@ impl Label {
                     package_ctx.repository().clone()
                 }
             }
-            Some(r) if parts.repo_is_canonical => RepositoryName::create(r)?,
+            Some(r) if parts.repo_is_canonical => {
+                if r.starts_with("[unknown repo ") {
+                    RepositoryName::create_unvalidated(r)
+                } else {
+                    RepositoryName::create(r)?
+                }
+            }
             Some(r) => repo_mapping.get(r),
         };
         let pkg_fragment = if parts.pkg_is_absolute {
@@ -1007,17 +1107,28 @@ impl TargetPattern {
             && !parts.pkg_ends_with_triple_dots
             && !has_colon
         {
-            return Ok(Self::PathAsTarget {
-                original: raw.to_string(),
-                path: relative_dir
+            let path = if cfg!(windows) {
+                relative_dir
                     .get_relative_str(&parts.target)
                     .path_string()
-                    .to_string(),
+                    .to_string()
+            } else {
+                join_unix_relative_path(relative_dir.path_string(), &parts.target)
+            };
+            return Ok(Self::PathAsTarget {
+                original: raw.to_string(),
+                path,
             });
         }
         let repo = match &parts.repo {
             None => current_repo.clone(),
-            Some(r) if parts.repo_is_canonical => RepositoryName::create_unvalidated(r.clone()),
+            Some(r) if parts.repo_is_canonical => {
+                if r.starts_with("[unknown repo ") {
+                    RepositoryName::create_unvalidated(r.clone())
+                } else {
+                    RepositoryName::create(r)?
+                }
+            }
             Some(r) => mapping.get(r),
         };
         let pkg_fragment = if parts.pkg_is_absolute {
@@ -1057,6 +1168,39 @@ impl TargetPattern {
             LabelSyntaxError(format!("invalid target name: '{}'; {}", parts.target, e.0))
         })?;
         Ok(Self::SingleTarget(label))
+    }
+}
+
+fn join_unix_relative_path(base: &str, rel: &str) -> String {
+    let combined = if base.is_empty() || rel.starts_with('/') {
+        rel.to_string()
+    } else {
+        format!("{base}/{rel}")
+    };
+    let is_abs = combined.starts_with('/');
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in combined.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if let Some(&last) = segs.last() {
+                if last != ".." {
+                    segs.pop();
+                    continue;
+                }
+            }
+            if !is_abs {
+                segs.push("..");
+            }
+        } else {
+            segs.push(seg);
+        }
+    }
+    if is_abs {
+        format!("/{}", segs.join("/"))
+    } else {
+        segs.join("/")
     }
 }
 
@@ -1640,5 +1784,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(keep_build.resolve("c/BUILD").unwrap(), "a/c/BUILD");
+    }
+
+    #[test]
+    fn canonical_repo_validation_and_did_you_mean_and_backslash_paths() {
+        // Canonical repo in target pattern validates repository characters and `.` / `..`.
+        assert!(TargetPattern::parse("@@bad!repo//pkg:tgt", &PathFragment::empty()).is_err());
+        assert!(TargetPattern::parse("@@.//pkg:tgt", &PathFragment::empty()).is_err());
+        assert!(TargetPattern::parse("@@..//pkg:tgt", &PathFragment::empty()).is_err());
+
+        // `did_you_mean` preserves insertion order and caps edit distance.
+        let ordered = RepositoryMapping::new_ordered(
+            vec![
+                ("fa".to_string(), RepositoryName::create("fa+").unwrap()),
+                ("fb".to_string(), RepositoryName::create("fb+").unwrap()),
+                (
+                    "rules_rs".to_string(),
+                    RepositoryName::create("rules_rs+").unwrap(),
+                ),
+            ],
+            RepositoryName::main(),
+        );
+        assert_eq!(ordered.did_you_mean("fo"), " (did you mean 'fa'?)");
+        assert_eq!(
+            ordered.did_you_mean("rules_r"),
+            " (did you mean 'rules_rs'?)"
+        );
+        assert_eq!(ordered.did_you_mean("completely_unrelated"), "");
+
+        // Non-visible marker formatting.
+        let nv = RepositoryName::to_non_visible(
+            "rules_r",
+            &RepositoryName::main(),
+            " (did you mean 'rules_rs'?)",
+        );
+        assert!(!nv.is_visible());
+        assert_eq!(
+            nv.not_visible_error_message().as_deref(),
+            Some("No repository visible as '@rules_r' from main repository (did you mean 'rules_rs'?)")
+        );
+
+        // On Unix, `join_unix_relative_path` preserves backslashes while collapsing `.` and `..`.
+        assert_eq!(
+            join_unix_relative_path("pkg/sub", r"../file\name.txt"),
+            r"pkg/file\name.txt"
+        );
+        let pat = TargetPattern::parse("dir/file.txt", &PathFragment::create("pkg/sub")).unwrap();
+        assert_eq!(
+            pat,
+            TargetPattern::PathAsTarget {
+                original: "dir/file.txt".to_string(),
+                path: "pkg/sub/dir/file.txt".to_string(),
+            }
+        );
     }
 }

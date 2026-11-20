@@ -725,6 +725,8 @@ impl Session {
             return Err("Repository '@@' is not defined".into());
         }
         if let Some(c) = arg.strip_prefix("@@") {
+            zel_cmdline::RepositoryName::validate(c)
+                .map_err(|e| format!("Invalid repo name: {e}"))?;
             return Ok(c.to_string());
         }
         if !arg.starts_with('@') {
@@ -750,11 +752,24 @@ impl Session {
         if a.is_empty() {
             return Err("invalid user-provided repo name '': valid names may contain only A-Z, a-z, 0-9, '-', '_', '.', and must start with a letter or a number".into());
         }
-        self.resolution
-            .repo_mapping(&ModuleKey::root())
-            .get(a)
-            .cloned()
-            .ok_or_else(|| format!("No repository visible as '@{a}' from main repository"))
+        let root_map = self.resolution.repo_mapping(&ModuleKey::root());
+        root_map.get(a).cloned().ok_or_else(|| {
+            let ordered: Vec<(String, zel_cmdline::RepositoryName)> = root_map
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        zel_cmdline::RepositoryName::create_unvalidated(v),
+                    )
+                })
+                .collect();
+            let dym = zel_cmdline::RepositoryMapping::new_ordered(
+                ordered,
+                zel_cmdline::RepositoryName::main(),
+            )
+            .did_you_mean(a);
+            format!("No repository visible as '@{a}' from main repository{dym}")
+        })
     }
 }
 
@@ -812,6 +827,30 @@ const EXIT_FETCH_FAILED: i32 = 8;
 /// `Interrupted.Code.INTERRUPTED` exit code, used by `createFailedBlazeCommandResult(reporter, message)`.
 const EXIT_INTERRUPTED: i32 = 8;
 
+/// Resolves the command's host working directory (for `--target_pattern_file`) and workspace-relative
+/// working directory (for relative target patterns) from `--client_cwd`, matching `BlazeRuntime::command_cwd`
+/// and `BlazeRuntime::command_relative_dir`.
+fn command_working_dirs(
+    workspace: &Path,
+    parsed: &ParsedCommandOptions,
+) -> (PathBuf, zel_vfs::PathFragment) {
+    let ws_pf = zel_vfs::PathFragment::create(&workspace.to_string_lossy());
+    match parsed.get_str("client_cwd") {
+        Some(cwd) if !cwd.is_empty() => {
+            let pf = zel_vfs::PathFragment::create(cwd);
+            if pf.is_absolute() {
+                let rel = pf
+                    .relative_to(&ws_pf)
+                    .unwrap_or_else(|_| zel_vfs::PathFragment::empty());
+                (PathBuf::from(pf.path_string()), rel)
+            } else {
+                (PathBuf::from(ws_pf.get_relative(&pf).path_string()), pf)
+            }
+        }
+        _ => (workspace.to_path_buf(), zel_vfs::PathFragment::empty()),
+    }
+}
+
 /// `bazel fetch` (`--all`, `--configure`, `--force`, `--repo`, target patterns).
 pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput {
     let mut cfg = cfg;
@@ -825,7 +864,14 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     let all = parsed.get_bool("all").unwrap_or(false);
     let configure = parsed.get_bool("configure").unwrap_or(false);
     let repos = raw(parsed, "repo");
-    let targets = parsed.targets.clone();
+    let (working_dir, working_dir_rel) = command_working_dirs(&cfg.workspace, parsed);
+    let target_pattern_file = parsed.get_str("target_pattern_file").unwrap_or("");
+    let targets =
+        match zel_cmdline::read_target_patterns(&parsed.targets, target_pattern_file, &working_dir)
+        {
+            Ok(ts) => ts,
+            Err(e) => return CmdOutput::fail(EXIT_COMMAND_LINE, format!("ERROR: {e}\n")),
+        };
     let count = [all, configure, !repos.is_empty(), !targets.is_empty()]
         .iter()
         .filter(|b| **b)
@@ -836,6 +882,11 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
             "ERROR: Only one fetch option can be provided for fetch command\n".into(),
         );
     }
+    // When both `--configure` and `--force` are passed, only force-invalidate configure=True repos.
+    let force_configure_only = configure && cfg.force;
+    if force_configure_only {
+        cfg.force = false;
+    }
     let session = match Session::open(cfg) {
         Ok(s) => s,
         Err(e) => return session_error(e),
@@ -844,7 +895,7 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     let rt = session.rt.clone();
     let result: Result<String, (i32, String)> = (|| {
         if !targets.is_empty() {
-            return fetch_targets(&session, &targets)
+            return fetch_targets(&session, &targets, &working_dir_rel)
                 .map(|_| {
                     "All external dependencies for the requested targets fetched successfully."
                         .to_string()
@@ -852,15 +903,21 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
                 .map_err(|e| (EXIT_COMMAND_LINE, e));
         }
         if !repos.is_empty() {
+            let mut resolved_repos = Vec::new();
+            let mut seen_canonical = HashSet::new();
             let mut errors = Vec::new();
+            // Validate all `--repo` arguments before fetching any repository.
             for r in &repos {
                 match session.resolve_repo_arg(r) {
                     Ok(c) => {
-                        if let Err(e) = rt.fetch_repo(&c) {
-                            errors.push(e);
+                        if seen_canonical.insert(c.clone()) {
+                            resolved_repos.push(c);
                         }
                     }
                     Err(e) => {
+                        if e.starts_with("Invalid repo name:") {
+                            return Err((EXIT_FETCH_FAILED, e));
+                        }
                         if e.starts_with("invalid user-provided repo name")
                             || e.starts_with("The repo value has to be")
                         {
@@ -868,6 +925,11 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
                         }
                         errors.push(e);
                     }
+                }
+            }
+            for c in &resolved_repos {
+                if let Err(e) = rt.fetch_repo(c) {
+                    errors.push(e);
                 }
             }
             if !errors.is_empty() {
@@ -913,8 +975,15 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
         }
         let names = rt.all_repo_names().map_err(|e| (EXIT_FETCH_FAILED, e))?;
         for n in names {
-            if configure && !rt.is_configure_repo(&n) {
+            if configure
+                && !rt
+                    .is_configure_repo(&n)
+                    .map_err(|e| (EXIT_FETCH_FAILED, e))?
+            {
                 continue;
+            }
+            if force_configure_only {
+                let _ = std::fs::remove_file(rt.external_dir().join(format!("@{n}.marker")));
             }
             rt.fetch_repo(&n).map_err(|e| (EXIT_FETCH_FAILED, e))?;
         }
@@ -941,7 +1010,11 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
 }
 
 /// Fetches the external repositories needed by `targets` via real target dependency closure analysis.
-fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
+fn fetch_targets(
+    session: &Session,
+    targets: &[String],
+    working_dir_rel: &zel_vfs::PathFragment,
+) -> Result<(), String> {
     let rt = &session.rt;
     let mut fetched_repos: HashSet<String> = HashSet::new();
 
@@ -950,15 +1023,30 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
         let t = t.trim_start_matches('-');
         if let Some(r) = t.strip_prefix("@@") {
             let (repo, _) = r.split_once("//").unwrap_or((r, ""));
-            if !repo.is_empty() && fetched_repos.insert(repo.to_string()) {
-                let _ = rt.fetch_repo(repo);
+            if !repo.is_empty() {
+                zel_cmdline::RepositoryName::validate(repo).map_err(|e| {
+                    format!(
+                        "ERROR: {e}\nERROR: Build did NOT complete successfully\nERROR: Fetching some target dependencies failed with errors: {e}"
+                    )
+                })?;
+                if fetched_repos.insert(repo.to_string()) {
+                    rt.fetch_repo(repo).map_err(|e| {
+                        format!(
+                            "ERROR: {e}\nERROR: Build did NOT complete successfully\nERROR: Fetching some target dependencies failed with errors: {e}"
+                        )
+                    })?;
+                }
             }
         } else if let Some(r) = t.strip_prefix('@') {
             let (repo, _) = r.split_once("//").unwrap_or((r, ""));
             match session.resolve_repo_arg(&format!("@{repo}")) {
                 Ok(c) => {
                     if !c.is_empty() && fetched_repos.insert(c.clone()) {
-                        let _ = rt.fetch_repo(&c);
+                        rt.fetch_repo(&c).map_err(|e| {
+                            format!(
+                                "ERROR: {e}\nERROR: Build did NOT complete successfully\nERROR: Fetching some target dependencies failed with errors: {e}"
+                            )
+                        })?;
                     }
                 }
                 Err(e) => {
@@ -973,7 +1061,7 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
     // 2. Package loader and pattern resolver for target dependency closure analysis
     let loader = rt.package_loader();
     let resolver =
-        zel_packages::resolve::PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
+        zel_packages::resolve::PatternResolver::new(loader.clone(), working_dir_rel.clone());
     let outcome = resolver.resolve_patterns(targets);
     for event in &outcome.events {
         rt.info(format!("WARNING: {}", event.message));
@@ -1019,27 +1107,34 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
     }
 
     while let Some(r) = queue.pop() {
-        if rt.fetch_repo(&r).is_ok() {
-            let pattern = format!("@@{r}//...");
-            let sub_outcome = resolver.resolve_patterns(&[pattern]);
-            let (sub_targets, _) = resolver.load_transitive_closure(&sub_outcome.targets);
-            for t in &sub_targets {
-                if let zel_packages::Target::Rule(rule) = t {
-                    for dep in rule.dependency_labels() {
-                        let repo_ident = dep.repository().name();
-                        if !repo_ident.is_empty() {
-                            let owner = rule.label.repository().name();
-                            let mapping = rt.repo_mapping_of(owner);
-                            let canonical = mapping
-                                .get(repo_ident)
-                                .unwrap_or(&repo_ident.to_string())
-                                .clone();
-                            if fetched_repos.insert(canonical.clone()) {
-                                queue.push(canonical);
+        match rt.fetch_repo(&r) {
+            Ok(_) => {
+                let pattern = format!("@@{r}//...");
+                let sub_outcome = resolver.resolve_patterns(&[pattern]);
+                let (sub_targets, _) = resolver.load_transitive_closure(&sub_outcome.targets);
+                for t in &sub_targets {
+                    if let zel_packages::Target::Rule(rule) = t {
+                        for dep in rule.dependency_labels() {
+                            let repo_ident = dep.repository().name();
+                            if !repo_ident.is_empty() {
+                                let owner = rule.label.repository().name();
+                                let mapping = rt.repo_mapping_of(owner);
+                                let canonical = mapping
+                                    .get(repo_ident)
+                                    .unwrap_or(&repo_ident.to_string())
+                                    .clone();
+                                if fetched_repos.insert(canonical.clone()) {
+                                    queue.push(canonical);
+                                }
                             }
                         }
                     }
                 }
+            }
+            Err(e) => {
+                return Err(format!(
+                    "ERROR: {e}\nERROR: Build did NOT complete successfully\nERROR: Fetching some target dependencies failed with errors: {e}"
+                ));
             }
         }
     }
@@ -1063,7 +1158,14 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
     }
     let repos = raw(parsed, "repo");
     let lockfile_deps = parsed.get_bool("lockfile_deps").unwrap_or(false);
-    let targets = parsed.targets.clone();
+    let (working_dir, working_dir_rel) = command_working_dirs(&cfg.workspace, parsed);
+    let target_pattern_file = parsed.get_str("target_pattern_file").unwrap_or("");
+    let targets =
+        match zel_cmdline::read_target_patterns(&parsed.targets, target_pattern_file, &working_dir)
+        {
+            Ok(ts) => ts,
+            Err(e) => return CmdOutput::fail(EXIT_COMMAND_LINE, format!("ERROR: {e}\n")),
+        };
     if !repos.is_empty() && !targets.is_empty() {
         return CmdOutput::fail(
             EXIT_INTERRUPTED,
@@ -1097,17 +1199,38 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
         if !repos.is_empty() {
             *ok_msg.borrow_mut() = "INFO: All requested repos vendored successfully.".to_string();
             err.push_str("INFO: Vendoring repositories...\n");
+            let mut seen = HashSet::new();
+            let mut repo_errors = Vec::new();
             for r in &repos {
-                let c = session.resolve_repo_arg(r).map_err(|e| {
-                    if e.starts_with("invalid user-provided repo name")
-                        || e.starts_with("The repo value has to be")
-                    {
-                        format!("Invalid repo name: {e}")
-                    } else {
-                        format!("Vendoring some repos failed with errors: [{e}]")
+                match session.resolve_repo_arg(r) {
+                    Ok(c) => {
+                        if seen.insert(c.clone()) {
+                            names.push(c);
+                        }
                     }
-                })?;
-                names.push(c);
+                    Err(e) => {
+                        if e.starts_with("Invalid repo name:") {
+                            return Err(e);
+                        }
+                        if e.starts_with("invalid user-provided repo name")
+                            || e.starts_with("The repo value has to be")
+                        {
+                            return Err(format!("Invalid repo name: {e}"));
+                        }
+                        repo_errors.push(e);
+                    }
+                }
+            }
+            for c in &names {
+                if let Err(e) = rt.fetch_repo(c) {
+                    repo_errors.push(e);
+                }
+            }
+            if !repo_errors.is_empty() {
+                return Err(format!(
+                    "Vendoring some repos failed with errors: [{}]",
+                    repo_errors.join(", ")
+                ));
             }
         } else if !targets.is_empty() || lockfile_deps {
             let subject = if targets.is_empty() {
@@ -1120,7 +1243,7 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             *ok_msg.borrow_mut() =
                 format!("INFO: All external dependencies for {subject} vendored successfully.");
             err.push_str(&format!("INFO: Vendoring dependencies for {subject}...\n"));
-            fetch_targets(&session, &targets)?;
+            fetch_targets(&session, &targets, &working_dir_rel)?;
             names = rt.state_fetched();
             if lockfile_deps {
                 for id in session.resolution.extension_ids() {
@@ -1147,11 +1270,19 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             }
             let vendor_file = vendor_file_cell.as_ref().unwrap();
             if vendor_file.ignored_repos.contains(n) {
-                // Ignore repo as configured in VENDOR.bazel
+                // Ignored repos are still fetched into output_base/external, only skipped in vendor_dir.
+                rt.fetch_repo(n)
+                    .map_err(|e| format!("Fetching some repos failed with errors: {e}"))?;
                 continue;
             }
+            let target = vendor_dir.join(n);
             if vendor_file.pinned_repos.contains(n) {
-                // Pinned repo: do not update contents
+                if !target.exists() {
+                    return Err(format!(
+                        "Pinned repo '{n}' does not exist under the vendor directory"
+                    ));
+                }
+                let _ = std::fs::remove_file(vendor_dir.join(format!("@{n}.marker")));
                 continue;
             }
             if rt.is_local_repo(n) || n == "bazel_tools" {
@@ -1161,23 +1292,36 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
                 .fetch_repo(n)
                 .map_err(|e| format!("Fetching some repos failed with errors: {e}"))?;
             vendored.push(n.clone());
-            let target = vendor_dir.join(n);
             std::fs::create_dir_all(&vendor_dir)
                 .map_err(|e| format!("Error while vendoring repos: {e}"))?;
-            // `dir` may itself be a symlink to `target` (re-run after a previous vendor), so copy
-            // to a temporary sibling first and only then replace the old vendored copy.
-            let tmp_target = vendor_dir.join(format!(".{n}.vendor-tmp"));
-            let _ = remove_any(&tmp_target);
-            copy_tree(&dir, &tmp_target)
-                .map_err(|e| format!("Error while vendoring repos: {e}"))?;
-            let _ = remove_any(&target);
-            std::fs::rename(&tmp_target, &target)
-                .map_err(|e| format!("Error while vendoring repos: {e}"))?;
-            crate::vendor::replant_symlinks(&target, &session.cfg.workspace, &rt.external_dir())
-                .map_err(|e| format!("Error replanting symlinks: {e}"))?;
             let marker = rt.external_dir().join(format!("@{n}.marker"));
-            if let Ok(m) = std::fs::read_to_string(&marker) {
-                let _ = std::fs::write(vendor_dir.join(format!("@{n}.marker")), m);
+            let vmarker = vendor_dir.join(format!("@{n}.marker"));
+            let ext_marker_str = std::fs::read_to_string(&marker).ok();
+            let vendor_marker_str = std::fs::read_to_string(&vmarker).ok();
+            let up_to_date = target.is_dir()
+                && matches!(
+                    (&ext_marker_str, &vendor_marker_str),
+                    (Some(em), Some(vm)) if em == vm
+                );
+            if !up_to_date {
+                // `dir` may itself be a symlink to `target` (re-run after a previous vendor), so copy
+                // to a temporary sibling first and only then replace the old vendored copy.
+                let tmp_target = vendor_dir.join(format!(".{n}.vendor-tmp"));
+                let _ = remove_any(&tmp_target);
+                copy_tree(&dir, &tmp_target)
+                    .map_err(|e| format!("Error while vendoring repos: {e}"))?;
+                let _ = remove_any(&target);
+                std::fs::rename(&tmp_target, &target)
+                    .map_err(|e| format!("Error while vendoring repos: {e}"))?;
+                crate::vendor::replant_symlinks(
+                    &target,
+                    &session.cfg.workspace,
+                    &rt.external_dir(),
+                )
+                .map_err(|e| format!("Error replanting symlinks: {e}"))?;
+                if let Some(m) = ext_marker_str {
+                    let _ = std::fs::write(&vmarker, m);
+                }
             }
             let _ = remove_any(&dir);
             #[cfg(unix)]
@@ -1186,13 +1330,26 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             }
         }
         // Vendor registry files fetched over the network.
+        let registries_dir = vendor_dir.join("_registries");
         for (url, hash) in &session.resolution.registry_file_hashes {
             if url.starts_with("file://") || hash.is_none() {
                 continue;
             }
+            let Some(rel) = registry_vendor_rel_path(url) else {
+                continue;
+            };
+            if rel.is_absolute()
+                || !rel
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let p = registries_dir.join(&rel);
+            if !p.starts_with(&registries_dir) {
+                continue;
+            }
             if let Ok(Some(b)) = crate::registry::fetch_url(url, 3) {
-                let rel = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
-                let p = vendor_dir.join("_registries").join(rel);
                 if let Some(par) = p.parent() {
                     let _ = std::fs::create_dir_all(par);
                 }
@@ -1269,11 +1426,11 @@ impl Rt {
         }
     }
 
-    pub fn is_configure_repo(self: &Arc<Self>, canonical: &str) -> bool {
+    pub fn is_configure_repo(self: &Arc<Self>, canonical: &str) -> Result<bool, String> {
         match self.repo_spec_for(canonical) {
             Ok(Some(s)) => {
                 if s.bzl_file.contains("bazel_tools") {
-                    return false;
+                    return Ok(false);
                 }
                 let (repo, pkg, name) = {
                     let r = s.bzl_file.trim_start_matches('@');
@@ -1282,20 +1439,135 @@ impl Rt {
                     (repo.to_string(), pkg.to_string(), name.to_string())
                 };
                 let key = format!("@@{repo}//{pkg}:{name}");
-                match self.eval_bzl_fresh(&key, &repo, &pkg, &name) {
-                    Ok(c) => match c.globals.get(&s.rule_name) {
-                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
-                            .parse::<usize>()
-                            .ok()
-                            .map(|i| self.state.lock().unwrap().rule_defs[i].configure)
-                            .unwrap_or(false),
-                        _ => false,
-                    },
-                    Err(_) => false,
-                }
+                let c = self
+                    .eval_bzl_fresh(&key, &repo, &pkg, &name)
+                    .map_err(|e| e.to_string())?;
+                Ok(match c.globals.get(&s.rule_name) {
+                    Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
+                        .parse::<usize>()
+                        .ok()
+                        .map(|i| self.state.lock().unwrap().rule_defs[i].configure)
+                        .unwrap_or(false),
+                    _ => false,
+                })
             }
-            _ => false,
+            Ok(None) => Ok(false),
+            Err(e) => Err(e),
         }
+    }
+}
+
+/// Formats a remote registry URL into its relative path under `<vendor_dir>/_registries`
+/// (`<lowercased_host>/<url_decoded_path>`, stripping `:port`, `?query`, and `#fragment`),
+/// returning `None` if the host or decoded path is empty, contains NUL or a drive prefix, or
+/// attempts to traverse above `<lowercased_host>`.
+fn registry_vendor_rel_path(url: &str) -> Option<PathBuf> {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let no_frag = after_scheme
+        .split_once('#')
+        .map(|(a, _)| a)
+        .unwrap_or(after_scheme);
+    let no_query = no_frag.split_once('?').map(|(a, _)| a).unwrap_or(no_frag);
+    let (authority, path) = no_query.split_once('/').unwrap_or((no_query, ""));
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, hp)| hp)
+        .unwrap_or(authority);
+    let raw_host = if host_port.starts_with('[') {
+        host_port
+            .split_once(']')
+            .map(|(h, _)| format!("{h}]"))
+            .unwrap_or_else(|| host_port.to_string())
+    } else {
+        host_port
+            .split_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_port)
+            .to_string()
+    };
+    let host = percent_decode_str(&raw_host, false).to_ascii_lowercase();
+    if host.is_empty()
+        || host == "."
+        || host == ".."
+        || host.contains(['/', '\\', '\0'])
+        || is_windows_drive_segment(&host)
+        || !is_single_normal_component(&host)
+    {
+        return None;
+    }
+
+    let decoded_path = percent_decode_str(path, true);
+    if decoded_path.contains('\0') {
+        return None;
+    }
+
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in decoded_path.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            segs.pop()?;
+            continue;
+        }
+        if is_windows_drive_segment(seg) || !is_single_normal_component(seg) {
+            return None;
+        }
+        segs.push(seg);
+    }
+    if segs.is_empty() {
+        return None;
+    }
+
+    let mut out = PathBuf::from(host);
+    for seg in segs {
+        out.push(seg);
+    }
+    Some(out)
+}
+
+fn is_windows_drive_segment(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+fn is_single_normal_component(s: &str) -> bool {
+    let mut comps = Path::new(s).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
+fn percent_decode_str(s: &str, plus_as_space: bool) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if plus_as_space && bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -1361,5 +1633,78 @@ mod repo_env_tests {
             ],
         );
         assert!(!e.contains_key("HOME") && !e.contains_key("NEW"), "{e:?}");
+    }
+
+    #[test]
+    fn registry_vendor_rel_path_normalizes_host_port_query_and_percent_escapes() {
+        assert_eq!(
+            registry_vendor_rel_path(
+                "https://BCR.Bazel.Build:8443/modules/foo%2Bbar/1.0/source.json?tok=1#frag"
+            ),
+            Some(PathBuf::from(
+                "bcr.bazel.build/modules/foo+bar/1.0/source.json"
+            ))
+        );
+        assert_eq!(
+            registry_vendor_rel_path("https://bcr.bazel.build/modules/foo+bar/1.0/source.json"),
+            Some(PathBuf::from(
+                "bcr.bazel.build/modules/foo bar/1.0/source.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn registry_vendor_rel_path_confines_encoded_separators_traversal_and_drives() {
+        let registries_dir = PathBuf::from("/tmp/vendor/_registries");
+
+        let slash_rel = registry_vendor_rel_path("https://example.com/%2fetc%2fpasswd")
+            .expect("encoded leading slash should remain confined under host");
+        assert!(!slash_rel.is_absolute(), "{slash_rel:?}");
+        assert_eq!(slash_rel, PathBuf::from("example.com/etc/passwd"));
+        assert_eq!(
+            registries_dir.join(&slash_rel),
+            PathBuf::from("/tmp/vendor/_registries/example.com/etc/passwd")
+        );
+
+        let backslash_rel = registry_vendor_rel_path("https://example.com/%5cetc%5cpasswd")
+            .expect("encoded backslash should split into normal relative components");
+        assert!(!backslash_rel.is_absolute(), "{backslash_rel:?}");
+        assert_eq!(backslash_rel, PathBuf::from("example.com/etc/passwd"));
+        assert_eq!(
+            registries_dir.join(&backslash_rel),
+            PathBuf::from("/tmp/vendor/_registries/example.com/etc/passwd")
+        );
+
+        let in_bounds =
+            registry_vendor_rel_path("https://example.com/modules/old/%2e%2e/foo/1.0/source.json")
+                .expect("in-bounds parent segment within host should normalize cleanly");
+        assert_eq!(
+            in_bounds,
+            PathBuf::from("example.com/modules/foo/1.0/source.json")
+        );
+        assert!(in_bounds
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_))));
+
+        for escaping_or_invalid in [
+            "https://example.com/%2e%2e/etc/passwd",
+            "https://example.com/modules/%2e%2e/%2e%2e/etc/passwd",
+            "https://example.com/a%2f..%2f..%2fetc%2fpasswd",
+            "https://example.com/a%5c..%5c..%5cetc%5cpasswd",
+            "https://%2e%2e/etc/passwd",
+            "https://../etc/passwd",
+            "https:///etc/passwd",
+            "https://example.com/C:%2fWindows%2fSystem32",
+            "https://example.com/c:%5cWindows%5cSystem32",
+            "https://example.com/D:secret.json",
+            "https://example.com/modules/foo%00bar/source.json",
+            "https://example.com/",
+        ] {
+            assert_eq!(
+                registry_vendor_rel_path(escaping_or_invalid),
+                None,
+                "expected None for {escaping_or_invalid}"
+            );
+        }
     }
 }

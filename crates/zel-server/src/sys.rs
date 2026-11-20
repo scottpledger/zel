@@ -327,18 +327,65 @@ pub fn free_memory_fraction() -> Option<f64> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let t = std::fs::read_to_string("/proc/meminfo").ok()?;
-        let get = |k: &str| -> Option<f64> {
-            t.lines().find_map(|l| {
-                l.strip_prefix(k)?
-                    .trim()
-                    .trim_end_matches("kB")
-                    .trim()
-                    .parse()
-                    .ok()
-            })
+        let (avail_kb, total_kb) = linux_available_and_total_kb()?;
+        Some((avail_kb / total_kb).clamp(0.0, 1.0))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn linux_available_and_total_kb() -> Option<(f64, f64)> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let get = |k: &str| -> Option<f64> {
+        t.lines().find_map(|l| {
+            l.strip_prefix(k)?
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse()
+                .ok()
+        })
+    };
+    let total = get("MemTotal:")?;
+    if total <= 0.0 {
+        return None;
+    }
+    let avail = match get("MemAvailable:") {
+        Some(a) => a,
+        None => {
+            let active = get("Active:").unwrap_or(0.0);
+            let inactive = get("Inactive:").unwrap_or(0.0);
+            let slab = get("Slab:").unwrap_or(0.0);
+            (total - active - 0.3 * inactive - 0.8 * slab).max(0.0)
+        }
+    };
+    Some((avail, total))
+}
+
+/// Bazel `SystemMemoryPressureMonitor` / `--shutdown_on_low_sys_mem`: true when available
+/// system memory is both `< 5%` of total RAM and `< 1 GiB`.
+pub fn is_low_sys_mem() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        let Some(total) = sysctl_u64("hw.memsize").map(|n| n as f64) else {
+            return false;
         };
-        Some(get("MemAvailable:")? / get("MemTotal:")?)
+        if total <= 0.0 {
+            return false;
+        }
+        let page = sysctl_u64("hw.pagesize").unwrap_or(4096) as f64;
+        let Some(free) = sysctl_u64("vm.page_free_count").map(|n| n as f64) else {
+            return false;
+        };
+        let spec = sysctl_u64("vm.page_speculative_count").unwrap_or(0) as f64;
+        let avail_bytes = (free + spec) * page;
+        (avail_bytes / total) < 0.05 && avail_bytes < (1024.0 * 1024.0 * 1024.0)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let Some((avail_kb, total_kb)) = linux_available_and_total_kb() else {
+            return false;
+        };
+        (avail_kb / total_kb) < 0.05 && avail_kb < (1024.0 * 1024.0)
     }
 }
 

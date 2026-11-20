@@ -159,13 +159,33 @@ impl BlazeRuntime {
                 popts.starlark_file = file_path.display().to_string();
             }
         }
-        if aquery && expr.trim().is_empty() && !popts.skyframe_state {
-            return ExitCode::SUCCESS;
-        }
+        let synthesized_expr: String;
+        let expr = if aquery && expr.trim().is_empty() && !popts.skyframe_state {
+            if qopts.universe_scope.is_empty() {
+                return ExitCode::SUCCESS;
+            }
+            synthesized_expr = format!("deps({})", qopts.universe_scope.join(" + "));
+            synthesized_expr.as_str()
+        } else {
+            expr
+        };
         if aquery && popts.skyframe_state {
             let mut pats = Vec::new();
-            if let Ok(e) = zel_query::parse::parse(expr, &zel_query::parse::all_functions()) {
-                e.collect_target_patterns(&mut pats);
+            if !expr.trim().is_empty() {
+                match zel_query::parse::parse(expr, &zel_query::parse::all_functions()) {
+                    Ok(e) => e.collect_target_patterns(&mut pats),
+                    Err(e) => {
+                        writeln_bytes(
+                            stderr,
+                            &format!(
+                                "ERROR: Error while parsing '{}': {}",
+                                zel_query::parse::truncate(expr),
+                                e.0
+                            ),
+                        );
+                        return ExitCode::COMMAND_LINE_ERROR;
+                    }
+                }
             }
             // QueryCommandUtils.getTopLevelTargets: dedup in encounter order and omit $var references.
             let mut seen_pats = std::collections::HashSet::new();
@@ -186,8 +206,10 @@ impl BlazeRuntime {
                 );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
-            if popts.output != "proto" && popts.output != "textproto" && popts.output != "jsonproto"
-            {
+            if !matches!(
+                popts.output.as_str(),
+                "proto" | "streamed_proto" | "textproto" | "jsonproto"
+            ) {
                 writeln_bytes(stderr, &format!("ERROR: --skyframe_state must be used with --output=proto|textproto|jsonproto. Invalid aquery output format: {}", popts.output));
                 return ExitCode::COMMAND_LINE_ERROR;
             }
@@ -206,7 +228,7 @@ impl BlazeRuntime {
                     }
                 }
             }
-            for kv in crate::loading::opt_list(parsed, "aspects_parameters") {
+            for kv in crate::exec_phase::opt_all(parsed, "aspects_parameters") {
                 if let Some((k, v)) = kv.split_once('=') {
                     popts.aspect_params.insert(k.to_string(), v.to_string());
                 }
@@ -301,7 +323,7 @@ impl BlazeRuntime {
                 } else {
                     pat
                 };
-                let params = crate::loading::opt_list(parsed, "aspects_parameters").join(", ");
+                let params = crate::exec_phase::opt_all(parsed, "aspects_parameters").join(", ");
                 return Err(fail(
                     stderr,
                     vec![

@@ -100,7 +100,7 @@ pub fn expand_command_args(
         });
         if has_platform_config {
             let mut plat_expanded = Vec::new();
-            let mut plat_ancestors = vec![platform.to_string()];
+            let mut plat_ancestors = Vec::new();
             let plat_opts = collect_config_definition(
                 rc_config,
                 command,
@@ -150,6 +150,32 @@ pub fn expand_command_args(
     Ok((expanded, warnings))
 }
 
+/// Expands `--config` references within `cli_args` against `rc_config` without re-prepending
+/// the base command sections from `rc_config`.
+pub fn expand_cli_configs_only(
+    rc_config: &BazelrcConfig,
+    command: &str,
+    cli_args: &[String],
+) -> Result<Vec<String>, OptionsParsingError> {
+    let commands_to_parse = get_command_ancestry(command);
+    let mut expanded = Vec::new();
+    let mut longest_chain = Vec::new();
+    let mut config_counts = std::collections::BTreeMap::new();
+    let mut found_notes = Vec::new();
+    expand_configs_recursive(
+        rc_config,
+        command,
+        &commands_to_parse,
+        cli_args,
+        &mut Vec::new(),
+        &mut longest_chain,
+        &mut config_counts,
+        &mut found_notes,
+        &mut expanded,
+    )?;
+    Ok(expanded)
+}
+
 fn collect_config_definition(
     rc_config: &BazelrcConfig,
     command: &str,
@@ -164,48 +190,33 @@ fn collect_config_definition(
         let key = format!("{cmd}:{cfg}");
         if let Some(opts) = rc_config.sections.get(&key) {
             found_definition = true;
-            let mut chunk_src: Option<&str> = None;
-            let mut chunk: Vec<&str> = Vec::new();
-            let kept_common: Option<Vec<String>> = if *cmd == "common" {
-                let toks: Vec<String> = opts.iter().map(|(o, _)| o.clone()).collect();
-                Some(split_unsupported_common_args(command, &toks).0)
-            } else {
-                None
-            };
-            let opts: Vec<&(String, String)> = match &kept_common {
-                Some(k) => {
-                    let mut keep = k.clone();
-                    opts.iter()
-                        .filter(|(o, _)| {
-                            if let Some(p) = keep.iter().position(|x| x == o) {
-                                keep.remove(p);
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .collect()
-                }
-                None => opts.iter().collect(),
-            };
+            let mut chunks: Vec<(&str, Vec<String>)> = Vec::new();
             for (opt, src) in opts {
-                if chunk_src.is_some_and(|c| c != src.as_str()) {
-                    found_notes.push(format!(
-                        "INFO: Found applicable config definition {key} in file {}: {}",
-                        chunk_src.unwrap_or_default(),
-                        chunk.join(" ")
-                    ));
-                    chunk.clear();
+                match chunks.last_mut() {
+                    Some((last_src, ref mut list)) if *last_src == src.as_str() => {
+                        list.push(opt.clone());
+                    }
+                    _ => chunks.push((src.as_str(), vec![opt.clone()])),
                 }
-                chunk_src = Some(src.as_str());
-                chunk.push(opt.as_str());
-                cfg_opts.push(opt.clone());
             }
-            if let Some(c) = chunk_src {
-                found_notes.push(format!(
-                    "INFO: Found applicable config definition {key} in file {c}: {}",
-                    chunk.join(" ")
-                ));
+            for (src, chunk_toks) in chunks {
+                let mut note = format!(
+                    "INFO: Found applicable config definition {key} in file {src}: {}",
+                    chunk_toks.join(" ")
+                );
+                if *cmd == "common" {
+                    let (kept, ignored) = split_unsupported_common_args(command, &chunk_toks);
+                    if !ignored.is_empty() {
+                        note.push_str(&format!(
+                            "\n  Ignored as unsupported by '{command}': {}",
+                            ignored.join(" ")
+                        ));
+                    }
+                    cfg_opts.extend(kept);
+                } else {
+                    cfg_opts.extend(chunk_toks);
+                }
+                found_notes.push(note);
             }
         }
     }

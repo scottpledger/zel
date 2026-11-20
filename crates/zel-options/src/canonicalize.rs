@@ -42,9 +42,24 @@ impl Default for CanonicalizeCommandOptions {
 
 /// Canonicalizes command options for a given target command.
 pub fn canonicalize_flags(raw_args: &[String]) -> Result<Vec<String>, OptionsParsingError> {
-    let (before_dash, after_dash) = match raw_args.iter().position(|a| a == "--") {
-        Some(idx) => (&raw_args[..idx], &raw_args[idx + 1..]),
-        None => (raw_args, &[][..]),
+    let mut rc_cfg = crate::rc::BazelrcConfig::default();
+    let partitioned = crate::rc::partition_rc_sources_and_apply(&mut rc_cfg, raw_args)?;
+    let expanded_storage: Vec<String>;
+    let effective_args: &[String] = if rc_cfg.sections.is_empty() {
+        &partitioned
+    } else {
+        let (expanded, _) = crate::config_expander::expand_command_args(
+            &rc_cfg,
+            "canonicalize-flags",
+            &partitioned,
+        )?;
+        expanded_storage = expanded;
+        &expanded_storage
+    };
+
+    let (before_dash, after_dash) = match effective_args.iter().position(|a| a == "--") {
+        Some(idx) => (&effective_args[..idx], &effective_args[idx + 1..]),
+        None => (effective_args, &[][..]),
     };
 
     let mut cmd_opts = CanonicalizeCommandOptions::default();
@@ -71,18 +86,31 @@ pub fn canonicalize_flags(raw_args: &[String]) -> Result<Vec<String>, OptionsPar
         )));
     }
 
-    if after_dash.is_empty() {
+    let combined_residue: Vec<String>;
+    let residue_args: &[String] = if parsed_cmd.targets.is_empty() {
+        after_dash
+    } else {
+        let mut r = parsed_cmd.targets.clone();
+        r.extend_from_slice(after_dash);
+        combined_residue = r;
+        &combined_residue
+    };
+
+    if residue_args.is_empty() && cmd_opts.invocation_policy.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut parsed =
-        match ParsedCommandOptions::parse_for_command_no_edit(&cmd_opts.for_command, after_dash) {
-            Ok(p) => p,
-            Err(mut e) => {
-                e.failed_arg = None;
-                return Err(e);
-            }
-        };
+    let mut parsed = match ParsedCommandOptions::parse_for_command_no_edit_with_aliases(
+        &cmd_opts.for_command,
+        residue_args,
+        &parsed_cmd.flag_aliases,
+    ) {
+        Ok(p) => p,
+        Err(mut e) => {
+            e.failed_arg = None;
+            return Err(e);
+        }
+    };
 
     if !parsed.targets.is_empty() {
         return Err(OptionsParsingError::new(format!(

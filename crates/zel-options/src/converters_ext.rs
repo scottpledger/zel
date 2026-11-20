@@ -295,7 +295,8 @@ fn enum_filter(raw: &str, pretty: &str, all: &[&str]) -> R {
     ok(raw)
 }
 
-/// `java.util.UUID.fromString` (JDK 17+): at most 36 chars, five `-`-separated hex groups.
+/// `java.util.UUID.fromString` (JDK 17+): at most 36 chars, five `-`-separated hex groups,
+/// each fitting in a non-negative signed 64-bit integer (`Long.parseLong(..., 16)`).
 fn java_uuid_ok(s: &str) -> bool {
     if s.chars().count() > 36 {
         return false;
@@ -305,15 +306,21 @@ fn java_uuid_ok(s: &str) -> bool {
         return false;
     }
     parts.iter().all(|p| {
+        if p.starts_with('-') {
+            return false;
+        }
         let digits = p.strip_prefix('+').unwrap_or(p);
-        !digits.is_empty() && digits.len() <= 16 && digits.chars().all(|c| c.is_ascii_hexdigit())
+        !digits.is_empty()
+            && digits.chars().all(|c| c.is_ascii_hexdigit())
+            && i64::from_str_radix(digits, 16).is_ok()
     })
 }
 
-/// `CommonCommandOptions.UUIDConverter`.
+/// `CommonCommandOptions.UUIDConverter`: empty input converts to `null` (`OptionValue::Void`)
+/// so an empty `--invocation_id=` does not override `BAZEL_INTERNAL_INVOCATION_ID`.
 fn uuid(raw: &str) -> R {
     if raw.is_empty() {
-        return ok(raw);
+        return Ok(OptionValue::Void);
     }
     if !java_uuid_ok(raw) {
         return Err(err(format!("Value '{raw}' is not a value UUID.")));
@@ -324,7 +331,7 @@ fn uuid(raw: &str) -> R {
 /// `CommonCommandOptions.PrefixedUUIDConverter`.
 fn prefixed_uuid(raw: &str) -> R {
     if raw.is_empty() {
-        return ok(raw);
+        return Ok(OptionValue::Void);
     }
     let units: Vec<u16> = raw.encode_utf16().collect();
     let good =

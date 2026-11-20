@@ -37,19 +37,23 @@ fn for_output(
     o: &zel_analysis::build_options::BuildOptions,
 ) -> ConfigForOutput {
     let mut fragments: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut user: BTreeMap<String, String> = BTreeMap::new();
     for (cls, opts) in &o.fragments {
         let m = fragments.entry((*cls).to_string()).or_default();
         for (k, v) in opts {
-            // `--define` lives in the `user-defined` section below (`CoreOptions.commandLineBuildVariables`).
-            if *k == "define"
-                && matches!(v, zel_analysis::build_options::ConfigValue::List(l) if l.is_empty())
-            {
+            // `--define` lives in the `user-defined` section (`CoreOptions.commandLineBuildVariables`).
+            if *k == "define" {
+                if let zel_analysis::build_options::ConfigValue::List(l) = v {
+                    for entry in l {
+                        let (dk, dv) = entry.split_once('=').unwrap_or((entry.as_str(), ""));
+                        user.insert(format!("--define:{dk}"), dv.to_string());
+                    }
+                }
                 continue;
             }
             m.insert((*k).to_string(), v.display());
         }
     }
-    let mut user: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in &o.starlark {
         user.insert(k.clone(), v.clone());
     }
@@ -182,11 +186,15 @@ impl BlazeRuntime {
                 continue;
             }
             out.push(for_output(
-                k.base_mnemonic(),
+                k.config_display_mnemonic(),
                 false,
                 &k.untrimmed_build_options(),
             ));
-            out.push(for_output(k.base_mnemonic(), false, &k.build_options()));
+            out.push(for_output(
+                k.config_display_mnemonic(),
+                false,
+                &k.build_options(),
+            ));
         }
         if !out.is_empty() {
             // `NoConfigTransition`: only CoreOptions at defaults.
@@ -233,7 +241,9 @@ impl BlazeRuntime {
                 &format!("INFO: Displaying config with id {}", residue[0]),
             );
         }
-        let json = parsed.get_str("output") == Some("json");
+        let json = parsed
+            .get_str("output")
+            .is_some_and(|s| s.eq_ignore_ascii_case("json"));
         let dump_all = parsed.get_bool("dump_all").unwrap_or(false);
         let text_config = |out: &mut Vec<u8>, c: &ConfigForOutput| {
             writeln_bytes(out, &format!("BuildConfigurationValue {}:", c.hash));

@@ -445,9 +445,11 @@ pub fn run_tidy(session: &Session) -> Result<String, (i32, String)> {
         ));
     }
     let mut by_file: BTreeMap<String, String> = BTreeMap::new();
+    let mut changed_fixups = Vec::new();
     let mut log = String::new();
-    for f in &fixups {
+    for (idx, f) in fixups.iter().enumerate() {
         log.push_str(&format!("WARNING: {}\n", f.warning));
+        let mut any_changed = false;
         for (file, cmd, proxy, repos) in &f.commands {
             let path = session.cfg.workspace.join(file);
             let cur = match by_file.get(file) {
@@ -456,7 +458,13 @@ pub fn run_tidy(session: &Session) -> Result<String, (i32, String)> {
                     .map_err(|e| (2, format!("Failed to read {}: {e}", path.display())))?,
             };
             let updated = apply_command(&cur, cmd, proxy, repos).map_err(|e| (2, e))?;
-            by_file.insert(file.clone(), updated);
+            if updated != cur {
+                any_changed = true;
+                by_file.insert(file.clone(), updated);
+            }
+        }
+        if any_changed {
+            changed_fixups.push(idx);
         }
     }
     for (file, content) in &by_file {
@@ -464,8 +472,8 @@ pub fn run_tidy(session: &Session) -> Result<String, (i32, String)> {
         std::fs::write(&path, content)
             .map_err(|e| (2, format!("Failed to write {}: {e}", path.display())))?;
     }
-    for f in &fixups {
-        log.push_str(&format!("INFO: {}\n", f.success));
+    for idx in changed_fixups {
+        log.push_str(&format!("INFO: {}\n", fixups[idx].success));
     }
     if !errors.is_empty() {
         return Err((2, errors.join("\n")));
