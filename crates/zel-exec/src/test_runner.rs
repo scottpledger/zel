@@ -694,6 +694,9 @@ fn run_attempt(
 ) -> std::io::Result<AttemptResult> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir)?;
+    let _ = std::fs::create_dir_all(dir.join("test.outputs"));
+    let _ = std::fs::create_dir_all(dir.join("test.outputs_manifest"));
+    let _ = std::fs::create_dir_all(dir.join("test.raw_splitlogs"));
     let policy = TestPolicyConfig {
         test_runner_fail_fast: spec.test_runner_fail_fast,
         ..Default::default()
@@ -1230,14 +1233,22 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 "test.outputs",
                 "test.outputs_manifest",
                 "test.raw_splitlogs",
+                "test_attempts",
+                "_coverage",
             ] {
                 let _ = std::fs::remove_dir_all(base.join(stale_dir));
             }
             for stale_file in [
+                "test.log",
+                "test.xml",
                 "test.warnings",
                 "test.unused_runfiles_log",
                 "test.infrastructure_failure",
                 "test.err",
+                "test.exited_prematurely",
+                "test.shard",
+                "coverage.dat",
+                "test.zip",
             ] {
                 let _ = std::fs::remove_file(base.join(stale_file));
             }
@@ -1268,12 +1279,19 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 } else {
                     unit_status = TestStatus::Failed;
                 }
-                if max_attempts > 1 && (!pass && !r.sharding_unsupported && attempt < max_attempts)
-                {
+                full_log.extend_from_slice(&r.log);
+                if !pass {
+                    unit_failed += 1;
+                    failed_attempts += 1;
+                }
+                let is_final_attempt =
+                    max_attempts == 1 || attempt == max_attempts || pass || r.sharding_unsupported;
+                if !is_final_attempt {
                     let att_dir = base.join("test_attempts");
                     std::fs::create_dir_all(&att_dir)?;
                     write_writable_file(&att_dir.join(format!("attempt_{attempt}.log")), &r.log)?;
-                    // Move all mapped sibling outputs (`test.*` -> `attempt_N.*`) into `test_attempts/`.
+                    // Archive failed attempt outputs (`test.*` -> `attempt_N.*`) into
+                    // `test_attempts/` without polluting `base/` (`StandaloneTestStrategy.renameOutputs`).
                     if let Ok(rd) = std::fs::read_dir(&adir) {
                         for entry in rd.flatten() {
                             let src = entry.path();
@@ -1288,61 +1306,69 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                                     fname.replacen("test", &format!("attempt_{attempt}"), 1);
                                 let dst = att_dir.join(mapped);
                                 if src.is_dir() {
+                                    let has_any = std::fs::read_dir(&src)
+                                        .map(|mut d| d.next().is_some())
+                                        .unwrap_or(false);
+                                    if !has_any {
+                                        continue;
+                                    }
                                     let _ = std::fs::remove_dir_all(&dst);
-                                    let _ = copy_dir(&src, &dst);
+                                    if std::fs::rename(&src, &dst).is_err() {
+                                        let _ = copy_dir(&src, &dst);
+                                    }
                                 } else {
-                                    let _ = std::fs::copy(&src, &dst);
+                                    let _ = std::fs::remove_file(&dst);
+                                    if std::fs::rename(&src, &dst).is_err() {
+                                        let _ = std::fs::copy(&src, &dst);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                full_log.extend_from_slice(&r.log);
-                if !pass {
-                    unit_failed += 1;
-                    failed_attempts += 1;
-                }
-                // Keep the last attempt's XML.
-                let x = adir.join("test.xml");
-                if x.exists() {
-                    let dst = base.join("test.xml");
-                    let _ = std::fs::copy(&x, &dst);
-                    xml_src = Some(dst);
-                }
-                // Copy per-attempt undeclared outputs next to the log.
-                let uo = adir.join("test.outputs");
-                if uo.is_dir() {
-                    let _ = std::fs::remove_dir_all(base.join("test.outputs"));
-                    let _ = copy_dir(&uo, &base.join("test.outputs"));
-                }
-                if max_attempts == 1 || attempt == max_attempts || pass || r.sharding_unsupported {
+                } else {
+                    let dst_xml = base.join("test.xml");
+                    let _ = std::fs::remove_file(&dst_xml);
+                    let x = adir.join("test.xml");
+                    if x.exists() && std::fs::copy(&x, &dst_xml).is_ok() {
+                        xml_src = Some(dst_xml);
+                    }
+                    let dst_uo = base.join("test.outputs");
+                    let _ = std::fs::remove_dir_all(&dst_uo);
+                    let uo = adir.join("test.outputs");
+                    if uo.is_dir() {
+                        let _ = copy_dir(&uo, &dst_uo);
+                    }
                     write_writable_file(&base.join("test.log"), &r.log)?;
-                }
-                if spec.coverage && pass {
-                    let cov = adir.join("coverage.dat");
-                    if cov.exists() {
-                        let dst = base.join("coverage.dat");
-                        if std::fs::copy(&cov, &dst).is_ok() {
-                            coverage_files.push(dst);
+                    if spec.coverage && pass {
+                        let cov = adir.join("coverage.dat");
+                        if cov.exists() {
+                            let dst = base.join("coverage.dat");
+                            if std::fs::copy(&cov, &dst).is_ok() {
+                                coverage_files.push(dst);
+                            }
                         }
                     }
-                }
-                for extra_dir in ["test.outputs_manifest", "test.raw_splitlogs"] {
-                    let src_d = adir.join(extra_dir);
-                    if src_d.is_dir() {
-                        let _ = std::fs::remove_dir_all(base.join(extra_dir));
-                        let _ = copy_dir(&src_d, &base.join(extra_dir));
+                    for extra_dir in ["test.outputs_manifest", "test.raw_splitlogs"] {
+                        let dst_d = base.join(extra_dir);
+                        let _ = std::fs::remove_dir_all(&dst_d);
+                        let _ = std::fs::create_dir_all(&dst_d);
+                        let src_d = adir.join(extra_dir);
+                        if src_d.is_dir() {
+                            let _ = copy_dir(&src_d, &dst_d);
+                        }
                     }
-                }
-                for extra_file in [
-                    "test.warnings",
-                    "test.unused_runfiles_log",
-                    "test.infrastructure_failure",
-                    "test.err",
-                ] {
-                    let src_f = adir.join(extra_file);
-                    if src_f.exists() {
-                        let _ = std::fs::copy(&src_f, base.join(extra_file));
+                    for extra_file in [
+                        "test.warnings",
+                        "test.unused_runfiles_log",
+                        "test.infrastructure_failure",
+                        "test.err",
+                    ] {
+                        let dst_f = base.join(extra_file);
+                        let _ = std::fs::remove_file(&dst_f);
+                        let src_f = adir.join(extra_file);
+                        if src_f.exists() {
+                            let _ = std::fs::copy(&src_f, &dst_f);
+                        }
                     }
                 }
                 let stop_unit = pass || r.sharding_unsupported;
@@ -2197,5 +2223,60 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&r.attempts[0].log)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn flaky_retry_isolates_failed_attempt_extras_from_passing_attempt() {
+        let mut sp = setup(
+            "flaky_extras_local",
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "marker=\"$TEST_SRCDIR/../../flaky_extras_once\"\n",
+                "if [ ! -e \"$marker\" ]; then\n",
+                "  touch \"$marker\"\n",
+                "  printf 'warn1\\n' > \"$TEST_WARNINGS_OUTPUT_FILE\"\n",
+                "  printf 'unused1\\n' > \"$TEST_UNUSED_RUNFILES_LOG_FILE\"\n",
+                "  printf 'infra1\\n' > \"$TEST_INFRASTRUCTURE_FAILURE_FILE\"\n",
+                "  printf 'split1\\n' > \"$TEST_LOGSPLITTER_OUTPUT_FILE\"\n",
+                "  printf 'err1\\n' > \"$(dirname \"$XML_OUTPUT_FILE\")/test.err\"\n",
+                "  printf 'only1' > \"$TEST_UNDECLARED_OUTPUTS_DIR/fail_only.txt\"\n",
+                "  printf 'ann1' > \"$TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR/a.part\"\n",
+                "  exit 1\n",
+                "fi\n",
+                "exit 0\n",
+            ),
+        );
+        sp.flaky_attempts = 2;
+        let _ = std::fs::remove_file(sp.exec_root.join("flaky_extras_once"));
+        let r = run_test(&sp).unwrap();
+        assert_eq!(r.status, TestStatus::Flaky);
+        assert_eq!(r.attempts.len(), 2);
+
+        let att = sp.test_log_dir.join("test_attempts");
+        assert!(att.join("attempt_1.log").exists());
+        assert!(att.join("attempt_1.xml").exists());
+        assert!(att.join("attempt_1.warnings").exists());
+        assert!(att.join("attempt_1.unused_runfiles_log").exists());
+        assert!(att.join("attempt_1.infrastructure_failure").exists());
+        assert!(att.join("attempt_1.raw_splitlogs/test.splitlogs").exists());
+        assert!(att.join("attempt_1.err").exists());
+        assert!(att.join("attempt_1.outputs/fail_only.txt").exists());
+        assert!(att.join("attempt_1.outputs_manifest/MANIFEST").exists());
+        assert!(att.join("attempt_1.outputs_manifest/ANNOTATIONS").exists());
+
+        // Passing attempt 2 produced none of the optional extras; base dir must have zero leftovers.
+        let base = &sp.test_log_dir;
+        assert!(base.join("test.log").exists());
+        assert!(base.join("test.xml").exists());
+        assert!(!base.join("test.warnings").exists());
+        assert!(!base.join("test.unused_runfiles_log").exists());
+        assert!(!base.join("test.infrastructure_failure").exists());
+        assert!(!base.join("test.raw_splitlogs/test.splitlogs").exists());
+        assert!(!base.join("test.err").exists());
+        assert!(!base.join("test.outputs/fail_only.txt").exists());
+        assert!(!base.join("test.outputs_manifest/MANIFEST").exists());
+        assert!(!base.join("test.outputs_manifest/ANNOTATIONS").exists());
     }
 }

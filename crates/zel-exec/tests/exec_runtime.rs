@@ -1406,3 +1406,115 @@ fn output_filter_compiled_once_and_applied_across_multiple_actions() {
     .unwrap();
     assert_eq!(String::from_utf8_lossy(&r6.stdout).trim(), "out-rep/ok.out");
 }
+
+#[test]
+fn sandboxed_flaky_retry_cleans_failed_attempt_extras() {
+    use std::os::unix::fs::PermissionsExt;
+    use zel_exec::test_runner::{
+        install_test_setup, run_test_in, TestBaseEnv, TestExec, TestSpec, TestStatus,
+    };
+
+    let w = ws("sandboxed-flaky-extras");
+    let er = std::path::Path::new(w.execroot.path_string());
+    let rt = runtime(&w, StrategyOptions::default(), 4.0);
+    let setup = er.join("test-setup.sh");
+    install_test_setup(&setup).unwrap();
+    let rf = er.join("pkg/flaky.runfiles/_main/pkg");
+    std::fs::create_dir_all(&rf).unwrap();
+    let state_file = w.root.join("sandbox_retry_marker");
+    let _ = std::fs::remove_file(&state_file);
+    let bin = rf.join("flaky.sh");
+    std::fs::write(
+        &bin,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "if [ ! -e \"{marker}\" ]; then\n",
+                "  touch \"{marker}\"\n",
+                "  printf 'warn1\\n' > \"$TEST_WARNINGS_OUTPUT_FILE\"\n",
+                "  printf 'unused1\\n' > \"$TEST_UNUSED_RUNFILES_LOG_FILE\"\n",
+                "  printf 'infra1\\n' > \"$TEST_INFRASTRUCTURE_FAILURE_FILE\"\n",
+                "  printf 'split1\\n' > \"$TEST_LOGSPLITTER_OUTPUT_FILE\"\n",
+                "  printf 'err1\\n' > \"$(dirname \"$XML_OUTPUT_FILE\")/test.err\"\n",
+                "  printf 'only1' > \"$TEST_UNDECLARED_OUTPUTS_DIR/fail_only.txt\"\n",
+                "  printf 'ann1' > \"$TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR/a.part\"\n",
+                "  exit 1\n",
+                "fi\n",
+                "exit 0\n",
+            ),
+            marker = state_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let log_dir = er.join("testlogs/pkg/flaky");
+    let spec = TestSpec {
+        label: "//pkg:flaky".into(),
+        exe_runfiles_path: "pkg/flaky.sh".into(),
+        exe_path: bin.clone(),
+        runfiles_dir: er.join("pkg/flaky.runfiles"),
+        exec_root: er.to_path_buf(),
+        workspace_name: "_main".into(),
+        test_log_dir: log_dir.clone(),
+        size: "small".into(),
+        timeout_secs: 30,
+        shard_count: 0,
+        runs_per_test: 1,
+        flaky_attempts: 2,
+        runs_per_test_detects_flakes: false,
+        run_under: None,
+        args: vec![],
+        env: BTreeMap::new(),
+        base_env: TestBaseEnv {
+            action_env: zel_util::action_env::EnvConfig::default().action_environment(false),
+            ..Default::default()
+        },
+        test_filter: None,
+        coverage: false,
+        coverage_script: None,
+        lcov_merger: None,
+        coverage_manifest: None,
+        zip_undeclared_outputs: false,
+        setup_script: setup,
+        kill_delay_ms: None,
+        test_tmpdir: None,
+        check_sharding_support: false,
+        test_runner_fail_fast: false,
+    };
+    let rep = Reporter::new();
+    let te = TestExec {
+        runtime: &rt,
+        reporter: &rep,
+        inputs: vec!["test-setup.sh".into()],
+        execution_info: BTreeMap::new(),
+        resources: zel_exec::resources::ResourceSet::default(),
+        announce_subcommands: false,
+        config_checksum: "deadbeef".into(),
+        cache_results: false,
+        streamed_out: None,
+    };
+    let res = run_test_in(&spec, Some(&te)).unwrap();
+    assert_eq!(res.status, TestStatus::Flaky);
+    assert_eq!(res.attempts.len(), 2);
+
+    let att = log_dir.join("test_attempts");
+    assert!(att.join("attempt_1.warnings").exists());
+    assert!(att.join("attempt_1.unused_runfiles_log").exists());
+    assert!(att.join("attempt_1.infrastructure_failure").exists());
+    assert!(att.join("attempt_1.raw_splitlogs/test.splitlogs").exists());
+    assert!(att.join("attempt_1.err").exists());
+    assert!(att.join("attempt_1.outputs/fail_only.txt").exists());
+    assert!(att.join("attempt_1.outputs_manifest/MANIFEST").exists());
+    assert!(att.join("attempt_1.outputs_manifest/ANNOTATIONS").exists());
+
+    assert!(!log_dir.join("test.warnings").exists());
+    assert!(!log_dir.join("test.unused_runfiles_log").exists());
+    assert!(!log_dir.join("test.infrastructure_failure").exists());
+    assert!(!log_dir.join("test.raw_splitlogs/test.splitlogs").exists());
+    assert!(!log_dir.join("test.err").exists());
+    assert!(!log_dir.join("test.outputs/fail_only.txt").exists());
+    assert!(!log_dir.join("test.outputs_manifest/MANIFEST").exists());
+    assert!(!log_dir.join("test.outputs_manifest/ANNOTATIONS").exists());
+}

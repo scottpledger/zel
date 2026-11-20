@@ -966,4 +966,65 @@ fn test_bep_undeclared_outputs_zip_and_nozip_names() {
             && !zip_txt.contains("\"name\": \"test.outputs/"),
         "zipped undeclared outputs must not emit individual test.outputs/* entries:\n{zip_txt}"
     );
+
+    // 3. Flaky retry: failed attempt 1 writes extras, passing attempt 2 writes none; BEP
+    // `testResult` for attempt 2 must not inherit stale extras from attempt 1.
+    let retry_marker = w.ws.join("flaky_bep_once");
+    let _ = std::fs::remove_file(&retry_marker);
+    w.write(
+        "p/BUILD",
+        "load(\"@rules_shell//shell:sh_test.bzl\", \"sh_test\")\nsh_test(name = \"u\", srcs = [\"u.sh\"])\nsh_test(name = \"flaky_u\", srcs = [\"flaky_u.sh\"], tags = [\"local\"])\n",
+    );
+    w.write(
+        "p/flaky_u.sh",
+        &format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "if [ ! -e \"{marker}\" ]; then\n",
+                "  touch \"{marker}\"\n",
+                "  printf 'warn1\\n' > \"$TEST_WARNINGS_OUTPUT_FILE\"\n",
+                "  printf 'infra1\\n' > \"$TEST_INFRASTRUCTURE_FAILURE_FILE\"\n",
+                "  printf 'only1' > \"$TEST_UNDECLARED_OUTPUTS_DIR/fail_only.txt\"\n",
+                "  exit 1\n",
+                "fi\n",
+                "exit 0\n",
+            ),
+            marker = retry_marker.display()
+        ),
+    );
+    let bep_flaky = w.ws.join("bep-flaky.json");
+    let r_flaky = w.run(&[
+        "test",
+        "--nocache_test_results",
+        "--flaky_test_attempts=2",
+        "--nozip_undeclared_test_outputs",
+        &format!("--build_event_json_file={}", bep_flaky.display()),
+        "//p:flaky_u",
+    ]);
+    assert_eq!(r_flaky.code, 0, "{}", r_flaky.err);
+    let flaky_lines: Vec<String> = std::fs::read_to_string(&bep_flaky)
+        .unwrap()
+        .lines()
+        .filter(|l| l.contains("\"testActionOutput\""))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        flaky_lines.len(),
+        2,
+        "expected 2 testResult events: {flaky_lines:?}"
+    );
+    let att1 = &flaky_lines[0];
+    let att2 = &flaky_lines[1];
+    assert!(att1.contains("test.warnings"), "{att1}");
+    assert!(att1.contains("test.infrastructure_failure"), "{att1}");
+    assert!(att1.contains("test.outputs/fail_only.txt"), "{att1}");
+    assert!(att1.contains("test.outputs_manifest__MANIFEST"), "{att1}");
+    assert!(
+        !att2.contains("test.warnings")
+            && !att2.contains("test.infrastructure_failure")
+            && !att2.contains("test.outputs/fail_only.txt")
+            && !att2.contains("test.outputs_manifest__MANIFEST"),
+        "passing retry attempt 2 leaked stale extras from attempt 1:\n{att2}"
+    );
 }
