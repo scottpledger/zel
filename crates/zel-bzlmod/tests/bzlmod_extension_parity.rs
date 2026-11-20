@@ -474,3 +474,66 @@ fn concurrent_credential_helper_creation_and_subprocess_spawning() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn helper_bzl_loaded_by_module_extension_reads_native_bazel_version() {
+    let root = std::env::temp_dir().join(format!("zel-bzlmod-native-ver-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ws = root.join("ws");
+    let ob = root.join("ob");
+    std::fs::create_dir_all(ws.join("collectors")).unwrap();
+
+    std::fs::write(
+        ws.join("MODULE.bazel"),
+        "module(name = \"root\")\next = use_extension(\"//:ext.bzl\", \"ext\")\nuse_repo(ext, \"report\")\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("BUILD"), "").unwrap();
+    std::fs::write(ws.join("collectors/BUILD"), "").unwrap();
+    // Plain helper .bzl (no repository_rule/module_extension): evaluated via zel-packages' PackageLoader.
+    std::fs::write(
+        ws.join("collectors/bazel.bzl"),
+        "TOP = native.bazel_version\ndef _bazel_version():\n    return native.bazel_version\ncollect_version = _bazel_version\n",
+    )
+    .unwrap();
+    std::fs::write(
+        ws.join("ext.bzl"),
+        r#"
+load("//collectors:bazel.bzl", "TOP", "collect_version")
+
+def _repo_impl(rctx):
+    rctx.file("BUILD.bazel", "")
+    rctx.file("version.txt", TOP + "|" + collect_version() + "|" + str(hasattr(native, "bazel_version")))
+
+_report_repo = repository_rule(implementation = _repo_impl)
+
+def _ext_impl(mctx):
+    _report_repo(name = "report")
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let mut opts = ResolveOptions::new(ws.clone());
+    opts.check_direct_dependencies = CheckMode::Off;
+    opts.bazel_compatibility_mode = CheckMode::Off;
+    let graph = Arc::new(resolve(&opts).unwrap());
+
+    let rt = Rt::new(
+        ExternalOptions {
+            output_base: ob,
+            workspace_root: ws.clone(),
+            ..Default::default()
+        },
+        Arc::clone(&graph),
+    );
+    let gen_dir = rt.fetch_repo("+ext+report").unwrap();
+    let expected = zel_bzlmod::resolve::default_bazel_version();
+    assert_eq!(
+        std::fs::read_to_string(gen_dir.join("version.txt")).unwrap(),
+        format!("{expected}|{expected}|True")
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}

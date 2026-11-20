@@ -62,6 +62,8 @@ pub struct LoaderConfig {
     pub sibling_repository_layout: bool,
     /// `--experimental_enable_scl_dialect` (default `true` in Bazel 9).
     pub experimental_enable_scl_dialect: bool,
+    /// Value exposed as `native.bazel_version` in `.bzl` files.
+    pub bazel_version: String,
     /// Handler for host calls that belong to an embedding runtime (Bzlmod repository rules and
     /// `repository_ctx`/`module_ctx` methods called from helper `.bzl` files evaluated here).
     /// Consulted first for names accepted by [`is_external_host_call`].
@@ -112,6 +114,7 @@ impl LoaderConfig {
             use_prelude: true,
             sibling_repository_layout: false,
             experimental_enable_scl_dialect: true,
+            bazel_version: zel_util::default_bazel_version(),
             external_host: None,
             bzl_override: None,
         }
@@ -1097,6 +1100,10 @@ impl PackageLoader {
                 Value::BuiltinFunction(format!("host:{f}")),
             );
         }
+        native.insert(
+            "bazel_version".to_string(),
+            Value::String(self.cfg.bazel_version.clone()),
+        );
         ctx.globals.insert(
             "native".to_string(),
             Value::Struct(Arc::new(StructValue::new(native))),
