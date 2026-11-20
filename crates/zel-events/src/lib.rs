@@ -332,6 +332,7 @@ pub struct Reporter {
     output_filter: Mutex<OutputFilter>,
     bep: Mutex<BepState>,
     invocation_id: Mutex<String>,
+    build_request_id: Mutex<Option<String>>,
     config_id: Mutex<String>,
     deferred_finish: std::sync::atomic::AtomicBool,
     deferred_exit: Mutex<Option<(String, i32)>>,
@@ -351,6 +352,7 @@ impl Default for Reporter {
                 publish_all_actions: false,
             }),
             invocation_id: Mutex::new("cmd-0".to_string()),
+            build_request_id: Mutex::new(None),
             config_id: Mutex::new("none".to_string()),
             deferred_finish: std::sync::atomic::AtomicBool::new(false),
             deferred_exit: Mutex::new(None),
@@ -403,6 +405,15 @@ impl Reporter {
 
     pub fn invocation_id(&self) -> String {
         self.invocation_id.lock().unwrap().clone()
+    }
+
+    /// Sets the build request id (BES `StreamId.build_id`, REAPI `correlated_invocations_id`).
+    pub fn set_build_request_id(&self, id: &str) {
+        *self.build_request_id.lock().unwrap() = (!id.is_empty()).then(|| id.to_string());
+    }
+
+    pub fn build_request_id(&self) -> Option<String> {
+        self.build_request_id.lock().unwrap().clone()
     }
 
     /// When set, [`BepEvent::Finished`] only records the exit code and the BEP file writers are

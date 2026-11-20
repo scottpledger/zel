@@ -490,6 +490,7 @@ pub(crate) fn build_runtime(
     mut cfg: ExecConfig,
     execroot: &PathFragment,
     client_env: &BTreeMap<String, String>,
+    invocation_id: &str,
 ) -> Result<Arc<ExecRuntime>, RuntimeError> {
     let exec_root = PathBuf::from(execroot.path_string());
     // execroot = <output_base>/execroot/<workspace>
@@ -565,17 +566,16 @@ pub(crate) fn build_runtime(
     // `RemoteModule.beforeCommand`: connect to the cache / executor and check its capabilities.
     let mut remote_setup_error: Option<String> = None;
     let remote = if cfg.remote.has_remote_cache() || cfg.remote.disk_cache.is_some() {
-        let invocation_id = format!(
-            "{:08x}-{:08x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u32)
-                .unwrap_or(0)
-        );
+        let fallback_id;
+        let effective_invocation_id = if invocation_id.is_empty() || invocation_id == "cmd-0" {
+            fallback_id = crate::observability::uuid_like();
+            fallback_id.as_str()
+        } else {
+            invocation_id
+        };
         match RemoteSpawnRunner::from_options(
             cfg.remote.clone(),
-            &invocation_id,
+            effective_invocation_id,
             Arc::new(LocalSpawnRunner),
         ) {
             Ok(runner) => Some(Arc::new(runner)),
@@ -702,11 +702,16 @@ pub(crate) fn run_build_actions(
         opt_last(parsed, "subcommands").as_deref() == Some("pretty_print"),
         std::sync::atomic::Ordering::Relaxed,
     );
+    let invocation_id = reporter.invocation_id();
+    let build_request_id = reporter.build_request_id();
     let mut fatal: Option<i32> = None;
     let (jobs, runtime, quit_workers) = match exec_config(parsed)
         .map_err(RuntimeError::Config)
         .and_then(|mut cfg| {
             cfg.remote.workspace = Some(PathBuf::from(workspace_dir.path_string()));
+            if cfg.remote.build_request_id.is_none() {
+                cfg.remote.build_request_id = build_request_id.clone();
+            }
             if let Some(dc) = &mut cfg.remote.disk_cache {
                 if !std::path::Path::new(dc).is_absolute() {
                     *dc = std::path::Path::new(workspace_dir.path_string())
@@ -717,7 +722,7 @@ pub(crate) fn run_build_actions(
             }
             let quit = cfg.worker.quit_after_build;
             let jobs = cfg.jobs;
-            build_runtime(cfg, execroot, client_env).map(|rt| (jobs, rt, quit))
+            build_runtime(cfg, execroot, client_env, &invocation_id).map(|rt| (jobs, rt, quit))
         }) {
         Ok((j, rt, q)) => (j, Some(rt), q),
         Err(e) => {
@@ -4881,5 +4886,94 @@ mod test_bep_outputs_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_runtime_uses_canonical_invocation_id_and_uuid_fallback() {
+        use super::{build_runtime, exec_config};
+        use std::collections::BTreeMap;
+        use zel_options::ParsedCommandOptions;
+        use zel_proto::reapi::{Message, RequestMetadata};
+        use zel_remote::fake_server::FakeReapiServer;
+        use zel_vfs::PathFragment;
+
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIPPED: loopback sockets not permitted ({e})");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SKIPPED: loopback connect not permitted ({e})");
+                return;
+            }
+            panic!("{e}");
+        }
+        let reapi = FakeReapiServer::new();
+        reapi.serve_tcp(listener);
+
+        let root = std::env::temp_dir().join(format!("zel-ep-inv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let execroot_dir = root.join("ob").join("execroot").join("_main");
+        std::fs::create_dir_all(&execroot_dir).unwrap();
+        let execroot = PathFragment::create(&execroot_dir.to_string_lossy());
+        let env = BTreeMap::new();
+
+        let decode_caps_rm = || -> RequestMetadata {
+            let headers = reapi
+                .last_headers("GetCapabilities")
+                .expect("GetCapabilities headers recorded");
+            let raw = headers
+                .iter()
+                .find(|(k, _)| k == zel_remote::reapi_client::REQUEST_METADATA_HEADER)
+                .map(|(_, v)| v.as_str())
+                .expect("RequestMetadata header present");
+            let bytes = zel_util::base64_decode(raw).unwrap();
+            RequestMetadata::decode(&bytes).unwrap()
+        };
+
+        // 1. Canonical invocation_id and build_request_id flow into REAPI RequestMetadata.
+        let parsed = ParsedCommandOptions::parse_for_command(
+            "build",
+            &[format!("--remote_cache=grpc://127.0.0.1:{port}")],
+        )
+        .unwrap();
+        let mut cfg = exec_config(&parsed).unwrap();
+        cfg.remote.build_request_id = Some("req-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".into());
+        let rt = build_runtime(cfg, &execroot, &env, "11111111-2222-4333-8444-555555555555")
+            .unwrap_or_else(|e| panic!("build_runtime failed: {}", e.message()));
+        assert!(rt.remote.is_some());
+        let rm = decode_caps_rm();
+        assert_eq!(
+            rm.tool_invocation_id,
+            "11111111-2222-4333-8444-555555555555"
+        );
+        assert_eq!(
+            rm.correlated_invocations_id,
+            "req-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        );
+
+        // 2. Empty or sentinel ("cmd-0") invocation_id falls back to a valid 36-char v4 UUID.
+        for fallback_input in ["", "cmd-0"] {
+            let cfg = exec_config(&parsed).unwrap();
+            let rt = build_runtime(cfg, &execroot, &env, fallback_input)
+                .unwrap_or_else(|e| panic!("build_runtime failed: {}", e.message()));
+            assert!(rt.remote.is_some());
+            let rm = decode_caps_rm();
+            assert_eq!(
+                rm.tool_invocation_id.len(),
+                36,
+                "expected 36-char UUID fallback for {fallback_input:?}, got {}",
+                rm.tool_invocation_id
+            );
+            assert_ne!(rm.tool_invocation_id, "cmd-0");
+            assert_eq!(rm.correlated_invocations_id, rm.tool_invocation_id);
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

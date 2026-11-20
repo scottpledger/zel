@@ -836,6 +836,7 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
     ) -> ExitCode {
         self.cmd_build_or_test_with_bep_args(command, args, None, stdout, stderr)
+            .0
     }
 
     fn cmd_build_or_test_with_bep_args(
@@ -845,7 +846,7 @@ impl BlazeRuntime {
         bep_args: Option<&[String]>,
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
-    ) -> ExitCode {
+    ) -> (ExitCode, String) {
         let parsed = ParsedCommandOptions::parse_for_command(command, args).ok();
         let debug_all_events = parsed
             .as_ref()
@@ -945,7 +946,7 @@ impl BlazeRuntime {
         } else {
             stdout.extend(obs.take_stdout());
         }
-        code
+        (code, obs.invocation_id().to_string())
     }
 
     fn cmd_build_or_test_inner(
@@ -1045,7 +1046,10 @@ impl BlazeRuntime {
                 .iter()
                 .any(|f| parsed.get_str(f).is_some_and(|v| !v.is_empty()))
             {
-                writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
+                writeln_bytes(
+                    stderr,
+                    &format!("INFO: Invocation ID: {}", obs.invocation_id()),
+                );
             }
             if let Some(dc) = parsed
                 .get_str("disk_cache")
@@ -3304,7 +3308,7 @@ impl BlazeRuntime {
         if let Some(ref rul) = run_under_label {
             build_args.push(rul.clone());
         }
-        let build_exit =
+        let (build_exit, run_build_id) =
             self.cmd_build_or_test_with_bep_args("run", &build_args, Some(args), stdout, stderr);
         if build_exit != ExitCode::SUCCESS {
             // `RunCommand`: a failed build never runs the target.
@@ -3736,17 +3740,6 @@ impl BlazeRuntime {
         } else {
             display
         };
-        let run_build_id = parsed
-            .get_str("invocation_id")
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                self.client_env()
-                    .get("BAZEL_INTERNAL_INVOCATION_ID")
-                    .filter(|s| !s.is_empty())
-                    .cloned()
-            })
-            .unwrap_or_else(pseudo_uuid);
         if script_path.is_none() {
             if parsed.subcommands {
                 writeln_bytes(stderr, "INFO: Running command line:");
@@ -4682,25 +4675,6 @@ fn format_windows_workspace_status_command(status_cmd: &str) -> String {
         }
         WorkspaceStatusInvocation::UnixShell { cmdline } => cmdline,
     }
-}
-
-/// `UUID.randomUUID()`-shaped id for `BUILD_ID`.
-fn pseudo_uuid() -> String {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let x = n ^ (pid << 64) ^ 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834u128;
-    let h = format!("{x:032x}");
-    format!(
-        "{}-{}-4{}-a{}-{}",
-        &h[0..8],
-        &h[8..12],
-        &h[13..16],
-        &h[17..20],
-        &h[20..32]
-    )
 }
 
 fn timestamp_prefix() -> String {
