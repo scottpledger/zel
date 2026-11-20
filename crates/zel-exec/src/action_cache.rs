@@ -404,6 +404,16 @@ impl CompactPersistentActionCache {
             add("|action_execution_salt");
             add(&parts.action_execution_salt);
         }
+        if parts.remote_cache_enabled {
+            add("|remote_cache_enabled");
+        }
+        if !parts.remote_default_exec_properties.is_empty() {
+            add("|remote_default_exec_properties");
+            for (k, v) in &parts.remote_default_exec_properties {
+                add(k);
+                add(v);
+            }
+        }
         add("|payload");
         b.extend_from_slice(&parts.payload);
         self.digest.hex(&b)
@@ -493,6 +503,8 @@ pub struct ActionKeyParts {
     pub execution_info: BTreeMap<String, String>,
     pub input_paths: Vec<String>,
     pub output_paths: Vec<String>,
+    pub remote_cache_enabled: bool,
+    pub remote_default_exec_properties: BTreeMap<String, String>,
     pub payload: Vec<u8>,
     pub action_execution_salt: String,
 }
@@ -511,6 +523,8 @@ mod tests {
             inherited_env: vec![],
             unset_env: vec![],
             execution_info: BTreeMap::new(),
+            remote_cache_enabled: false,
+            remote_default_exec_properties: BTreeMap::new(),
             input_paths: vec!["a.c".into()],
             output_paths: vec!["a.o".into()],
             payload: vec![],
@@ -531,6 +545,17 @@ mod tests {
         let mut p = parts();
         p.execution_info.insert("local".into(), "1".into());
         assert_ne!(c.compute_action_key(&p), base, "execution requirements");
+        let mut p = parts();
+        p.remote_cache_enabled = true;
+        assert_ne!(c.compute_action_key(&p), base, "remote_cache_enabled");
+        let mut p = parts();
+        p.remote_default_exec_properties
+            .insert("OSFamily".into(), "Linux".into());
+        assert_ne!(
+            c.compute_action_key(&p),
+            base,
+            "remote_default_exec_properties"
+        );
         let mut p = parts();
         p.mnemonic = "X".into();
         assert_ne!(c.compute_action_key(&p), base);

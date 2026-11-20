@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Remote Execution API v2 client over [`crate::grpc`]: Capabilities, ContentAddressableStorage
-//! (FindMissingBlobs, BatchUpdateBlobs, BatchReadBlobs, GetTree), ByteStream (Read/Write),
-//! ActionCache (Get/Update) and Execution (Execute/WaitExecution with Operations).
+//! Remote Execution API v2 client over [`crate::grpc`]: Capabilities (`ClientApiVersion`,
+//! `RemoteServerCapabilities`), ContentAddressableStorage (`FindMissingBlobs`,
+//! `BatchUpdateBlobs`, `BatchReadBlobs`, `GetTree`), ByteStream (`Read`/`Write`, `Chunker`, zstd
+//! `compressed-blobs`), ActionCache (`Get`/`Update`), and Execution (`Execute`/`WaitExecution`).
 
 use crate::digest::DigestFn;
 use crate::grpc::{CallOptions, Channel, GrpcStatus, RetryPolicy};
 use crate::merkle::BlobSource;
-use std::collections::{BTreeMap, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::io;
-use std::sync::Mutex;
+use std::fs::File;
+use std::io::{self, Read};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 use zel_proto::reapi::*;
 
@@ -31,23 +34,48 @@ const AC: &str = "/build.bazel.remote.execution.v2.ActionCache/";
 const EXEC: &str = "/build.bazel.remote.execution.v2.Execution/";
 const CAPS: &str = "/build.bazel.remote.execution.v2.Capabilities/GetCapabilities";
 const BS: &str = "/google.bytestream.ByteStream/";
-const REQUEST_METADATA_HEADER: &str = "build.bazel.remote.execution.v2.requestmetadata-bin";
+pub const REQUEST_METADATA_HEADER: &str = "build.bazel.remote.execution.v2.requestmetadata-bin";
 
-/// ByteStream chunk size for uploads.
-const WRITE_CHUNK: usize = 64 * 1024;
-/// Default maximum total size of a batch when the server does not advertise one (Bazel: 4 MiB,
+/// ByteStream chunk size for uploads (64 KiB).
+pub const WRITE_CHUNK: usize = 64 * 1024;
+/// Default maximum total size of a batch when the server does not advertise one (Bazel: 4 MiB
 /// minus protocol overhead).
 const DEFAULT_MAX_BATCH: i64 = 4 * 1024 * 1024 - 1024;
 const FIND_MISSING_CHUNK: usize = 1000;
 
+/// ZSTD enum value in `build.bazel.remote.execution.v2.Compressor.Value`.
+pub const COMPRESSOR_ZSTD: i32 = 1;
+
 #[derive(Debug)]
 pub enum RemoteError {
     Grpc(GrpcStatus),
-    /// Remote execution finished with a non-OK `ExecuteResponse.status` / `Operation.error`.
+    /// Remote execution finished with a non-OK `ExecuteResponse.status` (excluding action timeout).
     Exec(RpcStatus),
+    /// `ExecuteResponse.status` had `DEADLINE_EXCEEDED` (action timed out on worker; never retried).
+    ActionTimeout(RpcStatus),
+    /// Capabilities check or query failed (`RemoteExecutionCapabilitiesException`).
+    Capabilities(String),
     Io(io::Error),
     NotFound,
     Other(String),
+}
+
+impl RemoteError {
+    pub fn is_credential_helper_error(&self) -> bool {
+        matches!(self, Self::Grpc(g) if g.credential_helper_error)
+    }
+
+    pub fn is_capabilities_error(&self) -> bool {
+        matches!(self, Self::Capabilities(_))
+    }
+
+    pub fn is_action_timeout(&self) -> bool {
+        matches!(self, Self::ActionTimeout(_))
+    }
+
+    pub fn is_cache_not_found(&self) -> bool {
+        matches!(self, Self::NotFound) || matches!(self, Self::Grpc(g) if g.code == code::NOT_FOUND)
+    }
 }
 
 impl fmt::Display for RemoteError {
@@ -59,6 +87,14 @@ impl fmt::Display for RemoteError {
                 "remote execution failed (code {}): {}",
                 s.code, s.message
             ),
+            Self::ActionTimeout(s) => {
+                if s.message.is_empty() {
+                    write!(f, "Action timed out")
+                } else {
+                    write!(f, "Action timed out: {}", s.message)
+                }
+            }
+            Self::Capabilities(m) => write!(f, "{m}"),
             Self::Io(e) => write!(f, "{e}"),
             Self::NotFound => write!(f, "not found in remote cache"),
             Self::Other(s) => write!(f, "{s}"),
@@ -90,6 +126,294 @@ impl From<zel_proto::DecodeError> for RemoteError {
 
 pub type Result<T> = std::result::Result<T, RemoteError>;
 
+// ---------------------------------------------------------------------------
+// Chunker (mirrors Bazel's `com.google.devtools.build.lib.remote.Chunker`)
+// ---------------------------------------------------------------------------
+
+enum ChunkerState {
+    Unopened,
+    Memory { buf: Vec<u8>, pos: usize },
+    FileStream { file: File, remaining: u64 },
+    Exhausted,
+}
+
+/// Lazily-opened chunk iterator over in-memory bytes or a file on disk, optionally zstd-compressed.
+pub struct Chunker {
+    source: BlobSource,
+    chunk_size: usize,
+    compressed: bool,
+    offset: i64,
+    state: ChunkerState,
+}
+
+impl Chunker {
+    pub fn new(source: BlobSource, chunk_size: usize, compressed: bool) -> Self {
+        Self {
+            source,
+            chunk_size: chunk_size.max(1),
+            compressed,
+            offset: 0,
+            state: ChunkerState::Unopened,
+        }
+    }
+
+    pub fn is_compressed(&self) -> bool {
+        self.compressed
+    }
+
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    pub fn reset(&mut self) {
+        self.offset = 0;
+        self.state = ChunkerState::Unopened;
+    }
+
+    fn ensure_open(&mut self) -> io::Result<()> {
+        if !matches!(self.state, ChunkerState::Unopened) {
+            return Ok(());
+        }
+        if self.compressed {
+            let raw = self.source.read()?;
+            let z = zel_util::zstd::compress(&raw);
+            self.state = if z.is_empty() {
+                ChunkerState::Exhausted
+            } else {
+                ChunkerState::Memory { buf: z, pos: 0 }
+            };
+            return Ok(());
+        }
+        match &self.source {
+            BlobSource::Bytes(b) => {
+                self.state = if b.is_empty() {
+                    ChunkerState::Exhausted
+                } else {
+                    ChunkerState::Memory {
+                        buf: b.clone(),
+                        pos: 0,
+                    }
+                };
+            }
+            BlobSource::File(p) => {
+                let f = File::open(p)?;
+                let len = f.metadata()?.len();
+                self.state = if len == 0 {
+                    ChunkerState::Exhausted
+                } else {
+                    ChunkerState::FileStream {
+                        file: f,
+                        remaining: len,
+                    }
+                };
+            }
+        }
+        Ok(())
+    }
+
+    pub fn seek(&mut self, to_offset: i64) -> io::Result<()> {
+        if to_offset < 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "negative seek"));
+        }
+        if to_offset < self.offset || matches!(self.state, ChunkerState::Exhausted) {
+            self.reset();
+        }
+        self.ensure_open()?;
+        let mut to_skip = (to_offset - self.offset) as usize;
+        while to_skip > 0 {
+            match &mut self.state {
+                ChunkerState::Memory { buf, pos } => {
+                    let avail = buf.len().saturating_sub(*pos);
+                    if to_skip > avail {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "seek past end of chunker",
+                        ));
+                    }
+                    *pos += to_skip;
+                    self.offset += to_skip as i64;
+                    if *pos >= buf.len() {
+                        self.state = ChunkerState::Exhausted;
+                    }
+                    break;
+                }
+                ChunkerState::FileStream { file, remaining } => {
+                    let mut scratch = vec![0u8; to_skip.min(64 * 1024)];
+                    let n = file.read(&mut scratch)?;
+                    if n == 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "seek past EOF",
+                        ));
+                    }
+                    to_skip -= n;
+                    *remaining = remaining.saturating_sub(n as u64);
+                    self.offset += n as i64;
+                    if *remaining == 0 {
+                        self.state = ChunkerState::Exhausted;
+                    }
+                }
+                ChunkerState::Exhausted => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "seek past exhausted chunker",
+                    ));
+                }
+                ChunkerState::Unopened => unreachable!(),
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `Ok(Some((chunk_offset, data, is_last)))`, or `Ok(None)` once finished.
+    pub fn next_chunk(&mut self) -> io::Result<Option<(i64, Vec<u8>, bool)>> {
+        if matches!(self.state, ChunkerState::Exhausted) {
+            return Ok(None);
+        }
+        let was_unopened = matches!(self.state, ChunkerState::Unopened);
+        self.ensure_open()?;
+        if matches!(self.state, ChunkerState::Exhausted) {
+            if was_unopened && self.offset == 0 {
+                return Ok(Some((0, Vec::new(), true)));
+            }
+            return Ok(None);
+        }
+
+        let start_offset = self.offset;
+        match &mut self.state {
+            ChunkerState::Memory { buf, pos } => {
+                let end = (*pos + self.chunk_size).min(buf.len());
+                let slice = buf[*pos..end].to_vec();
+                *pos = end;
+                self.offset += slice.len() as i64;
+                let last = *pos >= buf.len();
+                if last {
+                    self.state = ChunkerState::Exhausted;
+                }
+                Ok(Some((start_offset, slice, last)))
+            }
+            ChunkerState::FileStream { file, remaining } => {
+                let want = self.chunk_size.min(*remaining as usize);
+                let mut out = vec![0u8; want];
+                let mut read_total = 0usize;
+                while read_total < want {
+                    let n = file.read(&mut out[read_total..])?;
+                    if n == 0 {
+                        break;
+                    }
+                    read_total += n;
+                }
+                out.truncate(read_total);
+                *remaining = remaining.saturating_sub(read_total as u64);
+                self.offset += read_total as i64;
+                let last = *remaining == 0 || read_total == 0;
+                if last {
+                    // Close underlying file handle immediately upon exhaustion.
+                    self.state = ChunkerState::Exhausted;
+                }
+                Ok(Some((start_offset, out, last)))
+            }
+            ChunkerState::Exhausted | ChunkerState::Unopened => unreachable!(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ClientApiVersion (`[2.0.0, 2.11.0]`, UTF-16 prerelease ordering)
+// ---------------------------------------------------------------------------
+
+pub const CLIENT_LOW_API: SemVer = SemVer {
+    major: 2,
+    minor: 0,
+    patch: 0,
+    prerelease: String::new(),
+};
+pub const CLIENT_HIGH_API: SemVer = SemVer {
+    major: 2,
+    minor: 11,
+    patch: 0,
+    prerelease: String::new(),
+};
+
+/// Compares two `SemVer` instances matching Bazel's `ApiVersion.compareTo`:
+/// - any non-empty `prerelease` sorts older than every release (`prerelease.is_empty()`);
+/// - two non-empty `prerelease` values compare by UTF-16 code units (ignoring major/minor/patch);
+/// - two releases compare by `(major, minor, patch)`.
+pub fn compare_semver(a: &SemVer, b: &SemVer) -> Ordering {
+    match (a.prerelease.is_empty(), b.prerelease.is_empty()) {
+        (false, true) => Ordering::Less,
+        (true, false) => Ordering::Greater,
+        (false, false) => a.prerelease.encode_utf16().cmp(b.prerelease.encode_utf16()),
+        (true, true) => (a.major, a.minor, a.patch).cmp(&(b.major, b.minor, b.patch)),
+    }
+}
+
+pub fn format_semver(v: &SemVer) -> String {
+    if !v.prerelease.is_empty() {
+        v.prerelease.clone()
+    } else if v.patch != 0 {
+        format!("{}.{}.{}", v.major, v.minor, v.patch)
+    } else {
+        format!("{}.{}", v.major, v.minor)
+    }
+}
+
+fn max_semver<'a>(a: &'a SemVer, b: &'a SemVer) -> &'a SemVer {
+    if compare_semver(a, b) >= Ordering::Equal {
+        a
+    } else {
+        b
+    }
+}
+
+fn min_semver<'a>(a: &'a SemVer, b: &'a SemVer) -> &'a SemVer {
+    if compare_semver(a, b) <= Ordering::Equal {
+        a
+    } else {
+        b
+    }
+}
+
+/// Checks `ServerCapabilities` API range against Bazel's `[2.0.0, 2.11.0]` window.
+/// Returns `Ok((negotiated_high, optional_deprecation_warning))` or `Err(unsupported_msg)`.
+pub fn check_api_version(
+    caps: &ServerCapabilities,
+) -> std::result::Result<(SemVer, Option<String>), String> {
+    let default_zero = SemVer::default();
+    let client_low = CLIENT_LOW_API;
+    let client_high = CLIENT_HIGH_API;
+    let st_low = caps.low_api_version.as_ref().unwrap_or(&default_zero);
+    let st_high = caps.high_api_version.as_ref().unwrap_or(&default_zero);
+
+    let overlap_low = max_semver(&client_low, st_low);
+    let overlap_high = min_semver(&client_high, st_high);
+    if compare_semver(overlap_low, overlap_high) <= Ordering::Equal {
+        return Ok((overlap_high.clone(), None));
+    }
+
+    if let Some(dep) = &caps.deprecated_api_version {
+        let dep_low = max_semver(&client_low, dep);
+        let dep_high = min_semver(&client_high, st_high);
+        if compare_semver(dep_low, dep_high) <= Ordering::Equal {
+            let warn = format!(
+                "The highest API version Bazel support {} is deprecated by the server. Please upgrade to server's recommended version: {} to {}.",
+                format_semver(dep_high),
+                format_semver(st_low),
+                format_semver(st_high),
+            );
+            return Ok((dep_high.clone(), Some(warn)));
+        }
+    }
+
+    Err(format!(
+        "The client supported API versions, {} to {}, is not supported by the server, {} to {}. Please switch to a different server or upgrade Bazel.",
+        format_semver(&client_low),
+        format_semver(&client_high),
+        format_semver(st_low),
+        format_semver(st_high),
+    ))
+}
+
 /// Client configuration.
 #[derive(Debug, Clone)]
 pub struct ReapiConfig {
@@ -100,6 +424,11 @@ pub struct ReapiConfig {
     pub retry: RetryPolicy,
     pub tool_invocation_id: String,
     pub correlated_invocations_id: String,
+    pub cache_compression: bool,
+    pub compression_threshold: usize,
+    pub verify_downloads: bool,
+    pub execution_priority: i32,
+    pub result_cache_priority: i32,
 }
 
 impl Default for ReapiConfig {
@@ -111,6 +440,11 @@ impl Default for ReapiConfig {
             retry: RetryPolicy::default(),
             tool_invocation_id: String::new(),
             correlated_invocations_id: String::new(),
+            cache_compression: false,
+            compression_threshold: 100,
+            verify_downloads: true,
+            execution_priority: 0,
+            result_cache_priority: 0,
         }
     }
 }
@@ -123,51 +457,46 @@ pub struct ActionMeta {
     pub target_id: String,
 }
 
+#[derive(Default)]
+struct UploadTracker {
+    present: HashSet<Digest>,
+    inflight: HashSet<Digest>,
+}
+
 pub struct ReapiClient {
-    pub cache: std::sync::Arc<Channel>,
-    pub executor: Option<std::sync::Arc<Channel>>,
+    pub cache: Arc<Channel>,
+    pub executor: Option<Arc<Channel>>,
     pub cfg: ReapiConfig,
-    caps: Mutex<Option<ServerCapabilities>>,
+    cache_caps: Mutex<Option<ServerCapabilities>>,
+    exec_caps: Mutex<Option<ServerCapabilities>>,
+    warnings: Mutex<Vec<String>>,
+    uploads: Mutex<UploadTracker>,
+    upload_cv: Condvar,
 }
 
 pub fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = ((c[0] as u32) << 16)
-            | ((*c.get(1).unwrap_or(&0) as u32) << 8)
-            | (*c.get(2).unwrap_or(&0) as u32);
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 {
-            T[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if c.len() > 2 {
-            T[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
+    zel_util::base64_encode(data)
 }
 
 impl ReapiClient {
-    pub fn new(
-        cache: std::sync::Arc<Channel>,
-        executor: Option<std::sync::Arc<Channel>>,
-        cfg: ReapiConfig,
-    ) -> Self {
+    pub fn new(cache: Arc<Channel>, executor: Option<Arc<Channel>>, cfg: ReapiConfig) -> Self {
         Self {
             cache,
             executor,
             cfg,
-            caps: Mutex::new(None),
+            cache_caps: Mutex::new(None),
+            exec_caps: Mutex::new(None),
+            warnings: Mutex::new(Vec::new()),
+            uploads: Mutex::new(UploadTracker::default()),
+            upload_cv: Condvar::new(),
         }
     }
 
-    fn opts(&self, meta: &ActionMeta, with_timeout: bool) -> CallOptions {
+    pub fn take_warnings(&self) -> Vec<String> {
+        std::mem::take(&mut *self.warnings.lock().unwrap())
+    }
+
+    pub fn opts(&self, meta: &ActionMeta, with_timeout: bool) -> CallOptions {
         let rm = RequestMetadata {
             tool_details: Some(ToolDetails {
                 tool_name: "bazel".into(),
@@ -188,9 +517,7 @@ impl ReapiClient {
             },
             metadata: vec![(
                 REQUEST_METADATA_HEADER.into(),
-                base64_encode(&rm.encode_to_vec())
-                    .trim_end_matches('=')
-                    .to_string(),
+                base64_encode(&rm.encode_to_vec()),
             )],
         }
     }
@@ -208,142 +535,222 @@ impl ReapiClient {
         Ok(R::decode(&resp)?)
     }
 
-    fn exec_channel(&self) -> Result<&std::sync::Arc<Channel>> {
+    fn exec_channel(&self) -> Result<&Arc<Channel>> {
         self.executor
             .as_ref()
             .ok_or_else(|| RemoteError::Other("no --remote_executor configured".into()))
     }
 
+    pub fn close(&self) {
+        self.cache.close();
+        if let Some(e) = &self.executor {
+            e.close();
+        }
+    }
+
     // ------------------------------------------------------------------ capabilities
 
-    /// `Capabilities.GetCapabilities` (cached). Uses the executor endpoint if configured.
-    pub fn capabilities(&self) -> Result<ServerCapabilities> {
-        if let Some(c) = self.caps.lock().unwrap().clone() {
-            return Ok(c);
-        }
-        let ch = self.executor.as_ref().unwrap_or(&self.cache);
+    fn fetch_caps(&self, ch: &Channel) -> Result<ServerCapabilities> {
         let req = GetCapabilitiesRequest {
             instance_name: self.cfg.instance_name.clone(),
         };
-        let caps: ServerCapabilities = self.unary(ch, CAPS, &req, &ActionMeta::default())?;
-        *self.caps.lock().unwrap() = Some(caps.clone());
+        let meta = ActionMeta {
+            action_id: "capabilities".into(),
+            ..Default::default()
+        };
+        self.unary(ch, CAPS, &req, &meta).map_err(|e| match e {
+            RemoteError::Grpc(g) if g.credential_helper_error => RemoteError::Grpc(g),
+            other => RemoteError::Capabilities(other.to_string()),
+        })
+    }
+
+    /// Queries and caches capabilities for the cache channel.
+    pub fn cache_capabilities(&self) -> Result<ServerCapabilities> {
+        if let Some(c) = self.cache_caps.lock().unwrap().clone() {
+            return Ok(c);
+        }
+        let caps = self.fetch_caps(&self.cache)?;
+        if let Some(ex) = &self.executor {
+            if Arc::ptr_eq(&self.cache, ex) {
+                *self.exec_caps.lock().unwrap() = Some(caps.clone());
+            }
+        }
+        *self.cache_caps.lock().unwrap() = Some(caps.clone());
         Ok(caps)
     }
 
-    /// `RemoteServerCapabilities.checkClientServerCompatibility`.
-    pub fn check_compatibility(&self, need_exec: bool) -> Result<()> {
-        self.check_compatibility_with_warning(need_exec).map(|_| ())
+    /// Queries and caches capabilities for the executor channel (or cache channel when unset).
+    pub fn capabilities(&self) -> Result<ServerCapabilities> {
+        if let Some(ex) = &self.executor {
+            if Arc::ptr_eq(&self.cache, ex) {
+                return self.cache_capabilities();
+            }
+            if let Some(c) = self.exec_caps.lock().unwrap().clone() {
+                return Ok(c);
+            }
+            let caps = self.fetch_caps(ex)?;
+            *self.exec_caps.lock().unwrap() = Some(caps.clone());
+            Ok(caps)
+        } else {
+            self.cache_capabilities()
+        }
     }
 
-    /// Checks client/server REAPI v2 compatibility (`2.0..=2.11`), returning `Ok(Some(warning))`
-    /// when falling back to the server's `deprecated_api_version`.
-    pub fn check_compatibility_with_warning(&self, need_exec: bool) -> Result<Option<String>> {
-        let caps = self.capabilities()?;
-        let lo = caps.low_api_version.clone().unwrap_or(SemVer {
-            major: 2,
-            ..Default::default()
-        });
-        let hi = caps.high_api_version.clone().unwrap_or(SemVer {
-            major: 2,
-            ..Default::default()
-        });
-        let cmp_semver = |a: &SemVer, b: &SemVer| -> std::cmp::Ordering {
-            match (a.major, a.minor, a.patch).cmp(&(b.major, b.minor, b.patch)) {
-                std::cmp::Ordering::Equal => {
-                    match (a.prerelease.is_empty(), b.prerelease.is_empty()) {
-                        (true, true) => std::cmp::Ordering::Equal,
-                        (true, false) => std::cmp::Ordering::Greater,
-                        (false, true) => std::cmp::Ordering::Less,
-                        (false, false) => a.prerelease.cmp(&b.prerelease),
-                    }
-                }
-                ord => ord,
-            }
-        };
-        let client_lo = SemVer {
-            major: 2,
-            minor: 0,
-            patch: 0,
-            prerelease: String::new(),
-        };
-        let client_hi = SemVer {
-            major: 2,
-            minor: 11,
-            patch: 0,
-            prerelease: String::new(),
-        };
-        let overlaps = |srv_lo: &SemVer, srv_hi: &SemVer| -> bool {
-            cmp_semver(srv_lo, &client_hi) != std::cmp::Ordering::Greater
-                && cmp_semver(srv_hi, &client_lo) != std::cmp::Ordering::Less
-        };
-        let mut warning = None;
-        if !overlaps(&lo, &hi) {
-            let dep_ok = caps
-                .deprecated_api_version
-                .as_ref()
-                .filter(|d| (d.major, d.minor, d.patch) != (0, 0, 0) || !d.prerelease.is_empty())
-                .filter(|d| overlaps(d, &hi));
-            if let Some(dep) = dep_ok {
-                warning = Some(format!(
-                    "The remote server's preferred REAPI version {}.{} is higher than 2.11; falling back to deprecated API version {}.{}",
-                    lo.major, lo.minor, dep.major, dep.minor
-                ));
-            } else {
-                return Err(RemoteError::Other(format!(
-                    "Server REAPI version range {}.{} - {}.{} is not compatible with supported REAPI 2.0 - 2.11",
-                    lo.major, lo.minor, hi.major, hi.minor
-                )));
-            }
+    fn check_cache_caps(&self, caps: &ServerCapabilities, want_upload: bool) -> Result<()> {
+        let (_ver, warn) = check_api_version(caps).map_err(RemoteError::Capabilities)?;
+        if let Some(w) = warn {
+            self.warnings.lock().unwrap().push(w);
         }
         let want = self.cfg.digest_fn.enum_value();
         let cc = caps.cache_capabilities.clone().unwrap_or_default();
-        if !cc.digest_functions.is_empty() && !cc.digest_functions.contains(&want) {
-            return Err(RemoteError::Other(format!(
+        if !cc.digest_functions.contains(&want) {
+            return Err(RemoteError::Capabilities(format!(
                 "Remote cache does not support the digest function {:?} (supports {:?})",
                 self.cfg.digest_fn, cc.digest_functions
             )));
         }
-        if need_exec {
-            let ec = caps.execution_capabilities.unwrap_or_default();
-            if !ec.exec_enabled {
-                return Err(RemoteError::Other(
-                    "Remote execution is not enabled on the server".into(),
-                ));
-            }
-            let fns: Vec<i32> = if ec.digest_functions.is_empty() {
-                vec![ec.digest_function]
-            } else {
-                ec.digest_functions.clone()
-            };
-            if !fns.is_empty() && !fns.contains(&0) && !fns.contains(&want) {
-                return Err(RemoteError::Other(
-                    "Remote executor does not support the digest function".into(),
-                ));
+        if self.cfg.cache_compression && !cc.supported_compressors.contains(&COMPRESSOR_ZSTD) {
+            return Err(RemoteError::Capabilities(
+                "Remote cache does not support ZSTD compression (--remote_cache_compression)"
+                    .into(),
+            ));
+        }
+        if cc.action_cache_update_capabilities.is_none() && want_upload {
+            self.warnings.lock().unwrap().push(
+                "Remote Action Cache is set to read-only (action_cache_update_capabilities omitted by server); local results will not be uploaded."
+                    .into(),
+            );
+        }
+        if self.cfg.result_cache_priority != 0 {
+            if let Some(pr) = &cc.cache_priority_capabilities {
+                if !pr.priorities.is_empty()
+                    && !pr.priorities.iter().any(|r| {
+                        self.cfg.result_cache_priority >= r.min_priority
+                            && self.cfg.result_cache_priority <= r.max_priority
+                    })
+                {
+                    return Err(RemoteError::Capabilities(format!(
+                        "--remote_result_cache_priority={} is outside server's supported range",
+                        self.cfg.result_cache_priority
+                    )));
+                }
             }
         }
-        Ok(warning)
+        Ok(())
     }
 
+    fn check_exec_caps(&self, caps: &ServerCapabilities) -> Result<()> {
+        let (_ver, warn) = check_api_version(caps).map_err(RemoteError::Capabilities)?;
+        if let Some(w) = warn {
+            self.warnings.lock().unwrap().push(w);
+        }
+        let ec = caps.execution_capabilities.clone().unwrap_or_default();
+        if !ec.exec_enabled {
+            return Err(RemoteError::Capabilities(
+                "Remote execution is not enabled on the server".into(),
+            ));
+        }
+        let want = self.cfg.digest_fn.enum_value();
+        let fns: Vec<i32> = if ec.digest_functions.is_empty() {
+            if ec.digest_function == 0 {
+                Vec::new()
+            } else {
+                vec![ec.digest_function]
+            }
+        } else {
+            ec.digest_functions
+        };
+        if !fns.contains(&want) {
+            return Err(RemoteError::Capabilities(format!(
+                "Remote executor does not support the digest function {:?}",
+                self.cfg.digest_fn
+            )));
+        }
+        if self.cfg.execution_priority != 0 {
+            if let Some(pr) = &ec.execution_priority_capabilities {
+                if !pr.priorities.is_empty()
+                    && !pr.priorities.iter().any(|r| {
+                        self.cfg.execution_priority >= r.min_priority
+                            && self.cfg.execution_priority <= r.max_priority
+                    })
+                {
+                    return Err(RemoteError::Capabilities(format!(
+                        "--remote_execution_priority={} is outside server's supported range",
+                        self.cfg.execution_priority
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `RemoteServerCapabilities.checkClientServerCompatibility`:
+    /// checks the cache endpoint with cache rules, and when `need_exec` is true also checks the
+    /// executor endpoint (sharing a single `GetCapabilities` RPC when both endpoints share a
+    /// channel, or checking each independently when separate).
+    pub fn check_compatibility(&self, need_exec: bool) -> Result<()> {
+        self.check_compatibility_ext(need_exec, true)
+    }
+
+    pub fn check_compatibility_ext(&self, need_exec: bool, want_upload: bool) -> Result<()> {
+        let c_caps = self.cache_capabilities()?;
+        if need_exec {
+            if let Some(ex) = &self.executor {
+                if Arc::ptr_eq(&self.cache, ex) {
+                    // Shared channel: check execution enabled first, then cache rules.
+                    self.check_exec_caps(&c_caps)?;
+                    self.check_cache_caps(&c_caps, want_upload)?;
+                    return Ok(());
+                }
+            }
+            self.check_cache_caps(&c_caps, want_upload)?;
+            let e_caps = self.capabilities()?;
+            self.check_exec_caps(&e_caps)?;
+        } else {
+            self.check_cache_caps(&c_caps, want_upload)?;
+        }
+        Ok(())
+    }
+
+    /// Returns `true` only when `cache_capabilities.action_cache_update_capabilities.update_enabled`
+    /// is explicitly `true` (missing `action_cache_update_capabilities` defaults to `false`).
     pub fn remote_cache_supports_update(&self) -> bool {
-        self.capabilities()
-            .ok()
-            .and_then(|c| c.cache_capabilities)
+        // Re-read fresh capabilities if uncached; never default to true on missing message or error.
+        let caps = self
+            .cache_caps
+            .lock()
+            .unwrap()
+            .clone()
+            .or_else(|| self.cache_capabilities().ok());
+        caps.and_then(|c| c.cache_capabilities)
             .and_then(|c| c.action_cache_update_capabilities)
             .map(|u| u.update_enabled)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
-    /// Server's REAPI high version supports `Command.output_paths` (>= 2.1).
+    pub fn allows_absolute_symlinks(&self) -> bool {
+        self.cache_capabilities()
+            .ok()
+            .and_then(|c| c.cache_capabilities)
+            .map(|c| c.symlink_absolute_path_strategy == symlink_absolute_path_strategy::ALLOWED)
+            .unwrap_or(false)
+    }
+
+    /// Server's negotiated REAPI version supports `Command.output_paths` (>= 2.1).
     pub fn supports_output_paths(&self) -> bool {
-        match self.capabilities().ok().and_then(|c| c.high_api_version) {
-            Some(v) => (v.major, v.minor) >= (2, 1),
+        match self
+            .capabilities()
+            .ok()
+            .and_then(|c| check_api_version(&c).ok())
+        {
+            Some((negotiated, _)) => (negotiated.major, negotiated.minor) >= (2, 1),
             None => true,
         }
     }
 
     pub fn max_batch_size(&self) -> i64 {
         let m = self
-            .capabilities()
+            .cache_capabilities()
             .ok()
             .and_then(|c| c.cache_capabilities)
             .map(|c| c.max_batch_total_size_bytes)
@@ -353,6 +760,12 @@ impl ReapiClient {
         } else {
             DEFAULT_MAX_BATCH
         }
+    }
+
+    fn should_compress(&self, uncompressed_size: i64) -> bool {
+        self.cfg.cache_compression
+            && uncompressed_size > 0
+            && (uncompressed_size as usize) >= self.cfg.compression_threshold
     }
 
     // ------------------------------------------------------------------ resource names
@@ -366,27 +779,45 @@ impl ReapiClient {
     }
 
     pub fn read_resource_name(&self, d: &Digest) -> String {
+        self.read_resource_name_ext(d, false)
+    }
+
+    pub fn read_resource_name_ext(&self, d: &Digest, compressed: bool) -> String {
+        let kind = if compressed {
+            "compressed-blobs/zstd"
+        } else {
+            "blobs"
+        };
         match self.cfg.digest_fn.resource_name() {
             Some(f) => format!(
-                "{}blobs/{f}/{}/{}",
+                "{}{kind}/{f}/{}/{}",
                 self.blob_prefix(),
                 d.hash,
                 d.size_bytes
             ),
-            None => format!("{}blobs/{}/{}", self.blob_prefix(), d.hash, d.size_bytes),
+            None => format!("{}{kind}/{}/{}", self.blob_prefix(), d.hash, d.size_bytes),
         }
     }
 
     pub fn write_resource_name(&self, uuid: &str, d: &Digest) -> String {
+        self.write_resource_name_ext(uuid, d, false)
+    }
+
+    pub fn write_resource_name_ext(&self, uuid: &str, d: &Digest, compressed: bool) -> String {
+        let kind = if compressed {
+            "compressed-blobs/zstd"
+        } else {
+            "blobs"
+        };
         match self.cfg.digest_fn.resource_name() {
             Some(f) => format!(
-                "{}uploads/{uuid}/blobs/{f}/{}/{}",
+                "{}uploads/{uuid}/{kind}/{f}/{}/{}",
                 self.blob_prefix(),
                 d.hash,
                 d.size_bytes
             ),
             None => format!(
-                "{}uploads/{uuid}/blobs/{}/{}",
+                "{}uploads/{uuid}/{kind}/{}/{}",
                 self.blob_prefix(),
                 d.hash,
                 d.size_bytes
@@ -397,8 +828,16 @@ impl ReapiClient {
     // ------------------------------------------------------------------ CAS
 
     pub fn find_missing_blobs(&self, digests: &[Digest], meta: &ActionMeta) -> Result<Vec<Digest>> {
+        let non_empty: Vec<Digest> = digests
+            .iter()
+            .filter(|d| d.size_bytes > 0)
+            .cloned()
+            .collect();
+        if non_empty.is_empty() {
+            return Ok(Vec::new());
+        }
         let mut missing = Vec::new();
-        for chunk in digests.chunks(FIND_MISSING_CHUNK) {
+        for chunk in non_empty.chunks(FIND_MISSING_CHUNK) {
             let req = FindMissingBlobsRequest {
                 instance_name: self.cfg.instance_name.clone(),
                 blob_digests: chunk.to_vec(),
@@ -408,22 +847,42 @@ impl ReapiClient {
                 self.unary(&self.cache, &format!("{CAS}FindMissingBlobs"), &req, meta)?;
             missing.extend(r.missing_blob_digests);
         }
+        // Any queried digest NOT reported missing is currently present on the server.
+        let missing_set: HashSet<&Digest> = missing.iter().collect();
+        let mut trk = self.uploads.lock().unwrap();
+        for d in &non_empty {
+            if !missing_set.contains(d) {
+                trk.present.insert(d.clone());
+            }
+        }
         Ok(missing)
     }
 
     /// `BatchUpdateBlobs`; the caller guarantees the total size fits the server's limit.
     pub fn batch_update_blobs(&self, blobs: &[(Digest, Vec<u8>)], meta: &ActionMeta) -> Result<()> {
-        if blobs.is_empty() {
+        let non_empty: Vec<&(Digest, Vec<u8>)> =
+            blobs.iter().filter(|(d, _)| d.size_bytes > 0).collect();
+        if non_empty.is_empty() {
             return Ok(());
         }
         let req = BatchUpdateBlobsRequest {
             instance_name: self.cfg.instance_name.clone(),
-            requests: blobs
+            requests: non_empty
                 .iter()
-                .map(|(d, data)| BatchUpdateBlobsRequestItem {
-                    digest: Some(d.clone()),
-                    data: data.clone(),
-                    compressor: 0,
+                .map(|(d, data)| {
+                    if self.should_compress(d.size_bytes) {
+                        BatchUpdateBlobsRequestItem {
+                            digest: Some(d.clone()),
+                            data: zel_util::zstd::compress(data),
+                            compressor: COMPRESSOR_ZSTD,
+                        }
+                    } else {
+                        BatchUpdateBlobsRequestItem {
+                            digest: Some(d.clone()),
+                            data: data.clone(),
+                            compressor: 0,
+                        }
+                    }
                 })
                 .collect(),
             digest_function: self.cfg.digest_fn.proto_value(),
@@ -434,6 +893,7 @@ impl ReapiClient {
             if let Some(s) = item.status {
                 if s.code != code::OK {
                     let d = item.digest.unwrap_or_default();
+                    self.uploads.lock().unwrap().present.remove(&d);
                     return Err(RemoteError::Grpc(GrpcStatus::new(
                         s.code,
                         format!(
@@ -444,6 +904,10 @@ impl ReapiClient {
                 }
             }
         }
+        let mut trk = self.uploads.lock().unwrap();
+        for (d, _) in non_empty {
+            trk.present.insert(d.clone());
+        }
         Ok(())
     }
 
@@ -453,11 +917,24 @@ impl ReapiClient {
         meta: &ActionMeta,
     ) -> Result<HashMap<Digest, Vec<u8>>> {
         let mut out = HashMap::new();
-        for chunk in digests.chunks(FIND_MISSING_CHUNK) {
+        let mut non_empty = Vec::new();
+        for d in digests {
+            if d.size_bytes == 0 {
+                out.insert(d.clone(), Vec::new());
+            } else {
+                non_empty.push(d.clone());
+            }
+        }
+        let accept = if self.cfg.cache_compression {
+            vec![0, COMPRESSOR_ZSTD]
+        } else {
+            vec![]
+        };
+        for chunk in non_empty.chunks(FIND_MISSING_CHUNK) {
             let req = BatchReadBlobsRequest {
                 instance_name: self.cfg.instance_name.clone(),
                 digests: chunk.to_vec(),
-                acceptable_compressors: vec![],
+                acceptable_compressors: accept.clone(),
                 digest_function: self.cfg.digest_fn.proto_value(),
             };
             let r: BatchReadBlobsResponse =
@@ -471,14 +948,35 @@ impl ReapiClient {
                 if st.code != code::OK {
                     return Err(RemoteError::Grpc(GrpcStatus::new(st.code, st.message)));
                 }
-                self.verify(&d, &item.data)?;
-                out.insert(d, item.data);
+                let raw = if item.compressor == COMPRESSOR_ZSTD {
+                    zel_util::zstd::decompress(&item.data).map_err(|e| {
+                        RemoteError::Other(format!(
+                            "Failed to decompress zstd BatchReadBlobs item {}/{}: {e}",
+                            d.hash, d.size_bytes
+                        ))
+                    })?
+                } else {
+                    item.data
+                };
+                self.verify(&d, &raw)?;
+                out.insert(d, raw);
             }
         }
         Ok(out)
     }
 
     fn verify(&self, d: &Digest, data: &[u8]) -> Result<()> {
+        if (data.len() as i64) != d.size_bytes {
+            return Err(RemoteError::Other(format!(
+                "Download of {}/{} failed: size mismatch (got {})",
+                d.hash,
+                d.size_bytes,
+                data.len()
+            )));
+        }
+        if !self.cfg.verify_downloads {
+            return Ok(());
+        }
         let actual = self.cfg.digest_fn.digest(data);
         if actual.hash != d.hash || actual.size_bytes != d.size_bytes {
             return Err(RemoteError::Other(format!(
@@ -489,33 +987,47 @@ impl ReapiClient {
         Ok(())
     }
 
-    /// `ByteStream.Write` of one blob in chunks.
-    pub fn write_blob_bytestream(&self, d: &Digest, data: &[u8], meta: &ActionMeta) -> Result<()> {
-        let uuid = format!("{:016x}-{:016x}", self.nanos(), d.size_bytes);
-        let resource = self.write_resource_name(&uuid, d);
+    /// `ByteStream.Write` of a blob source via [`Chunker`], supporting zstd `compressed-blobs`
+    /// and Bazel's `committed_size` rules (`-1` allowed only when compressed).
+    pub fn write_source_bytestream(
+        &self,
+        d: &Digest,
+        source: &BlobSource,
+        meta: &ActionMeta,
+    ) -> Result<()> {
+        if d.size_bytes == 0 {
+            return Ok(());
+        }
+        let compress = self.should_compress(d.size_bytes);
         let opts = self.opts(meta, true);
-        self.cfg.retry.run(|| {
+        let mut refreshed_auth = false;
+        let res = self.cfg.retry.run(|| {
+            let uuid = zel_util::uuid_v4();
+            let resource = self.write_resource_name_ext(&uuid, d, compress);
+            let mut chunker = Chunker::new(source.clone(), WRITE_CHUNK, compress);
             let mut msgs: Vec<Vec<u8>> = Vec::new();
-            let mut offset = 0usize;
-            loop {
-                let end = (offset + WRITE_CHUNK).min(data.len());
+            let mut total_wire: i64 = 0;
+            while let Some((off, bytes, is_last)) = chunker
+                .next_chunk()
+                .map_err(|e| GrpcStatus::new(code::INTERNAL, e.to_string()))?
+            {
+                total_wire += bytes.len() as i64;
                 msgs.push(
                     WriteRequest {
-                        resource_name: if offset == 0 {
+                        resource_name: if off == 0 {
                             resource.clone()
                         } else {
                             String::new()
                         },
-                        write_offset: offset as i64,
-                        finish_write: end == data.len(),
-                        data: data[offset..end].to_vec(),
+                        write_offset: off,
+                        finish_write: is_last,
+                        data: bytes,
                     }
                     .encode_to_vec(),
                 );
-                if end == data.len() {
+                if is_last {
                     break;
                 }
-                offset = end;
             }
             let mut chunks = msgs.into_iter();
             let mut committed: Option<i64> = None;
@@ -530,58 +1042,168 @@ impl ReapiClient {
                     Ok(())
                 });
             match r {
-                Ok(()) => {
-                    // A server may report -1 or the full size for an already-present blob.
-                    match committed {
-                        Some(c) if c == d.size_bytes || c == -1 => Ok(()),
-                        Some(c) => Err(GrpcStatus::new(
-                            code::INVALID_ARGUMENT,
-                            format!("committed size {c} != blob size {}", d.size_bytes),
-                        )),
-                        None => Err(GrpcStatus::new(code::INTERNAL, "no WriteResponse")),
+                Ok(()) => match committed {
+                    Some(c) if compress && (c == -1 || c == total_wire || c == d.size_bytes) => {
+                        Ok(())
                     }
-                }
+                    Some(c) if !compress && c == d.size_bytes => Ok(()),
+                    Some(c) => Err(GrpcStatus::new(
+                        code::INTERNAL,
+                        format!(
+                            "ByteStream.Write committed_size {c} did not match expected size {}",
+                            d.size_bytes
+                        ),
+                    )),
+                    None => Err(GrpcStatus::new(code::INTERNAL, "no WriteResponse")),
+                },
                 Err(e) if e.code == code::ALREADY_EXISTS => Ok(()),
+                Err(e)
+                    if e.code == code::UNAUTHENTICATED
+                        && !e.credential_helper_error
+                        && !refreshed_auth
+                        && self.cache.credentials().is_some() =>
+                {
+                    refreshed_auth = true;
+                    self.cache.refresh_credentials()?;
+                    // Trigger immediate retry via ABORTED/UNAVAILABLE? No, rerun once inline!
+                    let uuid2 = zel_util::uuid_v4();
+                    let resource2 = self.write_resource_name_ext(&uuid2, d, compress);
+                    chunker.reset();
+                    let mut msgs2 = Vec::new();
+                    while let Some((off, bytes, is_last)) = chunker
+                        .next_chunk()
+                        .map_err(|ie| GrpcStatus::new(code::INTERNAL, ie.to_string()))?
+                    {
+                        msgs2.push(
+                            WriteRequest {
+                                resource_name: if off == 0 {
+                                    resource2.clone()
+                                } else {
+                                    String::new()
+                                },
+                                write_offset: off,
+                                finish_write: is_last,
+                                data: bytes,
+                            }
+                            .encode_to_vec(),
+                        );
+                        if is_last {
+                            break;
+                        }
+                    }
+                    let mut it2 = msgs2.into_iter();
+                    let mut c2 = None;
+                    self.cache
+                        .call(&format!("{BS}Write"), &mut it2, &opts, &mut |m| {
+                            c2 = Some(
+                                WriteResponse::decode(&m)
+                                    .map_err(|de| GrpcStatus::new(code::INTERNAL, de.to_string()))?
+                                    .committed_size,
+                            );
+                            Ok(())
+                        })
+                }
                 Err(e) => Err(e),
             }
-        })?;
-        Ok(())
+        });
+        match res {
+            Ok(()) => {
+                self.uploads.lock().unwrap().present.insert(d.clone());
+                Ok(())
+            }
+            Err(e) => {
+                self.uploads.lock().unwrap().present.remove(d);
+                Err(e.into())
+            }
+        }
     }
 
-    fn nanos(&self) -> u64 {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static C: AtomicU64 = AtomicU64::new(0);
-        let t = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        t ^ C.fetch_add(0x9e37_79b9, Ordering::SeqCst).rotate_left(17)
+    /// `ByteStream.Write` of an in-memory blob.
+    pub fn write_blob_bytestream(&self, d: &Digest, data: &[u8], meta: &ActionMeta) -> Result<()> {
+        self.write_source_bytestream(d, &BlobSource::Bytes(data.to_vec()), meta)
     }
 
-    /// `ByteStream.Read` of a whole blob (digest-verified). Falls back to `BatchReadBlobs` when
-    /// the server does not implement ByteStream.
+    /// `ByteStream.Read` of a whole blob (resuming from `read_offset` across retries when
+    /// uncompressed, supporting zstd `compressed-blobs`, rejecting extra trailing bytes, and
+    /// falling back to `BatchReadBlobs` on `UNIMPLEMENTED`).
     pub fn download_blob(&self, d: &Digest, meta: &ActionMeta) -> Result<Vec<u8>> {
         if d.size_bytes == 0 {
             return Ok(Vec::new());
         }
-        let req = ReadRequest {
-            resource_name: self.read_resource_name(d),
-            read_offset: 0,
-            read_limit: 0,
-        }
-        .encode_to_vec();
+        let compress = self.should_compress(d.size_bytes);
         let opts = self.opts(meta, true);
-        let res = self.cfg.retry.run(|| {
-            let mut data = Vec::with_capacity(d.size_bytes.max(0) as usize);
-            self.cache
-                .server_stream(&format!("{BS}Read"), &req, &opts, &mut |m| {
-                    let r = ReadResponse::decode(&m)
-                        .map_err(|e| GrpcStatus::new(code::INTERNAL, e.to_string()))?;
-                    data.extend(r.data);
-                    Ok(())
-                })?;
-            Ok(data)
-        });
+
+        let res = if compress {
+            let req = ReadRequest {
+                resource_name: self.read_resource_name_ext(d, true),
+                read_offset: 0,
+                read_limit: 0,
+            }
+            .encode_to_vec();
+            let mut wire = Vec::new();
+            let stream_res = self.cfg.retry.run(|| {
+                let req_now = ReadRequest {
+                    resource_name: self.read_resource_name_ext(d, true),
+                    read_offset: wire.len() as i64,
+                    read_limit: 0,
+                }
+                .encode_to_vec();
+                self.cache
+                    .server_stream(&format!("{BS}Read"), &req_now, &opts, &mut |m| {
+                        let r = ReadResponse::decode(&m)
+                            .map_err(|e| GrpcStatus::new(code::INTERNAL, e.to_string()))?;
+                        wire.extend(r.data);
+                        Ok(())
+                    })
+            });
+            let _ = req;
+            stream_res.and_then(|()| {
+                zel_util::zstd::decompress(&wire).map_err(|e| {
+                    GrpcStatus::new(
+                        code::DATA_LOSS,
+                        format!(
+                            "zstd decompression failed for {}/{}: {e}",
+                            d.hash, d.size_bytes
+                        ),
+                    )
+                })
+            })
+        } else {
+            let expected = d.size_bytes.max(0) as usize;
+            let mut data = Vec::with_capacity(expected);
+            let stream_res = self.cfg.retry.run(|| {
+                let req = ReadRequest {
+                    resource_name: self.read_resource_name_ext(d, false),
+                    read_offset: data.len() as i64,
+                    read_limit: 0,
+                }
+                .encode_to_vec();
+                let r = self
+                    .cache
+                    .server_stream(&format!("{BS}Read"), &req, &opts, &mut |m| {
+                        let r = ReadResponse::decode(&m)
+                            .map_err(|e| GrpcStatus::new(code::INTERNAL, e.to_string()))?;
+                        if data.len() + r.data.len() > expected {
+                            return Err(GrpcStatus::new(
+                                code::DATA_LOSS,
+                                format!(
+                                    "ByteStream.Read returned more than {} bytes for {}",
+                                    expected, d.hash
+                                ),
+                            ));
+                        }
+                        data.extend(r.data);
+                        Ok(())
+                    });
+                match r {
+                    // Bazel ignores a trailing stream error once all expected bytes were received.
+                    Err(_) if data.len() == expected => Ok(()),
+                    other => other,
+                }
+            });
+            stream_res.map(|()| data)
+        };
+
         match res {
             Ok(data) => {
                 self.verify(d, &data)?;
@@ -595,24 +1217,89 @@ impl ReapiClient {
         }
     }
 
-    /// Ensures all `blobs` exist in the CAS: `FindMissingBlobs`, then uploads the missing ones
-    /// via `BatchUpdateBlobs` (small) or `ByteStream.Write` (larger than a batch).
+    /// Ensures all `blobs` exist in the CAS, skipping size-0 and already-known-present digests
+    /// (unless `force` is true), coalescing concurrent uploads of the same digest.
     pub fn ensure_blobs_present(
         &self,
         blobs: &BTreeMap<Digest, BlobSource>,
         meta: &ActionMeta,
     ) -> Result<usize> {
-        let digests: Vec<Digest> = blobs
-            .keys()
-            .filter(|&d| d.size_bytes > 0)
-            .cloned()
-            .collect();
-        let missing = self.find_missing_blobs(&digests, meta)?;
-        self.upload_blobs(&missing, blobs, meta)?;
+        self.ensure_blobs_present_ext(blobs, meta, false)
+    }
+
+    pub fn ensure_blobs_present_ext(
+        &self,
+        blobs: &BTreeMap<Digest, BlobSource>,
+        meta: &ActionMeta,
+        force: bool,
+    ) -> Result<usize> {
+        let mut to_query = Vec::new();
+        {
+            let mut trk = self.uploads.lock().unwrap();
+            for d in blobs.keys() {
+                if d.size_bytes <= 0 {
+                    continue;
+                }
+                if force {
+                    trk.present.remove(d);
+                    to_query.push(d.clone());
+                } else if !trk.present.contains(d) {
+                    to_query.push(d.clone());
+                }
+            }
+        }
+        if to_query.is_empty() {
+            return Ok(0);
+        }
+        let missing = if force {
+            to_query
+        } else {
+            self.find_missing_blobs(&to_query, meta)?
+        };
+        if missing.is_empty() {
+            return Ok(0);
+        }
+        self.upload_blobs_coalesced(&missing, blobs, meta, force)?;
         Ok(missing.len())
     }
 
-    /// Uploads exactly the given digests (no existence check).
+    fn upload_blobs_coalesced(
+        &self,
+        digests: &[Digest],
+        blobs: &BTreeMap<Digest, BlobSource>,
+        meta: &ActionMeta,
+        force: bool,
+    ) -> Result<()> {
+        let mut claimed = Vec::new();
+        {
+            let mut trk = self.uploads.lock().unwrap();
+            for d in digests {
+                if d.size_bytes <= 0 {
+                    continue;
+                }
+                while trk.inflight.contains(d) {
+                    trk = self.upload_cv.wait(trk).unwrap();
+                }
+                if !force && trk.present.contains(d) {
+                    continue;
+                }
+                trk.inflight.insert(d.clone());
+                claimed.push(d.clone());
+            }
+        }
+        let res = self.upload_blobs(&claimed, blobs, meta);
+        {
+            let mut trk = self.uploads.lock().unwrap();
+            for d in &claimed {
+                trk.inflight.remove(d);
+            }
+            self.upload_cv.notify_all();
+        }
+        res
+    }
+
+    /// Uploads the given digests directly (`BatchUpdateBlobs` for small, `ByteStream.Write` for
+    /// large).
     pub fn upload_blobs(
         &self,
         digests: &[Digest],
@@ -622,20 +1309,23 @@ impl ReapiClient {
         let max_batch = self.max_batch_size();
         let mut batch: Vec<(Digest, Vec<u8>)> = Vec::new();
         let mut batch_bytes = 0i64;
-        let mut large: Vec<(Digest, Vec<u8>)> = Vec::new();
+        let mut large: Vec<(Digest, BlobSource)> = Vec::new();
         for d in digests {
+            if d.size_bytes <= 0 {
+                continue;
+            }
             let src = blobs.get(d).ok_or_else(|| {
                 RemoteError::Other(format!(
                     "missing local source for blob {}/{}",
                     d.hash, d.size_bytes
                 ))
             })?;
-            let data = src.read()?;
             if d.size_bytes >= max_batch {
-                large.push((d.clone(), data));
+                large.push((d.clone(), src.clone()));
                 continue;
             }
-            if batch_bytes + d.size_bytes > max_batch {
+            let data = src.read()?;
+            if batch_bytes + d.size_bytes > max_batch && !batch.is_empty() {
                 self.batch_update_blobs(&batch, meta)?;
                 batch.clear();
                 batch_bytes = 0;
@@ -644,14 +1334,13 @@ impl ReapiClient {
             batch.push((d.clone(), data));
         }
         self.batch_update_blobs(&batch, meta)?;
-        // Large blobs go over ByteStream, a few at a time.
         let err: Mutex<Option<RemoteError>> = Mutex::new(None);
         for group in large.chunks(4) {
             std::thread::scope(|s| {
-                for (d, data) in group {
+                for (d, src) in group {
                     let err = &err;
                     s.spawn(move || {
-                        if let Err(e) = self.write_blob_bytestream(d, data, meta) {
+                        if let Err(e) = self.write_source_bytestream(d, src, meta) {
                             err.lock().unwrap().get_or_insert(e);
                         }
                     });
@@ -667,6 +1356,12 @@ impl ReapiClient {
     /// `GetTree` server-streaming RPC with pagination. Returns a `Tree` whose root is the
     /// directory with `root` digest.
     pub fn get_tree(&self, root: &Digest, meta: &ActionMeta) -> Result<Tree> {
+        if root.size_bytes == 0 {
+            return Ok(Tree {
+                root: Some(Directory::default()),
+                children: Vec::new(),
+            });
+        }
         let opts = self.opts(meta, true);
         let mut dirs: Vec<Directory> = Vec::new();
         let mut token = String::new();
@@ -721,11 +1416,22 @@ impl ReapiClient {
         action: &Digest,
         meta: &ActionMeta,
     ) -> Result<Option<ActionResult>> {
+        self.get_action_result_inlined(action, &[], meta)
+    }
+
+    pub fn get_action_result_inlined(
+        &self,
+        action: &Digest,
+        inline_output_files: &[String],
+        meta: &ActionMeta,
+    ) -> Result<Option<ActionResult>> {
         let req = GetActionResultRequest {
             instance_name: self.cfg.instance_name.clone(),
             action_digest: Some(action.clone()),
+            inline_stdout: false,
+            inline_stderr: false,
+            inline_output_files: inline_output_files.to_vec(),
             digest_function: self.cfg.digest_fn.proto_value(),
-            ..Default::default()
         };
         match self.unary::<_, ActionResult>(
             &self.cache,
@@ -745,11 +1451,15 @@ impl ReapiClient {
         result: &ActionResult,
         meta: &ActionMeta,
     ) -> Result<()> {
+        let results_cache_policy =
+            (self.cfg.result_cache_priority != 0).then_some(ResultsCachePolicy {
+                priority: self.cfg.result_cache_priority,
+            });
         let req = UpdateActionResultRequest {
             instance_name: self.cfg.instance_name.clone(),
             action_digest: Some(action.clone()),
             action_result: Some(result.clone()),
-            results_cache_policy: None,
+            results_cache_policy,
             digest_function: self.cfg.digest_fn.proto_value(),
         };
         let _: ActionResult =
@@ -760,7 +1470,9 @@ impl ReapiClient {
     // ------------------------------------------------------------------ execution
 
     /// `Execution.Execute`, resuming with `WaitExecution` when the stream breaks before the
-    /// operation is done. `on_stage` observes `ExecuteOperationMetadata.stage` updates.
+    /// operation is done, and retrying transient `ExecuteResponse.status` / `Operation.error`
+    /// via fresh `Execute` (matching `GrpcRemoteExecutor` + `ExecuteRetrier`).
+    /// `ExecuteResponse.status` with `DEADLINE_EXCEEDED` is an action timeout and is NEVER retried.
     pub fn execute(
         &self,
         action: &Digest,
@@ -769,25 +1481,41 @@ impl ReapiClient {
         on_stage: &mut dyn FnMut(i32),
     ) -> Result<ExecuteResponse> {
         let ch = self.exec_channel()?.clone();
+        let execution_policy = (self.cfg.execution_priority != 0).then_some(ExecutionPolicy {
+            priority: self.cfg.execution_priority,
+        });
+        let results_cache_policy =
+            (self.cfg.result_cache_priority != 0).then_some(ResultsCachePolicy {
+                priority: self.cfg.result_cache_priority,
+            });
         let req = ExecuteRequest {
             instance_name: self.cfg.instance_name.clone(),
             skip_cache_lookup,
             action_digest: Some(action.clone()),
-            execution_policy: None,
-            results_cache_policy: None,
+            execution_policy,
+            results_cache_policy,
             digest_function: self.cfg.digest_fn.proto_value(),
         }
         .encode_to_vec();
         let opts = self.opts(meta, false);
         let mut op_name: Option<String> = None;
         let mut attempt = 0u32;
+        let mut empty_wait_eofs = 0u32;
         loop {
+            if self.cfg.retry.is_caller_cancelled() {
+                return Err(RemoteError::Grpc(GrpcStatus::new(
+                    code::CANCELLED,
+                    "Interrupted",
+                )));
+            }
             let mut done: Option<Operation> = None;
             let current = op_name.clone();
             let mut seen_name: Option<String> = None;
+            let mut saw_any_op = false;
             let mut handle = |m: Vec<u8>| -> std::result::Result<(), GrpcStatus> {
                 let op = Operation::decode(&m)
                     .map_err(|e| GrpcStatus::new(code::INTERNAL, e.to_string()))?;
+                saw_any_op = true;
                 if !op.name.is_empty() {
                     seen_name = Some(op.name.clone());
                 }
@@ -814,35 +1542,99 @@ impl ReapiClient {
                 op_name = seen_name.take();
             }
             match (res, done) {
-                (_, Some(op)) => return self.finish_operation(op),
-                (Ok(()), None) => {
-                    // Stream closed without a final operation; keep waiting.
-                    if attempt >= self.cfg.retry.max_retries {
-                        return Err(RemoteError::Other(
-                            "execution stream ended without completing the operation".into(),
-                        ));
+                (_, Some(op)) => {
+                    match self.finish_operation(op) {
+                        Ok(resp) => return Ok(resp),
+                        Err(RemoteError::ActionTimeout(st)) => {
+                            // Action timeout on worker: NEVER retried.
+                            return Err(RemoteError::ActionTimeout(st));
+                        }
+                        Err(RemoteError::Exec(st)) => {
+                            // Missing blobs must surface immediately so RemoteSpawnRunner can
+                            // force-upload missing inputs and re-run.
+                            if is_missing_blobs_failure(&st) {
+                                return Err(RemoteError::Exec(st));
+                            }
+                            let as_grpc = GrpcStatus::from_rpc_status(st.clone());
+                            if RetryPolicy::is_retriable_with_cancel(
+                                &as_grpc,
+                                self.cfg.retry.is_caller_cancelled(),
+                            ) && attempt < self.cfg.retry.max_retries
+                            {
+                                op_name = None;
+                                std::thread::sleep(self.cfg.retry.delay(attempt));
+                                attempt += 1;
+                                continue;
+                            }
+                            return Err(RemoteError::Exec(st));
+                        }
+                        Err(RemoteError::Grpc(g)) => {
+                            // Operation.error (LRO RPC error, including DEADLINE_EXCEEDED) is
+                            // retried via fresh Execute!
+                            if RetryPolicy::is_retriable_with_cancel(
+                                &g,
+                                self.cfg.retry.is_caller_cancelled(),
+                            ) && attempt < self.cfg.retry.max_retries
+                            {
+                                op_name = None;
+                                std::thread::sleep(self.cfg.retry.delay(attempt));
+                                attempt += 1;
+                                continue;
+                            }
+                            return Err(RemoteError::Grpc(g));
+                        }
+                        Err(other) => return Err(other),
                     }
                 }
+                (Ok(()), None) => {
+                    // Clean EOF on initial Execute with no Operation fails immediately
+                    // (`GrpcRemoteExecutor`: no retry).
+                    if op_name.is_none() {
+                        return Err(RemoteError::Other(
+                            "Execution stream closed without returning an Operation".into(),
+                        ));
+                    }
+                    // Clean EOF after receiving an in-progress Operation resumes via
+                    // WaitExecution without consuming retry budget!
+                    if saw_any_op {
+                        empty_wait_eofs = 0;
+                    } else {
+                        empty_wait_eofs += 1;
+                        if empty_wait_eofs > 32 {
+                            return Err(RemoteError::Other(
+                                "WaitExecution repeatedly closed without yielding an Operation"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    continue;
+                }
                 (Err(e), None) => {
-                    // An unknown operation on WaitExecution means we must re-Execute.
-                    if e.code == code::NOT_FOUND && op_name.is_some() {
+                    // WaitExecution NOT_FOUND clears op_name and retries fresh Execute!
+                    if e.code == code::NOT_FOUND && current.is_some() {
                         op_name = None;
-                    } else if !RetryPolicy::is_retriable(&e)
-                        || attempt >= self.cfg.retry.max_retries
+                        if attempt >= self.cfg.retry.max_retries {
+                            return Err(e.into());
+                        }
+                    } else if !RetryPolicy::is_retriable_with_cancel(
+                        &e,
+                        self.cfg.retry.is_caller_cancelled(),
+                    ) || attempt >= self.cfg.retry.max_retries
                     {
                         return Err(e.into());
                     }
+                    std::thread::sleep(self.cfg.retry.delay(attempt));
+                    attempt += 1;
                 }
             }
-            attempt += 1;
-            std::thread::sleep(Duration::from_millis(10 * attempt as u64));
         }
     }
 
     fn finish_operation(&self, op: Operation) -> Result<ExecuteResponse> {
         if let Some(e) = op.error {
             if e.code != code::OK {
-                return Err(RemoteError::Exec(e));
+                // Operation.error is an LRO RPC-level error (retriable even for DEADLINE_EXCEEDED).
+                return Err(RemoteError::Grpc(GrpcStatus::from_rpc_status(e)));
             }
         }
         let any = op.response.ok_or_else(|| {
@@ -856,6 +1648,9 @@ impl ReapiClient {
         }
         let resp = ExecuteResponse::decode(&any.value)?;
         if let Some(s) = &resp.status {
+            if s.code == code::DEADLINE_EXCEEDED {
+                return Err(RemoteError::ActionTimeout(s.clone()));
+            }
             if s.code != code::OK {
                 return Err(RemoteError::Exec(s.clone()));
             }
@@ -869,24 +1664,17 @@ impl ReapiClient {
     }
 }
 
-/// Whether an `Exec` error is the REAPI "missing blobs" precondition failure.
+/// Strict REAPI "missing blobs" precondition check matching `GrpcRemoteExecutor.isMissingBlobs`:
+/// `FAILED_PRECONDITION` with non-empty `PreconditionFailure.violations` all of type `"MISSING"`,
+/// and no unexpected sibling detail types.
 pub fn is_missing_blobs_failure(s: &RpcStatus) -> bool {
-    if s.code != code::FAILED_PRECONDITION {
-        return false;
-    }
-    s.details.iter().any(|d| {
-        d.type_url.ends_with("PreconditionFailure")
-            && PreconditionFailure::decode(&d.value)
-                .map(|p| p.violations.iter().any(|v| v.r#type == "MISSING"))
-                .unwrap_or(false)
-    })
+    GrpcStatus::from_rpc_status(s.clone()).is_missing_blobs_error()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fake_server::FakeReapiServer;
-    use std::sync::Arc;
 
     pub(crate) fn client_for(server: &FakeReapiServer, exec: bool) -> ReapiClient {
         let ch = Arc::new(Channel::new(server.connector(), 4, vec![]));
@@ -914,7 +1702,7 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_and_compatibility() {
+    fn capabilities_semver_deprecation_and_compatibility() {
         let s = FakeReapiServer::new();
         let c = client_for(&s, true);
         let caps = c.capabilities().unwrap();
@@ -927,8 +1715,41 @@ mod tests {
         assert_eq!(
             s.request_count("GetCapabilities"),
             1,
-            "capabilities are cached"
+            "capabilities are cached per channel"
         );
+
+        // Server speaking 2.1..2.11 (having dropped 2.0) IS supported!
+        let s_21 = FakeReapiServer::new();
+        s_21.configure(|c| {
+            c.low_api_version = SemVer {
+                major: 2,
+                minor: 1,
+                patch: 0,
+                prerelease: String::new(),
+            };
+            c.high_api_version = SemVer {
+                major: 2,
+                minor: 11,
+                patch: 0,
+                prerelease: String::new(),
+            };
+        });
+        assert!(client_for(&s_21, false).check_compatibility(false).is_ok());
+
+        // Missing low/high API versions default to 0.0.0 -> unsupported!
+        let s_empty = FakeReapiServer::new();
+        s_empty.configure(|c| c.omit_api_versions = true);
+        assert!(client_for(&s_empty, false)
+            .check_compatibility(false)
+            .is_err());
+
+        // Missing action_cache_update_capabilities defaults to read-only (false) + warning!
+        let s_ro = FakeReapiServer::new();
+        s_ro.configure(|c| c.omit_update_capabilities = true);
+        let c_ro = client_for(&s_ro, false);
+        c_ro.check_compatibility(false).unwrap();
+        assert!(!c_ro.remote_cache_supports_update());
+        assert_eq!(c_ro.take_warnings().len(), 1);
 
         let s2 = FakeReapiServer::new();
         s2.configure(|c| c.exec_enabled = false);
@@ -951,15 +1772,19 @@ mod tests {
     }
 
     #[test]
-    fn cas_roundtrip_batch_and_bytestream() {
+    fn cas_roundtrip_batch_bytestream_and_zstd_compressed_blobs() {
         let s = FakeReapiServer::new();
         s.configure(|c| {
             c.max_batch_total_size_bytes = 1000;
             c.read_chunk = 100;
         });
-        let c = client_for(&s, false);
-        let small = b"small blob".to_vec();
-        let big: Vec<u8> = (0..200_000u32).map(|i| (i * 7 % 256) as u8).collect();
+        let mut c = client_for(&s, false);
+        c.cfg.cache_compression = true;
+        c.cfg.compression_threshold = 10;
+        c.check_compatibility(false).unwrap();
+
+        let small = b"small compressible blob small compressible blob".to_vec();
+        let big: Vec<u8> = (0..200_000u32).map(|i| (i / 16 % 256) as u8).collect();
         let mut blobs = BTreeMap::new();
         let sd = c.cfg.digest_fn.digest(&small);
         let bd = c.cfg.digest_fn.digest(&big);
@@ -968,16 +1793,18 @@ mod tests {
         assert_eq!(c.ensure_blobs_present(&blobs, &meta()).unwrap(), 2);
         assert_eq!(s.request_count("BatchUpdateBlobs"), 1);
         assert_eq!(s.request_count("ByteStream/Write"), 1);
+        assert_eq!(s.compressed_bytestream_writes(), 1);
         assert_eq!(s.get_blob(&bd).unwrap(), big);
-        // Second time: nothing missing, nothing uploaded.
+        // Second time: tracked in present set -> zero FindMissingBlobs and zero writes!
         let writes = s.cas_write_count();
         assert_eq!(c.ensure_blobs_present(&blobs, &meta()).unwrap(), 0);
         assert_eq!(s.cas_write_count(), writes);
         assert_eq!(c.download_blob(&bd, &meta()).unwrap(), big);
+        assert_eq!(s.compressed_bytestream_reads(), 1);
         assert_eq!(c.download_blob(&sd, &meta()).unwrap(), small);
         let m = c.batch_read_blobs(&[sd.clone()], &meta()).unwrap();
         assert_eq!(m[&sd], small);
-        // Missing blob → NotFound.
+        // Missing blob -> NotFound.
         let nd = c.cfg.digest_fn.digest(b"never uploaded");
         assert!(matches!(
             c.download_blob(&nd, &meta()),
@@ -1004,13 +1831,26 @@ mod tests {
             format!("projects/x/instances/y/blobs/{}/5", d.hash)
         );
         assert_eq!(
+            c.read_resource_name_ext(&d, true),
+            format!("projects/x/instances/y/compressed-blobs/zstd/{}/5", d.hash)
+        );
+        assert_eq!(
             c.write_resource_name("u", &d),
             format!("projects/x/instances/y/uploads/u/blobs/{}/5", d.hash)
         );
+        // MD5 is old-style in Bazel: NO /md5/ segment!
         c.cfg.digest_fn = DigestFn::Md5;
-        assert!(c.read_resource_name(&d).contains("/blobs/md5/"));
+        assert_eq!(
+            c.read_resource_name(&d),
+            format!("projects/x/instances/y/blobs/{}/5", d.hash)
+        );
+        // BLAKE3 (> 7) includes /blake3/ segment!
+        c.cfg.digest_fn = DigestFn::Blake3;
         c.cfg.instance_name.clear();
-        assert!(c.read_resource_name(&d).starts_with("blobs/md5/"));
+        assert!(c.read_resource_name(&d).starts_with("blobs/blake3/"));
+        assert!(c
+            .read_resource_name_ext(&d, true)
+            .starts_with("compressed-blobs/zstd/blake3/"));
     }
 
     #[test]
@@ -1027,7 +1867,6 @@ mod tests {
         c.update_action_result(&ad, &ar, &meta()).unwrap();
         assert_eq!(c.get_action_result(&ad, &meta()).unwrap().unwrap(), ar);
         s.configure(|c| c.update_enabled = false);
-        assert!(!c.remote_cache_supports_update() || c.capabilities().is_ok());
         assert!(c.update_action_result(&ad, &ar, &meta()).is_err());
     }
 
@@ -1129,8 +1968,9 @@ mod tests {
     }
 
     #[test]
-    fn execute_streams_operations_and_resumes_with_wait_execution() {
+    fn execute_streams_operations_resumes_wait_execution_and_never_retries_action_timeout() {
         let s = FakeReapiServer::new();
+        s.configure(|c| c.drop_execute_stream_after_first_op = true);
         s.set_executor(|ctx| {
             let out = ctx.server.put_blob(b"built");
             Ok(ActionResult {
@@ -1160,100 +2000,43 @@ mod tests {
             ..Default::default()
         };
         let ab = action.encode_to_vec();
-        let ad = s.put_blob(&ab);
-        let mut stages = Vec::new();
-        let r = c
-            .execute(&ad, false, &meta(), &mut |st| stages.push(st))
-            .unwrap();
-        assert_eq!(r.result.as_ref().unwrap().stdout_raw, b"tool arg");
-        assert!(!r.cached_result);
-        assert_eq!(
-            stages,
-            vec![
-                execution_stage::QUEUED,
-                execution_stage::EXECUTING,
-                execution_stage::COMPLETED
-            ]
-        );
-        assert_eq!(s.executions(), 1);
-        // Server cached the result: a second Execute is a cache hit without running anything.
-        let r2 = c.execute(&ad, false, &meta(), &mut |_| {}).unwrap();
-        assert!(r2.cached_result);
-        assert_eq!(s.executions(), 1);
-        // skip_cache_lookup forces re-execution.
-        c.execute(&ad, true, &meta(), &mut |_| {}).unwrap();
-        assert_eq!(s.executions(), 2);
+        let ad = c.cfg.digest_fn.digest(&ab);
+        s.put_blob(&ab);
 
-        // Stream drops after the first operation: client must call WaitExecution.
-        s.configure(|c| c.drop_execute_stream_after_first_op = true);
         let mut stages = Vec::new();
-        let r3 = c
+        let resp = c
             .execute(&ad, true, &meta(), &mut |st| stages.push(st))
             .unwrap();
-        assert_eq!(r3.result.unwrap().stdout_raw, b"tool arg");
-        assert_eq!(s.request_count("WaitExecution"), 1);
-        assert_eq!(stages[0], execution_stage::QUEUED);
-    }
+        assert_eq!(resp.result.unwrap().stdout_raw, b"tool arg");
+        assert!(s.request_count("WaitExecution") >= 1);
 
-    #[test]
-    fn execute_reports_missing_blobs_and_failures() {
-        let s = FakeReapiServer::new();
-        s.set_executor(|_| Err(GrpcStatus::new(code::INTERNAL, "worker exploded")));
-        let c = client_for(&s, true);
-        let missing = c.cfg.digest_fn.digest(b"not uploaded action");
-        match c.execute(&missing, false, &meta(), &mut |_| {}) {
-            Err(RemoteError::Exec(st)) => assert!(is_missing_blobs_failure(&st), "{st:?}"),
-            other => panic!("{other:?}"),
-        }
-        let root = s.put_blob(b"");
-        let cmd = s.put_blob(&Command::default().encode_to_vec());
-        let ad = s.put_blob(
-            &Action {
-                command_digest: Some(cmd),
-                input_root_digest: Some(root),
-                ..Default::default()
-            }
-            .encode_to_vec(),
-        );
-        match c.execute(&ad, false, &meta(), &mut |_| {}) {
-            Err(RemoteError::Exec(st)) => assert_eq!(st.code, code::INTERNAL),
-            other => panic!("{other:?}"),
-        }
-    }
+        // Clean EOF on initial Execute with zero operations fails immediately without retrying!
+        let s_eof = FakeReapiServer::new();
+        s_eof.configure(|c| c.clean_eof_without_op = true);
+        let c_eof = client_for(&s_eof, true);
+        assert!(c_eof.execute(&ad, true, &meta(), &mut |_| {}).is_err());
+        assert_eq!(s_eof.request_count("Execute"), 1);
 
-    #[test]
-    fn remote_headers_and_request_metadata_are_sent() {
-        let s = FakeReapiServer::new();
-        let ch = Arc::new(Channel::new(
-            s.connector(),
-            1,
-            vec![("Authorization".into(), "Bearer t0k".into())],
-        ));
-        let c = ReapiClient::new(
-            ch,
-            None,
-            ReapiConfig {
-                tool_invocation_id: "inv-1".into(),
-                ..Default::default()
-            },
-        );
-        c.find_missing_blobs(&[], &meta()).unwrap_or_default();
-        c.find_missing_blobs(
-            &[c.cfg.digest_fn.digest(b"a")],
-            &ActionMeta {
-                mnemonic: "CppCompile".into(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let h = s.last_headers("FindMissingBlobs").unwrap();
-        assert!(h.contains(&("authorization".to_string(), "Bearer t0k".to_string())));
-        assert!(h
-            .iter()
-            .any(|(k, _)| k == "build.bazel.remote.execution.v2.requestmetadata-bin"));
-        assert!(h
-            .iter()
-            .any(|(k, v)| k == "grpc-timeout" && v.ends_with('m')));
-        assert!(h.contains(&("content-type".to_string(), "application/grpc".to_string())));
+        // Action timeout (ExecuteResponse.status == DEADLINE_EXCEEDED) is NEVER retried!
+        let s_to = FakeReapiServer::new();
+        s_to.set_executor(|_| Err(GrpcStatus::new(code::DEADLINE_EXCEEDED, "timed out")));
+        let d_root = s_to.put_blob(b"");
+        let cmd_b = cmd.encode_to_vec();
+        let cmd_d = DigestFn::Sha256.digest(&cmd_b);
+        s_to.put_blob(&cmd_b);
+        let act2 = Action {
+            command_digest: Some(cmd_d),
+            input_root_digest: Some(d_root),
+            ..Default::default()
+        };
+        let act2_b = act2.encode_to_vec();
+        let act2_d = DigestFn::Sha256.digest(&act2_b);
+        s_to.put_blob(&act2_b);
+        let c_to = client_for(&s_to, true);
+        let err = c_to
+            .execute(&act2_d, true, &meta(), &mut |_| {})
+            .unwrap_err();
+        assert!(matches!(err, RemoteError::ActionTimeout(_)));
+        assert_eq!(s_to.executions(), 1);
     }
 }

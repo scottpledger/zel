@@ -39,8 +39,8 @@ message BuildEvent {
     google.protobuf.Any details = 2;
   }
   message InvocationAttemptFinished {
-    google.protobuf.Any details = 3;
-    BuildStatus invocation_status = 4;
+    BuildStatus invocation_status = 3;
+    google.protobuf.Any details = 4;
   }
   message BuildEnqueued {
     google.protobuf.Any details = 1;
@@ -98,10 +98,10 @@ message PublishLifecycleEventRequest {
 }
 
 message PublishBuildToolEventStreamRequest {
-  bool check_preceding_lifecycle_events_present = 3;
   OrderedBuildEvent ordered_build_event = 4;
   repeated string notification_keywords = 5;
   string project_id = 6;
+  bool check_preceding_lifecycle_events_present = 7;
 }
 
 message PublishBuildToolEventStreamResponse {

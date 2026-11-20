@@ -228,6 +228,7 @@ message!(Duration { 1 seconds: i64, 2 nanos: i32 });
 message!(UInt32Value { 1 value: u32 });
 message!(
     /// `google.protobuf.Any`.
+    #[derive(Eq)]
     AnyMsg { 1 type_url: String, 2 value: Vec<u8> }
 );
 message!(
@@ -272,9 +273,14 @@ message!(Action {
     9 salt: Vec<u8>,
     10 platform: Option<Platform>,
 });
+message!(ScrubSalt { 1 salt: String });
 message!(
     /// Bazel's `CacheSalt` (`src/main/protobuf/cache_salt.proto`).
-    CacheSalt { 1 may_be_executed_remotely: bool, 2 workspace: String }
+    CacheSalt {
+        1 may_be_executed_remotely: bool,
+        2 workspace: String,
+        3 scrub_salt: Option<ScrubSalt>,
+    }
 );
 message!(ExecutedActionMetadata {
     1 worker: String,
@@ -320,9 +326,10 @@ message!(ExecuteRequest {
     9 digest_function: i32,
 });
 message!(LogFile { 1 digest: Option<Digest>, 2 human_readable: bool });
+message!(ServerLogEntry { 1 key: String, 2 value: Option<LogFile> });
 message!(ExecuteResponse {
     1 result: Option<ActionResult>, 2 cached_result: bool, 3 status: Option<RpcStatus>,
-    5 message: String,
+    4 server_logs: Vec<ServerLogEntry>, 5 message: String,
 });
 message!(ExecuteOperationMetadata {
     1 stage: i32, 2 action_digest: Option<Digest>, 3 stdout_stream_name: String,
@@ -369,16 +376,22 @@ message!(GetTreeResponse { 1 directories: Vec<Directory>, 2 next_page_token: Str
 message!(GetCapabilitiesRequest { 1 instance_name: String });
 message!(SemVer { 1 major: i32, 2 minor: i32, 3 patch: i32, 4 prerelease: String });
 message!(ActionCacheUpdateCapabilities { 1 update_enabled: bool });
+message!(PriorityRange { 1 min_priority: i32, 2 max_priority: i32 });
+message!(PriorityCapabilities { 1 priorities: Vec<PriorityRange> });
 message!(CacheCapabilities {
     1 digest_functions: Vec<i32>,
     2 action_cache_update_capabilities: Option<ActionCacheUpdateCapabilities>,
+    3 cache_priority_capabilities: Option<PriorityCapabilities>,
     4 max_batch_total_size_bytes: i64,
     5 symlink_absolute_path_strategy: i32,
     6 supported_compressors: Vec<i32>,
     7 supported_batch_update_compressors: Vec<i32>,
 });
 message!(ExecutionCapabilities {
-    1 digest_function: i32, 2 exec_enabled: bool, 4 supported_node_properties: Vec<String>,
+    1 digest_function: i32,
+    2 exec_enabled: bool,
+    3 execution_priority_capabilities: Option<PriorityCapabilities>,
+    4 supported_node_properties: Vec<String>,
     5 digest_functions: Vec<i32>,
 });
 message!(ServerCapabilities {
@@ -403,6 +416,17 @@ message!(
     /// `google.rpc.PreconditionFailure`.
     PreconditionFailure { 1 violations: Vec<PreconditionViolation> }
 );
+message!(
+    /// `google.rpc.RetryInfo`.
+    RetryInfo { 1 retry_delay: Option<Duration> }
+);
+
+/// `SymlinkAbsolutePathStrategy.Value`.
+pub mod symlink_absolute_path_strategy {
+    pub const UNKNOWN: i32 = 0;
+    pub const DISALLOWED: i32 = 1;
+    pub const ALLOWED: i32 = 2;
+}
 
 // google.bytestream
 message!(ReadRequest { 1 resource_name: String, 2 read_offset: i64, 3 read_limit: i64 });

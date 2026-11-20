@@ -12,14 +12,76 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `--credential_helper` support: the Bazel credential-helper protocol (`<helper> get`, request
-//! JSON `{"uri": ...}` on stdin, response JSON `{"expires": ..., "headers": {name: [values]}}`
-//! on stdout). OAuth via `--google_credentials` is not supported (it needs TLS).
+//! Authentication & credential providers mirroring Bazel's `authandtls`:
+//! - `CallCredentialsProvider` (`NO_CREDENTIALS`, per-RPC metadata + `refresh()`)
+//! - `CredentialHelperProvider` (`--credential_helper=[scope=]path`, exact/wildcard/default scope
+//!   precedence, `--credential_helper_timeout`, `--credential_helper_cache_duration` & RFC-3339
+//!   `expires`)
+//! - `GoogleAuthCallCredentialsProvider` (`--google_credentials`, `--google_default_credentials`,
+//!   `--google_auth_scopes`, OAuth2 refresh_token & service-account RS256 JWT token exchange,
+//!   1-second refresh throttle)
+//! - `NetrcCredentialsProvider` (`$NETRC` / `~/.netrc` with column-0 `#` comments and
+//!   `URI.getHost()` normalization)
 
 use crate::hpack::Header;
-use std::collections::BTreeMap;
-use std::io::Write;
+use crate::transport::{Connector, TcpConnector, TlsConfig, TlsConnector};
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use zel_util::base64_encode;
+
+/// Error returned while acquiring or refreshing call credentials.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialError {
+    /// Mirrors Bazel's `CredentialHelperException` (never swallowed by `RemoteSpawnCache`).
+    Helper(String),
+    /// General Google / OAuth / auth failure.
+    Auth(String),
+}
+
+impl CredentialError {
+    pub fn is_helper_error(&self) -> bool {
+        matches!(self, Self::Helper(_))
+    }
+}
+
+impl fmt::Display for CredentialError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Helper(m) | Self::Auth(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for CredentialError {}
+
+/// Mirrors Bazel's `CallCredentialsProvider`.
+pub trait CallCredentialsProvider: Send + Sync {
+    /// Returns lowercased `(header_name, header_value)` pairs to attach to an RPC/HTTP request
+    /// targeting `uri`.
+    fn get_credentials(&self, uri: &str) -> Result<Vec<Header>, CredentialError>;
+
+    /// Refreshes cached credentials (invoked on `UNAUTHENTICATED` / `PERMISSION_DENIED` or 401).
+    fn refresh(&self) -> Result<(), CredentialError>;
+}
+
+/// Mirrors `CallCredentialsProvider.NO_CREDENTIALS`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoCredentialsProvider;
+
+impl CallCredentialsProvider for NoCredentialsProvider {
+    fn get_credentials(&self, _uri: &str) -> Result<Vec<Header>, CredentialError> {
+        Ok(Vec::new())
+    }
+
+    fn refresh(&self) -> Result<(), CredentialError> {
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 enum Json {
@@ -171,6 +233,18 @@ impl P<'_> {
     }
 }
 
+fn parse_json_obj(s: &str) -> Result<BTreeMap<String, Json>, String> {
+    let mut p = P {
+        b: s.as_bytes(),
+        i: 0,
+    };
+    let v = p.value()?;
+    match v {
+        Json::Obj(m) => Ok(m),
+        _ => Err("JSON root is not an object".into()),
+    }
+}
+
 fn json_escape(s: &str) -> String {
     let mut o = String::new();
     for c in s.chars() {
@@ -245,6 +319,9 @@ impl GetCredentialsResponse {
 
 /// Parses an RFC 3339 timestamp (`YYYY-MM-DDTHH:MM:SS[.frac](Z|+HH:MM|-HH:MM)`) into Unix epoch seconds.
 pub fn parse_rfc3339_epoch_secs(s: &str) -> Result<i64, String> {
+    if !s.is_ascii() {
+        return Err(format!("invalid RFC 3339 timestamp '{s}'"));
+    }
     let t_pos = s
         .find(['T', 't'])
         .ok_or_else(|| format!("invalid RFC 3339 timestamp '{s}'"))?;
@@ -345,33 +422,210 @@ pub fn parse_rfc3339_epoch_secs(s: &str) -> Result<i64, String> {
     Ok(utc_secs)
 }
 
-/// Parses a credential-helper response into HTTP/2 request headers.
-pub fn parse_helper_response(out: &str) -> Result<Vec<Header>, String> {
-    let parsed = GetCredentialsResponse::parse(out)?;
-    let mut headers = Vec::new();
-    for (k, vals) in parsed.headers {
-        if !vals.is_empty() {
-            headers.push((k.to_ascii_lowercase(), vals.join(",")));
-        }
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
-    Ok(headers)
+}
+fn percent_decode_str(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) = (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
-fn extract_uri_host(uri: &str) -> &str {
+/// Extracts and normalizes the host component of `uri` following `URI.getHost()`:
+/// percent-decoded, IPv6 brackets removed, ASCII-lowercased.
+pub fn extract_uri_host(uri: &str) -> String {
+    if uri.starts_with("unix:") {
+        return String::new();
+    }
     let rest = uri.split_once("://").map(|(_, r)| r).unwrap_or(uri);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let hostport = authority
         .rsplit_once('@')
         .map(|(_, h)| h)
         .unwrap_or(authority);
-    if hostport.starts_with('[') {
-        hostport
-            .split(']')
-            .next()
-            .map(|s| s.trim_start_matches('['))
-            .unwrap_or(hostport)
+    let raw = if let Some(after_bracket) = hostport.strip_prefix('[') {
+        after_bracket.split(']').next().unwrap_or(after_bracket)
     } else {
-        hostport.split(':').next().unwrap_or(hostport)
+        match hostport.rsplit_once(':') {
+            Some((h, _)) if !h.contains(':') => h,
+            _ => hostport,
+        }
+    };
+    percent_decode_str(raw).to_ascii_lowercase()
+}
+
+/// Parses an RFC-3339 timestamp (`2030-01-01T00:00:00Z`, `2030-01-01T02:30:00+02:00`,
+/// optional fractional seconds) into `SystemTime`.
+pub fn parse_rfc3339(s: &str) -> Result<SystemTime, String> {
+    let s = s.trim();
+    if s.len() < 20 || !s.is_ascii() {
+        return Err(format!("invalid RFC-3339 timestamp: '{s}'"));
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' || (b[10] != b'T' && b[10] != b't') {
+        return Err(format!("invalid RFC-3339 date separator: '{s}'"));
+    }
+    let year: i64 = s[0..4].parse().map_err(|_| "bad year")?;
+    let month: i64 = s[5..7].parse().map_err(|_| "bad month")?;
+    let day: i64 = s[8..10].parse().map_err(|_| "bad day")?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err("month/day out of range".into());
+    }
+    let time_part = &s[11..];
+    if time_part.len() < 9 || time_part.as_bytes()[2] != b':' || time_part.as_bytes()[5] != b':' {
+        return Err("bad time format".into());
+    }
+    let hour: i64 = time_part[0..2].parse().map_err(|_| "bad hour")?;
+    let min: i64 = time_part[3..5].parse().map_err(|_| "bad minute")?;
+    let sec: i64 = time_part[6..8].parse().map_err(|_| "bad second")?;
+    if hour > 23 || min > 59 || sec > 60 {
+        return Err("time component out of range".into());
+    }
+
+    let mut rem = &time_part[8..];
+    let mut nanos: u32 = 0;
+    if let Some(after_dot) = rem.strip_prefix('.') {
+        let digits_len = after_dot.bytes().take_while(|c| c.is_ascii_digit()).count();
+        if digits_len == 0 {
+            return Err("empty fractional seconds".into());
+        }
+        let mut frac = after_dot[..digits_len.min(9)].to_string();
+        while frac.len() < 9 {
+            frac.push('0');
+        }
+        nanos = frac.parse().map_err(|_| "bad fractional seconds")?;
+        rem = &after_dot[digits_len..];
+    }
+
+    let offset_secs: i64 = if rem == "Z" || rem == "z" {
+        0
+    } else if rem.len() == 6
+        && (rem.starts_with('+') || rem.starts_with('-'))
+        && rem.as_bytes()[3] == b':'
+    {
+        let sign = if rem.starts_with('+') { 1i64 } else { -1i64 };
+        let oh: i64 = rem[1..3].parse().map_err(|_| "bad tz hour")?;
+        let om: i64 = rem[4..6].parse().map_err(|_| "bad tz minute")?;
+        sign * (oh * 3600 + om * 60)
+    } else {
+        return Err(format!("invalid timezone offset: '{rem}'"));
+    };
+
+    // Howard Hinnant civil-from-days / days-from-civil algorithm (exact proleptic Gregorian).
+    let y = year - if month <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    let unix_secs = days * 86400 + hour * 3600 + min * 60 + sec - offset_secs;
+
+    if unix_secs >= 0 {
+        Ok(UNIX_EPOCH + Duration::new(unix_secs as u64, nanos))
+    } else {
+        Ok(UNIX_EPOCH - Duration::from_secs((-unix_secs) as u64))
+    }
+}
+
+/// Parsed output of a credential-helper invocation.
+#[derive(Debug, Clone)]
+pub struct HelperOutput {
+    pub headers: Vec<Header>,
+    pub expires: Option<SystemTime>,
+}
+
+/// Parses a credential-helper response into request headers and optional expiry.
+pub fn parse_helper_response_with_expiry(out: &str) -> Result<HelperOutput, String> {
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return Ok(HelperOutput {
+            headers: Vec::new(),
+            expires: None,
+        });
+    }
+    let m = parse_json_obj(trimmed)
+        .map_err(|_| "credential helper output is not a JSON object".to_string())?;
+    let expires = match m.get("expires") {
+        Some(Json::Str(s)) => Some(parse_rfc3339(s)?),
+        Some(Json::Null) | None => None,
+        _ => return Err("\"expires\" must be an RFC-3339 string".into()),
+    };
+    let mut headers = Vec::new();
+    match m.get("headers") {
+        Some(Json::Obj(h)) => {
+            for (k, v) in h {
+                match v {
+                    Json::Arr(vals) => {
+                        let mut joined = Vec::new();
+                        for x in vals {
+                            if let Json::Str(s) = x {
+                                joined.push(s.clone());
+                            } else {
+                                return Err(format!("header {k}: values must be strings"));
+                            }
+                        }
+                        if !joined.is_empty() {
+                            headers.push((k.to_ascii_lowercase(), joined.join(",")));
+                        }
+                    }
+                    _ => return Err(format!("header {k}: expected an array of strings")),
+                }
+            }
+        }
+        Some(Json::Null) | None => {}
+        _ => return Err("\"headers\" must be a JSON object".into()),
+    }
+    Ok(HelperOutput { headers, expires })
+}
+
+/// Parses a credential-helper response into request headers.
+pub fn parse_helper_response(out: &str) -> Result<Vec<Header>, String> {
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return Err("credential helper output is empty".into());
+    }
+    Ok(parse_helper_response_with_expiry(out)?.headers)
+}
+
+/// Returns scope match specificity (`usize::MAX` for exact host, `1 + domain.len()` for
+/// `*.domain` matching both subdomains and apex `domain`, `0` for unscoped default).
+fn scope_specificity(scope: Option<&str>, host: &str) -> Option<usize> {
+    match scope {
+        None | Some("") => Some(0),
+        Some(sc) => {
+            if host.is_empty() {
+                return None;
+            }
+            if let Some(domain) = sc.strip_prefix("*.") {
+                let dom = domain.to_ascii_lowercase();
+                if host == dom || host.ends_with(&format!(".{dom}")) {
+                    Some(1 + dom.len())
+                } else {
+                    None
+                }
+            } else if host.eq_ignore_ascii_case(sc) {
+                Some(usize::MAX)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -435,86 +689,11 @@ pub fn expand_credential_helper_path(raw: &str, workspace: Option<&std::path::Pa
     raw.to_string()
 }
 
-/// Resolves `--credential_helper=[scope=]path` entries following Bazel's `CredentialHelperProvider`:
-/// exact host match > longest matching `*.domain` wildcard (matching both `domain` and subdomains
-/// of `domain`) > unscoped default helper; later registrations override earlier ones of equal scope.
-#[derive(Debug, Clone, Default)]
-pub struct CredentialHelperProvider {
-    default_helper: Option<String>,
-    exact_hosts: BTreeMap<String, String>,
-    wildcard_domains: BTreeMap<String, String>,
-}
-
-impl CredentialHelperProvider {
-    pub fn from_specs(specs: &[String], workspace: Option<&std::path::Path>) -> Self {
-        let mut p = Self::default();
-        for spec in specs {
-            if spec.is_empty() {
-                continue;
-            }
-            p.add(spec, workspace);
-        }
-        p
-    }
-
-    pub fn add(&mut self, spec: &str, workspace: Option<&std::path::Path>) {
-        let expand = |raw: &str| expand_credential_helper_path(raw, workspace);
-        match spec.split_once('=') {
-            Some((scope, path)) if !scope.is_empty() => {
-                let expanded = expand(path);
-                if let Some(domain) = scope.strip_prefix("*.") {
-                    self.wildcard_domains
-                        .insert(domain.to_ascii_lowercase(), expanded);
-                } else {
-                    self.exact_hosts
-                        .insert(scope.to_ascii_lowercase(), expanded);
-                }
-            }
-            Some((_, path)) => {
-                self.default_helper = Some(expand(path));
-            }
-            None => {
-                self.default_helper = Some(expand(spec));
-            }
-        }
-    }
-
-    pub fn helper_for_uri(&self, uri: &str) -> Option<&str> {
-        let host = extract_uri_host(uri).to_ascii_lowercase();
-        if !host.is_empty() {
-            if let Some(exact) = self.exact_hosts.get(&host) {
-                return Some(exact.as_str());
-            }
-            // Check wildcard domains from most specificsubdomain suffix to least specific,
-            // including matching the bare domain itself (`*.example.com` matches `example.com`).
-            let mut best: Option<(usize, &str)> = None;
-            for (domain, helper) in &self.wildcard_domains {
-                if (host == *domain || host.ends_with(&format!(".{domain}")))
-                    && best.is_none_or(|(len, _)| domain.len() >= len)
-                {
-                    best = Some((domain.len(), helper.as_str()));
-                }
-            }
-            if let Some((_, helper)) = best {
-                return Some(helper);
-            }
-        }
-        self.default_helper.as_deref()
-    }
-}
-
 /// `--credential_helper=[scope=]path`: whether the helper applies to `uri`'s host.
 pub fn helper_applies(spec: &str, uri: &str) -> Option<String> {
-    let host = extract_uri_host(uri).to_ascii_lowercase();
+    let host = extract_uri_host(uri);
     match spec.split_once('=') {
-        Some((scope, path)) => {
-            let scope_lc = scope.to_ascii_lowercase();
-            let ok = match scope_lc.strip_prefix("*.") {
-                Some(suffix) => host == suffix || host.ends_with(&format!(".{suffix}")),
-                None => scope_lc == host,
-            };
-            ok.then(|| path.to_string())
-        }
+        Some((scope, path)) => scope_specificity(Some(scope), &host).map(|_| path.to_string()),
         None => Some(spec.to_string()),
     }
 }
@@ -569,19 +748,917 @@ pub fn invoke_credential_helper_process(
         .map_err(|e| format!("Credential helper '{path}' returned invalid output: {e}"))
 }
 
-/// Runs the helper (`<path> get`) for `uri` and returns the headers to attach.
+fn resolve_helper_path(raw: &str, workspace: Option<&Path>) -> PathBuf {
+    if raw == "%workspace%"
+        || raw
+            .strip_prefix("%workspace%")
+            .is_some_and(|r| r.starts_with(['/', '\\']))
+    {
+        return PathBuf::from(expand_credential_helper_path(raw, workspace));
+    }
+    if let Some(rel) = raw.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rel);
+        }
+    }
+    PathBuf::from(raw)
+}
+
+fn is_etxtbsy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        // ETXTBSY == 26 on Linux, macOS, and BSDs: raised transiently when a concurrent
+        // thread forks while a newly-written executable's writable fd is closing.
+        err.raw_os_error() == Some(26)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Ok(val) => return Ok(val),
+            Err(e) if is_etxtbsy(&e) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis((attempt as u64 * 2).min(20)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn invoke_helper_process(
+    path: &Path,
+    uri: &str,
+    timeout: Duration,
+) -> Result<HelperOutput, CredentialError> {
+    let display = path.display().to_string();
+    #[cfg(windows)]
+    let exec_buf = PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+    #[cfg(windows)]
+    let exec_path: &Path = exec_buf.as_path();
+    #[cfg(not(windows))]
+    let exec_path: &Path = path;
+    let mut child = retry_etxtbsy(|| {
+        Command::new(exec_path)
+            .arg("get")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_remove("RUN_UNDER_RUNFILES")
+            .spawn()
+    })
+    .map_err(|e| {
+        CredentialError::Helper(format!(
+            "Failed to get credentials for '{uri}' from helper '{display}': {e}"
+        ))
+    })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(format!("{{\"uri\":\"{}\"}}", json_escape(uri)).as_bytes());
+    }
+
+    let mut stdout_pipe = child.stdout.take().unwrap();
+    let mut stderr_pipe = child.stderr.take().unwrap();
+    let out_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout_pipe.read_to_string(&mut s);
+        s
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr_pipe.read_to_string(&mut s);
+        s
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if !timeout.is_zero() && start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CredentialError::Helper(format!(
+                        "Credential helper '{display}' timed out after {:?} for '{uri}'",
+                        timeout
+                    )));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => {
+                return Err(CredentialError::Helper(format!(
+                    "Failed waiting for credential helper '{display}': {e}"
+                )));
+            }
+        }
+    };
+
+    let stdout_str = out_handle.join().unwrap_or_default();
+    let stderr_str = err_handle.join().unwrap_or_default();
+    if !status.success() {
+        return Err(CredentialError::Helper(format!(
+            "Credential helper '{display}' failed: {}",
+            stderr_str.trim()
+        )));
+    }
+    parse_helper_response_with_expiry(&stdout_str).map_err(|e| {
+        CredentialError::Helper(format!(
+            "Credential helper '{display}' returned invalid output: {e}"
+        ))
+    })
+}
+
+/// Runs a single helper spec (`<path> get`) for `uri` and returns headers.
 pub fn run_credential_helper(spec: &str, uri: &str) -> Result<Vec<Header>, String> {
     let Some(path) = helper_applies(spec, uri) else {
         return Ok(vec![]);
     };
-    let resp = invoke_credential_helper_process(&path, uri, None, None)?;
-    let mut headers = Vec::new();
-    for (k, vals) in resp.headers {
-        if !vals.is_empty() {
-            headers.push((k.to_ascii_lowercase(), vals.join(",")));
+    invoke_helper_process(Path::new(&path), uri, Duration::from_secs(5))
+        .map(|o| o.headers)
+        .map_err(|e| e.to_string())
+}
+
+#[derive(Clone)]
+struct HelperEntry {
+    scope: Option<String>,
+    path: PathBuf,
+}
+
+struct CachedCreds {
+    headers: Vec<Header>,
+    expires_at: Option<Instant>,
+    expires_wall: Option<SystemTime>,
+}
+
+impl CachedCreds {
+    fn is_valid(&self) -> bool {
+        if let Some(wall) = self.expires_wall {
+            return SystemTime::now() < wall;
+        }
+        if let Some(inst) = self.expires_at {
+            return Instant::now() < inst;
+        }
+        false
+    }
+}
+
+/// Multi-helper `--credential_helper` provider with Bazel scope resolution, timeout, and
+/// `CredentialCacheExpiry` caching.
+pub struct CredentialHelperProvider {
+    entries: Vec<HelperEntry>,
+    timeout: Duration,
+    cache_duration: Duration,
+    cache: Mutex<HashMap<String, CachedCreds>>,
+}
+
+impl CredentialHelperProvider {
+    pub fn from_specs(
+        specs: &[String],
+        workspace: Option<&Path>,
+        timeout: Duration,
+        cache_duration: Duration,
+    ) -> Self {
+        let entries = specs
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|spec| match spec.split_once('=') {
+                Some((sc, p)) => HelperEntry {
+                    scope: Some(sc.to_string()),
+                    path: resolve_helper_path(p, workspace),
+                },
+                None => HelperEntry {
+                    scope: None,
+                    path: resolve_helper_path(spec, workspace),
+                },
+            })
+            .collect();
+        Self {
+            entries,
+            timeout,
+            cache_duration,
+            cache: Mutex::new(HashMap::new()),
         }
     }
-    Ok(headers)
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Picks the highest-precedence helper for `uri`:
+    /// exact host > longest `*.domain` wildcard > unscoped default; later flag wins on tie.
+    pub fn select_helper(&self, uri: &str) -> Option<&Path> {
+        let host = extract_uri_host(uri);
+        let mut best: Option<(usize, &Path)> = None;
+        for entry in &self.entries {
+            if let Some(prio) = scope_specificity(entry.scope.as_deref(), &host) {
+                if best.map(|(p, _)| prio >= p).unwrap_or(true) {
+                    best = Some((prio, entry.path.as_path()));
+                }
+            }
+        }
+        best.map(|(_, p)| p)
+    }
+
+    pub fn helper_for_uri(&self, uri: &str) -> Option<&str> {
+        self.select_helper(uri).and_then(|p| p.to_str())
+    }
+}
+
+impl CallCredentialsProvider for CredentialHelperProvider {
+    fn get_credentials(&self, uri: &str) -> Result<Vec<Header>, CredentialError> {
+        let Some(helper_path) = self.select_helper(uri) else {
+            return Ok(Vec::new());
+        };
+        {
+            let mut cache = self.cache.lock().unwrap();
+            if let Some(entry) = cache.get(uri) {
+                if entry.is_valid() {
+                    return Ok(entry.headers.clone());
+                }
+                cache.remove(uri);
+            }
+        }
+        let out = invoke_helper_process(helper_path, uri, self.timeout)?;
+        let cached = match out.expires {
+            Some(wall) => CachedCreds {
+                headers: out.headers.clone(),
+                expires_at: None,
+                expires_wall: Some(wall),
+            },
+            None if !self.cache_duration.is_zero() => CachedCreds {
+                headers: out.headers.clone(),
+                expires_at: Some(Instant::now() + self.cache_duration),
+                expires_wall: None,
+            },
+            None => {
+                return Ok(out.headers);
+            }
+        };
+        if cached.is_valid() {
+            self.cache.lock().unwrap().insert(uri.to_string(), cached);
+        }
+        Ok(out.headers)
+    }
+
+    fn refresh(&self) -> Result<(), CredentialError> {
+        self.cache.lock().unwrap().clear();
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GoogleAuthCallCredentialsProvider (`--google_credentials` / ADC)
+// ---------------------------------------------------------------------------
+
+struct GoogleTokenState {
+    access_token: Option<String>,
+    expires_at: Option<Instant>,
+    last_refresh: Instant,
+}
+
+/// Mirrors Bazel's `GoogleAuthCallCredentialsProvider`, including the 1-second stopwatch
+/// throttle on `refresh()`.
+pub struct GoogleAuthCallCredentialsProvider {
+    credentials_path: PathBuf,
+    scopes: Vec<String>,
+    tls: TlsConfig,
+    state: Mutex<GoogleTokenState>,
+}
+
+fn well_known_adc_path_with<F>(is_windows: bool, get_env: &mut F) -> Option<PathBuf>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    const ADC_FILE: &str = "application_default_credentials.json";
+    if let Some(cfg_dir) = get_env("CLOUDSDK_CONFIG").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(cfg_dir).join(ADC_FILE));
+    }
+    if is_windows {
+        if let Some(appdata) = get_env("APPDATA").filter(|s| !s.is_empty()) {
+            return Some(PathBuf::from(appdata).join("gcloud").join(ADC_FILE));
+        }
+        return get_env("USERPROFILE").filter(|s| !s.is_empty()).map(|u| {
+            PathBuf::from(u)
+                .join("AppData")
+                .join("Roaming")
+                .join("gcloud")
+                .join(ADC_FILE)
+        });
+    }
+    get_env("HOME").filter(|s| !s.is_empty()).map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("gcloud")
+            .join(ADC_FILE)
+    })
+}
+
+fn resolve_adc_path_with<F>(is_windows: bool, get_env: &mut F) -> Result<PathBuf, CredentialError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(p) = get_env("GOOGLE_APPLICATION_CREDENTIALS").filter(|s| !s.is_empty()) {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Ok(pb);
+        }
+        return Err(CredentialError::Auth(format!(
+            "GOOGLE_APPLICATION_CREDENTIALS file not found: {}",
+            pb.display()
+        )));
+    }
+    if let Some(adc) = well_known_adc_path_with(is_windows, get_env) {
+        if adc.is_file() {
+            return Ok(adc);
+        }
+    }
+    Err(CredentialError::Auth(
+        "Unable to find Application Default Credentials".into(),
+    ))
+}
+
+impl GoogleAuthCallCredentialsProvider {
+    pub fn from_file(path: PathBuf, scopes: Vec<String>, tls: TlsConfig) -> Self {
+        Self {
+            credentials_path: path,
+            scopes: if scopes.is_empty() {
+                vec!["https://www.googleapis.com/auth/cloud-platform".to_string()]
+            } else {
+                scopes
+            },
+            tls,
+            state: Mutex::new(GoogleTokenState {
+                access_token: None,
+                expires_at: None,
+                // Stopwatch starts on construction (mirrors GoogleAuthCallCredentialsProvider).
+                last_refresh: Instant::now(),
+            }),
+        }
+    }
+
+    pub fn from_adc(scopes: Vec<String>, tls: TlsConfig) -> Result<Self, CredentialError> {
+        Self::from_adc_with_env(scopes, tls, cfg!(windows), |name| std::env::var(name).ok())
+    }
+
+    fn from_adc_with_env<F>(
+        scopes: Vec<String>,
+        tls: TlsConfig,
+        is_windows: bool,
+        mut get_env: F,
+    ) -> Result<Self, CredentialError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let path = resolve_adc_path_with(is_windows, &mut get_env)?;
+        Ok(Self::from_file(path, scopes, tls))
+    }
+
+    fn fetch_token(&self) -> Result<(String, Option<Duration>), CredentialError> {
+        let raw = std::fs::read_to_string(&self.credentials_path).map_err(|e| {
+            CredentialError::Auth(format!(
+                "Failed to read Google credentials '{}': {e}",
+                self.credentials_path.display()
+            ))
+        })?;
+        let obj = parse_json_obj(raw.trim()).map_err(|e| {
+            CredentialError::Auth(format!(
+                "Invalid Google credentials JSON '{}': {e}",
+                self.credentials_path.display()
+            ))
+        })?;
+
+        // 1. Direct pre-issued access_token JSON (`{"access_token": "...", "expires_in": 3600}`)
+        if let Some(Json::Str(tok)) = obj.get("access_token").or_else(|| obj.get("token")) {
+            let ttl = match obj.get("expires_in") {
+                Some(Json::Num(secs)) if *secs > 0.0 => Some(Duration::from_secs_f64(*secs)),
+                _ => Some(Duration::from_secs(3600)),
+            };
+            return Ok((tok.clone(), ttl));
+        }
+
+        let cred_type = match obj.get("type") {
+            Some(Json::Str(t)) => t.as_str(),
+            _ => "",
+        };
+        let token_uri = match obj.get("token_uri") {
+            Some(Json::Str(u)) if !u.is_empty() => u.as_str(),
+            _ => "https://oauth2.googleapis.com/token",
+        };
+
+        match cred_type {
+            "authorized_user" => {
+                let get_s = |k: &str| -> Result<&str, CredentialError> {
+                    match obj.get(k) {
+                        Some(Json::Str(s)) => Ok(s.as_str()),
+                        _ => Err(CredentialError::Auth(format!(
+                            "authorized_user credentials missing '{k}'"
+                        ))),
+                    }
+                };
+                let body = format!(
+                    "grant_type=refresh_token&client_id={}&client_secret={}&refresh_token={}",
+                    url_form_encode(get_s("client_id")?),
+                    url_form_encode(get_s("client_secret")?),
+                    url_form_encode(get_s("refresh_token")?),
+                );
+                exchange_oauth_token(token_uri, &body, &self.tls)
+            }
+            "service_account" => {
+                let client_email = match obj.get("client_email") {
+                    Some(Json::Str(s)) => s.as_str(),
+                    _ => {
+                        return Err(CredentialError::Auth(
+                            "service_account credentials missing 'client_email'".into(),
+                        ))
+                    }
+                };
+                let private_key = match obj.get("private_key") {
+                    Some(Json::Str(s)) => s.as_str(),
+                    _ => {
+                        return Err(CredentialError::Auth(
+                            "service_account credentials missing 'private_key'".into(),
+                        ))
+                    }
+                };
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let scope_joined = self.scopes.join(" ");
+                let jwt = sign_rs256_jwt(client_email, &scope_joined, token_uri, now, private_key)?;
+                let body = format!(
+                    "grant_type={}&assertion={}",
+                    url_form_encode("urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                    url_form_encode(&jwt),
+                );
+                exchange_oauth_token(token_uri, &body, &self.tls)
+            }
+            other => Err(CredentialError::Auth(format!(
+                "Unsupported Google credentials type: '{other}'"
+            ))),
+        }
+    }
+}
+
+impl CallCredentialsProvider for GoogleAuthCallCredentialsProvider {
+    fn get_credentials(&self, _uri: &str) -> Result<Vec<Header>, CredentialError> {
+        let mut st = self.state.lock().unwrap();
+        let valid = st.access_token.is_some()
+            && st
+                .expires_at
+                .map(|exp| Instant::now() < exp)
+                .unwrap_or(true);
+        if !valid {
+            let (tok, ttl) = self.fetch_token()?;
+            st.access_token = Some(tok);
+            st.expires_at = ttl.map(|d| Instant::now() + d);
+            st.last_refresh = Instant::now();
+        }
+        let tok = st.access_token.as_ref().unwrap();
+        Ok(vec![("authorization".to_string(), format!("Bearer {tok}"))])
+    }
+
+    fn refresh(&self) -> Result<(), CredentialError> {
+        let mut st = self.state.lock().unwrap();
+        // Bazel's GoogleAuthCallCredentialsProvider throttles refresh() calls within 1 second.
+        if st.last_refresh.elapsed() <= Duration::from_secs(1) {
+            return Ok(());
+        }
+        let (tok, ttl) = self.fetch_token()?;
+        st.access_token = Some(tok);
+        st.expires_at = ttl.map(|d| Instant::now() + d);
+        st.last_refresh = Instant::now();
+        Ok(())
+    }
+}
+
+fn base64url_encode(data: &[u8]) -> String {
+    base64_encode(data)
+        .trim_end_matches('=')
+        .replace('+', "-")
+        .replace('/', "_")
+}
+
+fn url_form_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn sign_rs256_jwt(
+    iss: &str,
+    scope: &str,
+    aud: &str,
+    now_secs: u64,
+    private_key_pem: &str,
+) -> Result<String, CredentialError> {
+    let header_b64 = base64url_encode(b"{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+    let claims = format!(
+        "{{\"iss\":\"{}\",\"scope\":\"{}\",\"aud\":\"{}\",\"iat\":{},\"exp\":{}}}",
+        json_escape(iss),
+        json_escape(scope),
+        json_escape(aud),
+        now_secs,
+        now_secs + 3600
+    );
+    let claims_b64 = base64url_encode(claims.as_bytes());
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    let key_path = std::env::temp_dir().join(format!("zel-sa-key-{}.pem", zel_util::uuid_v4()));
+    {
+        let mut f = std::fs::File::create(&key_path).map_err(|e| {
+            CredentialError::Auth(format!("Failed to stage temporary signing key: {e}"))
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        if let Err(e) = f.write_all(private_key_pem.as_bytes()) {
+            let _ = std::fs::remove_file(&key_path);
+            return Err(CredentialError::Auth(format!(
+                "Failed writing temporary signing key: {e}"
+            )));
+        }
+    }
+
+    let mut child = match Command::new("openssl")
+        .arg("dgst")
+        .arg("-sha256")
+        .arg("-sign")
+        .arg(&key_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&key_path);
+            return Err(CredentialError::Auth(format!(
+                "Failed invoking openssl to sign service_account JWT: {e}"
+            )));
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(signing_input.as_bytes());
+    }
+    let out = child.wait_with_output();
+    let _ = std::fs::remove_file(&key_path);
+    let out = out.map_err(|e| CredentialError::Auth(format!("openssl dgst failed: {e}")))?;
+    if !out.status.success() {
+        return Err(CredentialError::Auth(format!(
+            "Failed signing service_account JWT: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let sig_b64 = base64url_encode(&out.stdout);
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+fn exchange_oauth_token(
+    token_uri: &str,
+    form_body: &str,
+    tls: &TlsConfig,
+) -> Result<(String, Option<Duration>), CredentialError> {
+    let (tls_scheme, rest) = if let Some(r) = token_uri.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = token_uri.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return Err(CredentialError::Auth(format!(
+            "Unsupported token_uri scheme: '{token_uri}'"
+        )));
+    };
+    let (hostport, path) = match rest.split_once('/') {
+        Some((hp, p)) => (hp, format!("/{p}")),
+        None => (rest, "/".to_string()),
+    };
+    let default_port = if tls_scheme { 443 } else { 80 };
+    let (host, port) = if let Some(r) = hostport.strip_prefix('[') {
+        let (h, p) = r
+            .split_once(']')
+            .ok_or_else(|| CredentialError::Auth("bad IPv6 host in token_uri".into()))?;
+        let port = match p.strip_prefix(':') {
+            Some(ps) => ps
+                .parse()
+                .map_err(|_| CredentialError::Auth("bad port in token_uri".into()))?,
+            None => default_port,
+        };
+        (h.to_string(), port)
+    } else if let Some((h, p)) = hostport.rsplit_once(':') {
+        let port = p
+            .parse()
+            .map_err(|_| CredentialError::Auth("bad port in token_uri".into()))?;
+        (h.to_string(), port)
+    } else {
+        (hostport.to_string(), default_port)
+    };
+
+    let mut transport = if tls_scheme {
+        TlsConnector {
+            host: host.clone(),
+            port,
+            connect_timeout: Duration::from_secs(10),
+            alpn: None,
+            tls: tls.clone(),
+            unix_proxy: None,
+        }
+        .connect()
+    } else {
+        TcpConnector::new(host.clone(), port, Duration::from_secs(10)).connect()
+    }
+    .map_err(|e| CredentialError::Auth(format!("Failed connecting to {token_uri}: {e}")))?;
+
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{form_body}",
+        form_body.len()
+    );
+    transport
+        .writer
+        .write_all(req.as_bytes())
+        .and_then(|_| transport.writer.flush())
+        .map_err(|e| CredentialError::Auth(format!("Failed sending OAuth token request: {e}")))?;
+
+    let mut resp = Vec::new();
+    transport
+        .reader
+        .read_to_end(&mut resp)
+        .map_err(|e| CredentialError::Auth(format!("Failed reading OAuth token response: {e}")))?;
+    (transport.shutdown)();
+
+    let header_end = resp
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| CredentialError::Auth("Malformed HTTP response from token_uri".into()))?;
+    let head = String::from_utf8_lossy(&resp[..header_end]);
+    let status_line = head.lines().next().unwrap_or("");
+    let status_code: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body_bytes = &resp[header_end + 4..];
+    let body_text = String::from_utf8_lossy(body_bytes);
+    if !(200..300).contains(&status_code) {
+        return Err(CredentialError::Auth(format!(
+            "OAuth token exchange failed with HTTP {status_code}: {}",
+            body_text.trim()
+        )));
+    }
+    let obj = parse_json_obj(body_text.trim()).map_err(|e| {
+        CredentialError::Auth(format!("Invalid JSON from OAuth token endpoint: {e}"))
+    })?;
+    let tok = match obj.get("access_token") {
+        Some(Json::Str(t)) => t.clone(),
+        _ => {
+            return Err(CredentialError::Auth(
+                "OAuth token response missing 'access_token'".into(),
+            ))
+        }
+    };
+    let ttl = match obj.get("expires_in") {
+        Some(Json::Num(secs)) if *secs > 0.0 => Some(Duration::from_secs_f64(*secs)),
+        _ => Some(Duration::from_secs(3600)),
+    };
+    Ok((tok, ttl))
+}
+
+// ---------------------------------------------------------------------------
+// NetrcCredentialsProvider (`NetrcParser` + `NetrcCredentials`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default)]
+struct NetrcEntry {
+    login: String,
+    password: String,
+}
+
+/// Mirrors Bazel's `NetrcCredentials` + `NetrcParser`:
+/// - `#` starts a comment ONLY when column 0 of the raw line is `#`;
+/// - `macdef` consumes lines until a blank line;
+/// - matched entry always emits `Authorization: Basic base64(login + ":" + password)` with
+///   omitted `login` or `password` treated as `""`;
+/// - lookup key is `URI.getHost()` (lowercased, percent-decoded, IPv6 brackets removed).
+#[derive(Debug, Clone, Default)]
+pub struct NetrcCredentialsProvider {
+    machines: HashMap<String, NetrcEntry>,
+    default_entry: Option<NetrcEntry>,
+}
+
+impl NetrcCredentialsProvider {
+    pub fn parse(content: &str) -> Result<Self, String> {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut in_macdef = false;
+        for raw_line in content.lines() {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            if in_macdef {
+                if line.trim().is_empty() {
+                    in_macdef = false;
+                }
+                continue;
+            }
+            if line.starts_with('#') {
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            for tok in trimmed.split_ascii_whitespace() {
+                if tok == "macdef" {
+                    in_macdef = true;
+                    break;
+                }
+                tokens.push(tok.to_string());
+            }
+        }
+
+        let mut machines = HashMap::new();
+        let mut default_entry = None;
+        let mut i = 0usize;
+        while i < tokens.len() {
+            match tokens[i].as_str() {
+                "machine" => {
+                    i += 1;
+                    if i >= tokens.len() {
+                        return Err("Unexpected EOF after 'machine' in .netrc".into());
+                    }
+                    let name = tokens[i].clone();
+                    i += 1;
+                    let entry = Self::parse_entry(&tokens, &mut i)?;
+                    machines.insert(name, entry);
+                }
+                "default" => {
+                    i += 1;
+                    default_entry = Some(Self::parse_entry(&tokens, &mut i)?);
+                    // Bazel NetrcParser stops after `default`.
+                    break;
+                }
+                other => return Err(format!("Unexpected token in .netrc: '{other}'")),
+            }
+        }
+        Ok(Self {
+            machines,
+            default_entry,
+        })
+    }
+
+    fn parse_entry(tokens: &[String], i: &mut usize) -> Result<NetrcEntry, String> {
+        let mut entry = NetrcEntry::default();
+        while *i < tokens.len() {
+            match tokens[*i].as_str() {
+                "login" => {
+                    *i += 1;
+                    if *i >= tokens.len() {
+                        return Err("Unexpected EOF after 'login'".into());
+                    }
+                    entry.login = tokens[*i].clone();
+                    *i += 1;
+                }
+                "password" => {
+                    *i += 1;
+                    if *i >= tokens.len() {
+                        return Err("Unexpected EOF after 'password'".into());
+                    }
+                    entry.password = tokens[*i].clone();
+                    *i += 1;
+                }
+                "account" => {
+                    *i += 1;
+                    if *i >= tokens.len() {
+                        return Err("Unexpected EOF after 'account'".into());
+                    }
+                    *i += 1;
+                }
+                "machine" | "default" | "macdef" => break,
+                other => return Err(format!("Unexpected token in .netrc machine: '{other}'")),
+            }
+        }
+        Ok(entry)
+    }
+
+    pub fn from_file(path: &Path) -> Result<Self, String> {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("Failed to parse {}: {e}", path.display()))?;
+        // ISO-8859-1 / Latin-1 decoding matching Bazel's NetrcParser.
+        let text: String = bytes.into_iter().map(|b| b as char).collect();
+        Self::parse(&text).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+    }
+
+    pub fn from_client_env(client_env: &BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        let candidate = client_env
+            .get("NETRC")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                client_env
+                    .get("HOME")
+                    .filter(|s| !s.is_empty())
+                    .map(|h| PathBuf::from(h).join(".netrc"))
+            })
+            .or_else(|| {
+                client_env
+                    .get("USERPROFILE")
+                    .filter(|s| !s.is_empty())
+                    .map(|h| PathBuf::from(h).join(".netrc"))
+            });
+        let Some(path) = candidate else {
+            return Ok(None);
+        };
+        match std::fs::metadata(&path) {
+            Ok(_) => Self::from_file(&path).map(Some),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Failed to parse {}: {e}", path.display())),
+        }
+    }
+
+    pub fn try_from_env() -> Result<Option<Self>, String> {
+        let mut env = BTreeMap::new();
+        for key in ["NETRC", "HOME", "USERPROFILE"] {
+            if let Ok(val) = std::env::var(key) {
+                env.insert(key.to_string(), val);
+            }
+        }
+        Self::from_client_env(&env)
+    }
+
+    pub fn from_env() -> Option<Self> {
+        Self::try_from_env().ok().flatten()
+    }
+}
+
+impl CallCredentialsProvider for NetrcCredentialsProvider {
+    fn get_credentials(&self, uri: &str) -> Result<Vec<Header>, CredentialError> {
+        let host = extract_uri_host(uri);
+        if host.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(entry) = self.machines.get(&host).or(self.default_entry.as_ref()) else {
+            return Ok(Vec::new());
+        };
+        let raw = format!("{}:{}", entry.login, entry.password);
+        // ISO-8859-1 bytes for Basic encoding, matching Bazel's NetrcCredentials.
+        let latin1: Vec<u8> = raw.chars().map(|c| c as u8).collect();
+        Ok(vec![(
+            "authorization".to_string(),
+            format!("Basic {}", base64_encode(&latin1)),
+        )])
+    }
+
+    fn refresh(&self) -> Result<(), CredentialError> {
+        Ok(())
+    }
+}
+
+/// Chains `CredentialHelperProvider` -> `GoogleAuthCallCredentialsProvider` -> `NetrcCredentialsProvider`,
+/// matching Bazel's credential precedence (`CredentialModule` + `GoogleAuthUtils`).
+pub struct CompositeCredentialsProvider {
+    pub helper: Option<CredentialHelperProvider>,
+    pub google: Option<GoogleAuthCallCredentialsProvider>,
+    pub netrc: Option<NetrcCredentialsProvider>,
+}
+
+impl CallCredentialsProvider for CompositeCredentialsProvider {
+    fn get_credentials(&self, uri: &str) -> Result<Vec<Header>, CredentialError> {
+        if let Some(h) = &self.helper {
+            if h.select_helper(uri).is_some() {
+                return h.get_credentials(uri);
+            }
+        }
+        if let Some(g) = &self.google {
+            return g.get_credentials(uri);
+        }
+        if let Some(n) = &self.netrc {
+            return n.get_credentials(uri);
+        }
+        Ok(Vec::new())
+    }
+
+    fn refresh(&self) -> Result<(), CredentialError> {
+        if let Some(h) = &self.helper {
+            h.refresh()?;
+        }
+        if let Some(g) = &self.google {
+            g.refresh()?;
+        }
+        if let Some(n) = &self.netrc {
+            n.refresh()?;
+        }
+        Ok(())
+    }
 }
 
 /// Resolves the best matching helper from `specs` and returns its HTTP/2 headers for `uri`.
@@ -596,7 +1673,12 @@ pub fn run_credential_helpers_in_workspace(
     uri: &str,
     workspace: Option<&std::path::Path>,
 ) -> Result<Vec<Header>, String> {
-    let provider = CredentialHelperProvider::from_specs(specs, workspace);
+    let provider = CredentialHelperProvider::from_specs(
+        specs,
+        workspace,
+        Duration::from_secs(5),
+        Duration::from_secs(30 * 60),
+    );
     let Some(path) = provider.helper_for_uri(uri) else {
         return Ok(vec![]);
     };
@@ -615,13 +1697,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_helper_output() {
-        let h = parse_helper_response(
+    fn parses_helper_output_and_rfc3339_expiry() {
+        let out = parse_helper_response_with_expiry(
             r#"{"expires":"2030-01-01T00:00:00Z","headers":{"Authorization":["Bearer abc"],"X-Multi":["a","b"]}}"#,
         )
         .unwrap();
-        assert!(h.contains(&("authorization".to_string(), "Bearer abc".to_string())));
-        assert!(h.contains(&("x-multi".to_string(), "a,b".to_string())));
+        assert!(out
+            .headers
+            .contains(&("authorization".to_string(), "Bearer abc".to_string())));
+        assert!(out
+            .headers
+            .contains(&("x-multi".to_string(), "a,b".to_string())));
+        assert!(out.expires.unwrap() > SystemTime::now());
         assert!(parse_helper_response("[]").is_err());
         assert!(parse_helper_response(r#"{"headers":{"a":"s"}}"#).is_err());
         assert_eq!(
@@ -631,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn scopes() {
+    fn scopes_precedence_and_apex_matching() {
         assert_eq!(
             helper_applies("/bin/h", "grpc://a.b:1"),
             Some("/bin/h".into())
@@ -640,29 +1727,124 @@ mod tests {
             helper_applies("*.b=/bin/h", "grpc://a.b:1"),
             Some("/bin/h".into())
         );
+        // `*.example.com` also matches apex `example.com` in Bazel.
+        assert_eq!(
+            helper_applies("*.example.com=/bin/h", "https://Example.COM:443"),
+            Some("/bin/h".into())
+        );
         assert_eq!(helper_applies("*.b=/bin/h", "grpc://x.c:1"), None);
         assert_eq!(
             helper_applies("a.b=/bin/h", "grpc://a.b"),
             Some("/bin/h".into())
         );
+
+        let prov = CredentialHelperProvider::from_specs(
+            &[
+                "/default/h".into(),
+                "*.example.com=/wild/h".into(),
+                "*.sub.example.com=/subwild/h".into(),
+                "api.sub.example.com=/exact/h".into(),
+            ],
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
+        assert_eq!(
+            prov.select_helper("https://api.sub.example.com"),
+            Some(Path::new("/exact/h"))
+        );
+        assert_eq!(
+            prov.select_helper("https://other.sub.example.com"),
+            Some(Path::new("/subwild/h"))
+        );
+        assert_eq!(
+            prov.select_helper("https://example.com"),
+            Some(Path::new("/wild/h"))
+        );
+        assert_eq!(
+            prov.select_helper("https://unrelated.org"),
+            Some(Path::new("/default/h"))
+        );
+    }
+
+    #[test]
+    fn netrc_credentials_and_google_refresh_throttle() {
+        let netrc = NetrcCredentialsProvider::parse(
+            "# comment\nmachine foo.example.org login alice password s#cret\n",
+        )
+        .unwrap();
+        let hdrs = netrc
+            .get_credentials("https://Foo.Ex%61mple.ORG:8443/cas")
+            .unwrap();
+        assert_eq!(
+            hdrs,
+            vec![(
+                "authorization".to_string(),
+                format!("Basic {}", base64_encode(b"alice:s#cret"))
+            )]
+        );
+
+        let dir = std::env::temp_dir().join(format!("zel-gcred-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cred_file = dir.join("creds.json");
+        std::fs::write(&cred_file, r#"{"access_token":"tok-1"}"#).unwrap();
+        let g = GoogleAuthCallCredentialsProvider::from_file(
+            cred_file.clone(),
+            vec![],
+            TlsConfig::default(),
+        );
+        assert_eq!(
+            g.get_credentials("https://remote.example.com").unwrap(),
+            vec![("authorization".to_string(), "Bearer tok-1".to_string())]
+        );
+        // Update file on disk; immediate refresh() within 1s must be throttled!
+        std::fs::write(&cred_file, r#"{"access_token":"tok-2"}"#).unwrap();
+        g.refresh().unwrap();
+        assert_eq!(
+            g.get_credentials("https://remote.example.com").unwrap()[0].1,
+            "Bearer tok-1"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
     #[test]
-    fn runs_a_real_helper_script() {
+    fn runs_a_real_helper_script_and_caches_until_refresh() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("zel-cred-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
+        let count_file = dir.join("count");
         let script = dir.join("helper.sh");
-        std::fs::write(&script, "#!/bin/sh\nread req\ncase \"$1\" in get) echo '{\"headers\":{\"Authorization\":[\"Bearer from-helper\"]}}';; *) exit 1;; esac\n").unwrap();
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nread req\nn=$(cat {} 2>/dev/null || echo 0)\nn=$((n + 1))\necho $n > {}\ncase \"$1\" in get) echo '{{\"headers\":{{\"Authorization\":[\"Bearer tok-'$n'\"]}}}}';; *) exit 1;; esac\n",
+                count_file.display(),
+                count_file.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let h = run_credential_helper(script.to_str().unwrap(), "grpc://h:1").unwrap();
+
+        let prov = CredentialHelperProvider::from_specs(
+            &[script.to_str().unwrap().to_string()],
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(600),
+        );
+        let h1 = prov.get_credentials("https://h:443").unwrap();
+        let h2 = prov.get_credentials("https://h:443").unwrap();
         assert_eq!(
-            h,
-            vec![(
-                "authorization".to_string(),
-                "Bearer from-helper".to_string()
-            )]
+            h1,
+            vec![("authorization".to_string(), "Bearer tok-1".to_string())]
+        );
+        assert_eq!(h1, h2);
+        prov.refresh().unwrap();
+        let h3 = prov.get_credentials("https://h:443").unwrap();
+        assert_eq!(
+            h3,
+            vec![("authorization".to_string(), "Bearer tok-2".to_string())]
         );
         assert!(run_credential_helper("/nonexistent/helper", "grpc://h:1").is_err());
         let _ = std::fs::remove_dir_all(&dir);
@@ -708,6 +1890,8 @@ mod tests {
                 "host.sub.example.com=/abs/exact".to_string(),
             ],
             Some(ws),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
         );
         assert_eq!(
             provider.helper_for_uri("https://host.sub.example.com/x"),
@@ -736,6 +1920,8 @@ mod tests {
                 "exact.example.com=%workspace%".to_string(),
             ],
             Some(win_ws),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
         );
         assert_eq!(
             win_provider.helper_for_uri("https://exact.example.com/x"),
@@ -763,5 +1949,479 @@ mod tests {
             ),
             "/tools/wild"
         );
+    }
+
+    #[test]
+    fn netrc_from_client_env_distinguishes_missing_from_malformed_or_unreadable() {
+        let tmp = std::env::temp_dir().join(format!("zel-netrc-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Empty client_env -> Ok(None).
+        assert!(NetrcCredentialsProvider::from_client_env(&BTreeMap::new())
+            .unwrap()
+            .is_none());
+
+        // Non-existent $HOME/.netrc -> Ok(None) (`GoogleAuthUtilsTest.testNetrc_netrcNotExist_shouldIgnore`).
+        let missing_home = tmp.join("missing-home");
+        let mut env_missing = BTreeMap::new();
+        env_missing.insert("HOME".into(), missing_home.to_string_lossy().into_owned());
+        assert!(NetrcCredentialsProvider::from_client_env(&env_missing)
+            .unwrap()
+            .is_none());
+
+        // Non-existent $NETRC does NOT fall back to an existing $HOME/.netrc
+        // (`GoogleAuthUtilsTest.testNetrc_netrcFromNetrcEnvNotExist_shouldIgnore`).
+        let valid_home = tmp.join("valid-home");
+        std::fs::create_dir_all(&valid_home).unwrap();
+        std::fs::write(
+            valid_home.join(".netrc"),
+            "machine foo.example.org login foouser password foopass\n",
+        )
+        .unwrap();
+        let mut env_netrc_missing = BTreeMap::new();
+        env_netrc_missing.insert("HOME".into(), valid_home.to_string_lossy().into_owned());
+        env_netrc_missing.insert(
+            "NETRC".into(),
+            tmp.join("does-not-exist.netrc")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        assert!(
+            NetrcCredentialsProvider::from_client_env(&env_netrc_missing)
+                .unwrap()
+                .is_none()
+        );
+
+        // Malformed .netrc via $HOME -> Err("Failed to parse ...").
+        let bad_home = tmp.join("bad-home");
+        std::fs::create_dir_all(&bad_home).unwrap();
+        std::fs::write(bad_home.join(".netrc"), "machine\n").unwrap();
+        let mut env_bad_home = BTreeMap::new();
+        env_bad_home.insert("HOME".into(), bad_home.to_string_lossy().into_owned());
+        let err = NetrcCredentialsProvider::from_client_env(&env_bad_home).unwrap_err();
+        assert!(err.contains("Failed to parse"), "unexpected error: {err}");
+
+        // Unreadable path (directory at $NETRC) -> Err("Failed to parse ...").
+        let dir_netrc = tmp.join("dir.netrc");
+        std::fs::create_dir_all(&dir_netrc).unwrap();
+        let mut env_dir = BTreeMap::new();
+        env_dir.insert("NETRC".into(), dir_netrc.to_string_lossy().into_owned());
+        let dir_err = NetrcCredentialsProvider::from_client_env(&env_dir).unwrap_err();
+        assert!(
+            dir_err.contains("Failed to parse"),
+            "unexpected error: {dir_err}"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable = tmp.join("unreadable.netrc");
+            std::fs::write(&unreadable, "machine foo login a password b\n").unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Only assert permission error when not running as root (root bypasses mode 000).
+            if std::fs::File::open(&unreadable).is_err() {
+                let mut env_unreadable = BTreeMap::new();
+                env_unreadable.insert("NETRC".into(), unreadable.to_string_lossy().into_owned());
+                let perm_err =
+                    NetrcCredentialsProvider::from_client_env(&env_unreadable).unwrap_err();
+                assert!(
+                    perm_err.contains("Failed to parse"),
+                    "unexpected error: {perm_err}"
+                );
+            }
+            let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600));
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn adc_resolves_env_override_cloudsdk_config_windows_appdata_and_unix_home() {
+        let tmp = std::env::temp_dir().join(format!("zel-adc-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let explicit = tmp.join("explicit.json");
+        std::fs::write(&explicit, r#"{"access_token":"tok-explicit"}"#).unwrap();
+
+        let cloudsdk_dir = tmp.join("custom-gcloud");
+        std::fs::create_dir_all(&cloudsdk_dir).unwrap();
+        std::fs::write(
+            cloudsdk_dir.join("application_default_credentials.json"),
+            r#"{"access_token":"tok-cloudsdk"}"#,
+        )
+        .unwrap();
+
+        let appdata = tmp.join("AppData").join("Roaming");
+        std::fs::create_dir_all(appdata.join("gcloud")).unwrap();
+        std::fs::write(
+            appdata
+                .join("gcloud")
+                .join("application_default_credentials.json"),
+            r#"{"access_token":"tok-win-appdata"}"#,
+        )
+        .unwrap();
+
+        let userprofile = tmp.join("Users").join("alice");
+        std::fs::create_dir_all(userprofile.join("AppData").join("Roaming").join("gcloud"))
+            .unwrap();
+        std::fs::write(
+            userprofile
+                .join("AppData")
+                .join("Roaming")
+                .join("gcloud")
+                .join("application_default_credentials.json"),
+            r#"{"access_token":"tok-win-userprofile"}"#,
+        )
+        .unwrap();
+
+        let unix_home = tmp.join("unix-home");
+        std::fs::create_dir_all(unix_home.join(".config").join("gcloud")).unwrap();
+        std::fs::write(
+            unix_home
+                .join(".config")
+                .join("gcloud")
+                .join("application_default_credentials.json"),
+            r#"{"access_token":"tok-unix-home"}"#,
+        )
+        .unwrap();
+
+        let lookup = |map: &BTreeMap<&str, String>, k: &str| map.get(k).cloned();
+
+        // 1. GOOGLE_APPLICATION_CREDENTIALS wins over CLOUDSDK_CONFIG, APPDATA, and HOME.
+        let mut env_explicit = BTreeMap::new();
+        env_explicit.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            explicit.to_string_lossy().into_owned(),
+        );
+        env_explicit.insert(
+            "CLOUDSDK_CONFIG",
+            cloudsdk_dir.to_string_lossy().into_owned(),
+        );
+        env_explicit.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_explicit.insert("HOME", unix_home.to_string_lossy().into_owned());
+        let p_exp = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_explicit, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_exp.get_credentials("https://remote.example.com").unwrap()[0].1,
+            "Bearer tok-explicit"
+        );
+
+        // Missing GOOGLE_APPLICATION_CREDENTIALS errors instead of falling back to well-known ADC.
+        let mut env_bad_explicit = env_explicit.clone();
+        env_bad_explicit.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            tmp.join("missing.json").to_string_lossy().into_owned(),
+        );
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_bad_explicit, k),
+        )
+        .is_err());
+
+        // Empty GOOGLE_APPLICATION_CREDENTIALS is ignored; CLOUDSDK_CONFIG wins on both OSes.
+        let mut env_cloudsdk = BTreeMap::new();
+        env_cloudsdk.insert("GOOGLE_APPLICATION_CREDENTIALS", String::new());
+        env_cloudsdk.insert(
+            "CLOUDSDK_CONFIG",
+            cloudsdk_dir.to_string_lossy().into_owned(),
+        );
+        env_cloudsdk.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_cloudsdk.insert("HOME", unix_home.to_string_lossy().into_owned());
+        for is_win in [false, true] {
+            let p_cs = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+                vec![],
+                TlsConfig::default(),
+                is_win,
+                |k| lookup(&env_cloudsdk, k),
+            )
+            .unwrap();
+            assert_eq!(
+                p_cs.get_credentials("https://remote.example.com").unwrap()[0].1,
+                "Bearer tok-cloudsdk"
+            );
+        }
+
+        // CLOUDSDK_CONFIG pointing to a dir without ADC does NOT fall back to APPDATA or HOME.
+        let empty_cfg = tmp.join("empty-gcloud");
+        std::fs::create_dir_all(&empty_cfg).unwrap();
+        let mut env_empty_cs = BTreeMap::new();
+        env_empty_cs.insert("CLOUDSDK_CONFIG", empty_cfg.to_string_lossy().into_owned());
+        env_empty_cs.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_empty_cs.insert("HOME", unix_home.to_string_lossy().into_owned());
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_empty_cs, k),
+        )
+        .is_err());
+
+        // 2. Windows well-known path: %APPDATA%\gcloud\application_default_credentials.json.
+        let mut env_win = BTreeMap::new();
+        env_win.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_win.insert("USERPROFILE", userprofile.to_string_lossy().into_owned());
+        let p_win = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_win, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_win.get_credentials("https://remote.example.com").unwrap()[0].1,
+            "Bearer tok-win-appdata"
+        );
+
+        // Windows fallback when APPDATA is unset: %USERPROFILE%\AppData\Roaming\gcloud\...
+        let mut env_win_up = BTreeMap::new();
+        env_win_up.insert("USERPROFILE", userprofile.to_string_lossy().into_owned());
+        let p_win_up = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_win_up, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_win_up
+                .get_credentials("https://remote.example.com")
+                .unwrap()[0]
+                .1,
+            "Bearer tok-win-userprofile"
+        );
+
+        // Windows with no env vars returns Err cleanly without panicking.
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |_| None,
+        )
+        .is_err());
+
+        // 3. Unix well-known path: $HOME/.config/gcloud/application_default_credentials.json.
+        let mut env_unix = BTreeMap::new();
+        env_unix.insert("HOME", unix_home.to_string_lossy().into_owned());
+        let p_unix = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            false,
+            |k| lookup(&env_unix, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_unix
+                .get_credentials("https://remote.example.com")
+                .unwrap()[0]
+                .1,
+            "Bearer tok-unix-home"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn composite_matching_empty_helper_does_not_fall_through_to_google_or_netrc() {
+        assert_eq!(parse_helper_response("{}").unwrap(), Vec::<Header>::new());
+        assert_eq!(
+            parse_helper_response(r#"{"headers":{}}"#).unwrap(),
+            Vec::<Header>::new()
+        );
+
+        let tmp = std::env::temp_dir().join(format!("zel-comp-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        #[cfg(unix)]
+        let (helper_obj, helper_hdrs) = {
+            use std::os::unix::fs::PermissionsExt;
+            let h1 = tmp.join("empty-obj.sh");
+            std::fs::write(&h1, "#!/bin/sh\ncat >/dev/null\necho '{}'\n").unwrap();
+            std::fs::set_permissions(&h1, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let h2 = tmp.join("empty-hdrs.sh");
+            std::fs::write(&h2, "#!/bin/sh\ncat >/dev/null\necho '{\"headers\":{}}'\n").unwrap();
+            std::fs::set_permissions(&h2, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (h1, h2)
+        };
+        #[cfg(windows)]
+        let (helper_obj, helper_hdrs) = {
+            let h1 = tmp.join("empty-obj.cmd");
+            std::fs::write(&h1, "@echo off\r\necho {}\r\n").unwrap();
+            let h2 = tmp.join("empty-hdrs.cmd");
+            std::fs::write(&h2, "@echo off\r\necho {\"headers\":{}}\r\n").unwrap();
+            (h1, h2)
+        };
+
+        let helper = CredentialHelperProvider::from_specs(
+            &[
+                format!("*.anon.example={}", helper_obj.display()),
+                format!("explicit.anon.example={}", helper_hdrs.display()),
+            ],
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
+
+        let g_file = tmp.join("google.json");
+        std::fs::write(&g_file, r#"{"access_token":"google-fallback-tok"}"#).unwrap();
+        let google =
+            GoogleAuthCallCredentialsProvider::from_file(g_file, vec![], TlsConfig::default());
+
+        let netrc =
+            NetrcCredentialsProvider::parse("default login fallbackuser password fallbackpass\n")
+                .unwrap();
+
+        let composite = CompositeCredentialsProvider {
+            helper: Some(helper),
+            google: Some(google),
+            netrc: Some(netrc.clone()),
+        };
+
+        // Matching helper returning `{}` -> explicit empty headers; must NOT attach Google or netrc!
+        assert_eq!(
+            composite
+                .get_credentials("https://api.anon.example:443/cas")
+                .unwrap(),
+            Vec::<Header>::new()
+        );
+        // Matching helper returning `{"headers":{}}` -> explicit empty headers; must NOT fall through!
+        assert_eq!(
+            composite
+                .get_credentials("https://explicit.anon.example:443/cas")
+                .unwrap(),
+            Vec::<Header>::new()
+        );
+        // Non-matching host (`select_helper` is `None`) -> falls through to Google fallback.
+        assert_eq!(
+            composite
+                .get_credentials("https://other.example:443/cas")
+                .unwrap(),
+            vec![(
+                "authorization".to_string(),
+                "Bearer google-fallback-tok".to_string()
+            )]
+        );
+
+        // With Google absent, matching empty helper still returns empty headers while non-matching
+        // host falls through to netrc.
+        let composite_netrc_only = CompositeCredentialsProvider {
+            helper: Some(CredentialHelperProvider::from_specs(
+                &[format!("*.anon.example={}", helper_obj.display())],
+                None,
+                Duration::from_secs(5),
+                Duration::from_secs(60),
+            )),
+            google: None,
+            netrc: Some(netrc),
+        };
+        assert_eq!(
+            composite_netrc_only
+                .get_credentials("https://api.anon.example:443/cas")
+                .unwrap(),
+            Vec::<Header>::new()
+        );
+        assert_eq!(
+            composite_netrc_only
+                .get_credentials("https://other.example:443/cas")
+                .unwrap(),
+            vec![(
+                "authorization".to_string(),
+                format!("Basic {}", base64_encode(b"fallbackuser:fallbackpass"))
+            )]
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn extract_uri_host_and_rfc3339_handle_multibyte_utf8_without_panicking() {
+        assert_eq!(extract_uri_host("https://%é/cas"), "%é");
+        assert_eq!(extract_uri_host("https://%日/cas"), "%日");
+        assert_eq!(extract_uri_host("https://%🦀/cas"), "%🦀");
+        assert_eq!(extract_uri_host("https://host%/cas"), "host%");
+        assert_eq!(extract_uri_host("https://host%a/cas"), "host%a");
+        assert_eq!(extract_uri_host("https://host%zz/cas"), "host%zz");
+        assert_eq!(
+            extract_uri_host("https://CAF%C3%A9.EXAMPLE:443/cas"),
+            "café.example"
+        );
+        assert!(parse_rfc3339("2026-01-10T12:00:0éZ").is_err());
+        assert!(parse_rfc3339("2026-01-10T12:00:00+日0").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_retries_transient_etxtbsy_and_surfaces_persistent_busy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut transient = 0u32;
+        assert_eq!(
+            retry_etxtbsy(|| {
+                transient += 1;
+                if transient < 3 {
+                    Err(std::io::Error::from_raw_os_error(26))
+                } else {
+                    Ok("ready")
+                }
+            })
+            .unwrap(),
+            "ready"
+        );
+        assert_eq!(transient, 3);
+
+        let mut persistent = 0u32;
+        let err = retry_etxtbsy::<()>(|| {
+            persistent += 1;
+            Err(std::io::Error::from_raw_os_error(26))
+        })
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(26));
+        assert_eq!(persistent, 21);
+
+        let dir = std::env::temp_dir().join(format!("zel-remote-etxtbsy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper_bin = dir.join("busy_helper.sh");
+        std::fs::write(
+            &helper_bin,
+            "#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer BUSY_OK\"]}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let write_fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&helper_bin)
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            drop(write_fd);
+        });
+
+        let provider = CredentialHelperProvider::from_specs(
+            &[format!("example.com={}", helper_bin.display())],
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
+        let hdrs = provider
+            .get_credentials("https://example.com:443/cas")
+            .unwrap();
+        releaser.join().unwrap();
+        assert_eq!(
+            hdrs,
+            vec![("authorization".to_string(), "Bearer BUSY_OK".to_string())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

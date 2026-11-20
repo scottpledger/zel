@@ -542,6 +542,30 @@ impl BlazeRuntime {
         } else {
             None
         };
+        if downloader_config_error.is_none()
+            && module_resolution_failure.is_none()
+            && not_in_workspace.is_none()
+            && !matches!(command, "build" | "test" | "coverage")
+        {
+            let prev = zel_events::bes::drain_previous_uploads_ext(
+                command == "shutdown",
+                zel_events::bes::DEFAULT_PREVIOUS_UPLOAD_MAX_WAIT,
+            );
+            if prev.warnings.is_empty() && prev.waited > std::time::Duration::from_millis(100) {
+                let ms = prev.waited.as_millis();
+                writeln_bytes(
+                    &mut stderr,
+                    &format!(
+                        "INFO: Waited for the background upload of the Build Event Protocol for {}.{:03} seconds.",
+                        ms / 1000,
+                        ms % 1000
+                    ),
+                );
+            }
+            for w in prev.warnings {
+                writeln_bytes(&mut stderr, &format!("WARNING: {w}"));
+            }
+        }
         let exit_code = match command {
             _ if downloader_config_error.is_some() => {
                 crate::query_cmd::emit_deprecation_warnings(command, cmd_args, &mut stderr);
@@ -800,6 +824,7 @@ impl BlazeRuntime {
             command,
             &self.dirs.output_base.to_string(),
             env_inv_id.as_deref(),
+            &self.client_env(),
         );
         if !has_explicit_inv_id && env_inv_id.is_some() {
             writeln_bytes(
@@ -981,7 +1006,10 @@ impl BlazeRuntime {
             {
                 writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
             }
-            if let Some(dc) = parsed.get_str("disk_cache").filter(|s| !s.is_empty()) {
+            if let Some(dc) = parsed
+                .get_str("disk_cache")
+                .filter(|s| !s.is_empty() && *s != ".")
+            {
                 let abs = if std::path::Path::new(dc).is_absolute() {
                     std::path::PathBuf::from(dc)
                 } else {

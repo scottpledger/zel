@@ -40,6 +40,7 @@ pub mod resource_converter;
 pub mod singlejar;
 pub mod terminal;
 pub mod zip;
+pub mod zstd;
 
 /// Exit codes shared by Bazel client and server, matching `ExitCode.java`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -632,6 +633,488 @@ pub fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
+pub fn from_hex(s: &str) -> Option<Vec<u8>> {
+    let b = s.as_bytes();
+    if b.len() % 2 != 0 {
+        return None;
+    }
+    let val = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity(b.len() / 2);
+    for pair in b.chunks(2) {
+        out.push((val(pair[0])? << 4) | val(pair[1])?);
+    }
+    Some(out)
+}
+
+pub fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = ((c[0] as u32) << 16)
+            | ((*c.get(1).unwrap_or(&0) as u32) << 8)
+            | (*c.get(2).unwrap_or(&0) as u32);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+pub fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for c in s.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            _ => return Err(format!("invalid base64 character '{}'", c as char)),
+        };
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    if s.len() % 4 == 1 {
+        return Err("invalid base64 length".to_string());
+    }
+    Ok(out)
+}
+
+/// Generates a standard RFC 4122 version-4 UUID string (`xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx`).
+pub fn uuid_v4() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u128;
+    let mut seed = Vec::with_capacity(32);
+    seed.extend_from_slice(&nanos.to_le_bytes());
+    seed.extend_from_slice(&pid.to_le_bytes());
+    seed.extend_from_slice(&seq.to_le_bytes());
+    let mut b = sha256::digest(&seed);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    format!(
+        "{}-{}-{}-{}-{}",
+        to_hex(&b[0..4]),
+        to_hex(&b[4..6]),
+        to_hex(&b[6..8]),
+        to_hex(&b[8..10]),
+        to_hex(&b[10..16]),
+    )
+}
+
+/// FIPS 180-4 SHA-384 and SHA-512 implementations.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+pub mod sha512 {
+    const K512: [u64; 80] = [
+        0x428a2f98d728ae22,
+        0x7137449123ef65cd,
+        0xb5c0fbcfec4d3b2f,
+        0xe9b5dba58189dbbc,
+        0x3956c25bf348b538,
+        0x59f111f1b605d019,
+        0x923f82a4af194f9b,
+        0xab1c5ed5da6d8118,
+        0xd807aa98a3030242,
+        0x12835b0145706fbe,
+        0x243185be4ee4b28c,
+        0x550c7dc3d5ffb4e2,
+        0x72be5d74f27b896f,
+        0x80deb1fe3b1696b1,
+        0x9bdc06a725c71235,
+        0xc19bf174cf692694,
+        0xe49b69c19ef14ad2,
+        0xefbe4786384f25e3,
+        0x0fc19dc68b8cd5b5,
+        0x240ca1cc77ac9c65,
+        0x2de92c6f592b0275,
+        0x4a7484aa6ea6e483,
+        0x5cb0a9dcbd41fbd4,
+        0x76f988da831153b5,
+        0x983e5152ee66dfab,
+        0xa831c66d2db43210,
+        0xb00327c898fb213f,
+        0xbf597fc7beef0ee4,
+        0xc6e00bf33da88fc2,
+        0xd5a79147930aa725,
+        0x06ca6351e003826f,
+        0x142929670a0e6e70,
+        0x27b70a8546d22ffc,
+        0x2e1b21385c26c926,
+        0x4d2c6dfc5ac42aed,
+        0x53380d139d95b3df,
+        0x650a73548baf63de,
+        0x766a0abb3c77b2a8,
+        0x81c2c92e47edaee6,
+        0x92722c851482353b,
+        0xa2bfe8a14cf10364,
+        0xa81a664bbc423001,
+        0xc24b8b70d0f89791,
+        0xc76c51a30654be30,
+        0xd192e819d6ef5218,
+        0xd69906245565a910,
+        0xf40e35855771202a,
+        0x106aa07032bbd1b8,
+        0x19a4c116b8d2d0c8,
+        0x1e376c085141ab53,
+        0x2748774cdf8eeb99,
+        0x34b0bcb5e19b48a8,
+        0x391c0cb3c5c95a63,
+        0x4ed8aa4ae3418acb,
+        0x5b9cca4f7763e373,
+        0x682e6ff3d6b2b8a3,
+        0x748f82ee5defb2fc,
+        0x78a5636f43172f60,
+        0x84c87814a1f0ab72,
+        0x8cc702081a6439ec,
+        0x90befffa23631e28,
+        0xa4506cebde82bde9,
+        0xbef9a3f7b2c67915,
+        0xc67178f2e372532b,
+        0xca273eceea26619c,
+        0xd186b8c721c0c207,
+        0xeada7dd6cde0eb1e,
+        0xf57d4f7fee6ed178,
+        0x06f067aa72176fba,
+        0x0a637dc5a2c898a6,
+        0x113f9804bef90dae,
+        0x1b710b35131c471b,
+        0x28db77f523047d84,
+        0x32caab7b40c72493,
+        0x3c9ebe0a15c9bebc,
+        0x431d67c49c100d4c,
+        0x4cc5d4becb3e42b6,
+        0x597f299cfc657e2a,
+        0x5fcb6fab3ad6faec,
+        0x6c44198c4a475817,
+    ];
+
+    fn core(data: &[u8], mut h: [u64; 8]) -> [u64; 8] {
+        let bitlen = (data.len() as u128).wrapping_mul(8);
+        let mut msg = data.to_vec();
+        msg.push(0x80);
+        while msg.len() % 128 != 112 {
+            msg.push(0);
+        }
+        msg.extend_from_slice(&bitlen.to_be_bytes());
+        for chunk in msg.chunks_exact(128) {
+            let mut w = [0u64; 80];
+            for i in 0..16 {
+                w[i] = u64::from_be_bytes(chunk[i * 8..i * 8 + 8].try_into().unwrap());
+            }
+            for i in 16..80 {
+                let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
+                let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
+                w[i] = w[i - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[i - 7])
+                    .wrapping_add(s1);
+            }
+            let mut v = h;
+            for i in 0..80 {
+                let s1 = v[4].rotate_right(14) ^ v[4].rotate_right(18) ^ v[4].rotate_right(41);
+                let ch = (v[4] & v[5]) ^ ((!v[4]) & v[6]);
+                let t1 = v[7]
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K512[i])
+                    .wrapping_add(w[i]);
+                let s0 = v[0].rotate_right(28) ^ v[0].rotate_right(34) ^ v[0].rotate_right(39);
+                let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
+                let t2 = s0.wrapping_add(maj);
+                v[7] = v[6];
+                v[6] = v[5];
+                v[5] = v[4];
+                v[4] = v[3].wrapping_add(t1);
+                v[3] = v[2];
+                v[2] = v[1];
+                v[1] = v[0];
+                v[0] = t1.wrapping_add(t2);
+            }
+            for i in 0..8 {
+                h[i] = h[i].wrapping_add(v[i]);
+            }
+        }
+        h
+    }
+
+    pub fn digest(data: &[u8]) -> [u8; 64] {
+        let h = core(
+            data,
+            [
+                0x6a09e667f3bcc908,
+                0xbb67ae8584caa73b,
+                0x3c6ef372fe94f82b,
+                0xa54ff53a5f1d36f1,
+                0x510e527fade682d1,
+                0x9b05688c2b3e6c1f,
+                0x1f83d9abfb41bd6b,
+                0x5be0cd19137e2179,
+            ],
+        );
+        let mut out = [0u8; 64];
+        for (i, x) in h.iter().enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&x.to_be_bytes());
+        }
+        out
+    }
+
+    pub fn digest384(data: &[u8]) -> [u8; 48] {
+        let h = core(
+            data,
+            [
+                0xcbbb9d5dc1059ed8,
+                0x629a292a367cd507,
+                0x9159015a3070dd17,
+                0x152fecd8f70e5939,
+                0x67332667ffc00b31,
+                0x8eb44a8768581511,
+                0xdb0c2e0d64f98fa7,
+                0x47b5481dbefa4fa4,
+            ],
+        );
+        let mut out = [0u8; 48];
+        for (i, x) in h.iter().take(6).enumerate() {
+            out[i * 8..i * 8 + 8].copy_from_slice(&x.to_be_bytes());
+        }
+        out
+    }
+
+    pub fn hex_digest(data: &[u8]) -> String {
+        super::to_hex(&digest(data))
+    }
+
+    pub fn hex_digest384(data: &[u8]) -> String {
+        super::to_hex(&digest384(data))
+    }
+}
+
+/// Pure-Rust BLAKE3 implementation (256-bit default output).
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+pub mod blake3 {
+    const IV: [u32; 8] = [
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB,
+        0x5BE0CD19,
+    ];
+    const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+    const CHUNK_START: u32 = 1 << 0;
+    const CHUNK_END: u32 = 1 << 1;
+    const PARENT: u32 = 1 << 2;
+    const ROOT: u32 = 1 << 3;
+
+    #[inline(always)]
+    fn g(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, mx: u32, my: u32) {
+        s[a] = s[a].wrapping_add(s[b]).wrapping_add(mx);
+        s[d] = (s[d] ^ s[a]).rotate_right(16);
+        s[c] = s[c].wrapping_add(s[d]);
+        s[b] = (s[b] ^ s[c]).rotate_right(12);
+        s[a] = s[a].wrapping_add(s[b]).wrapping_add(my);
+        s[d] = (s[d] ^ s[a]).rotate_right(8);
+        s[c] = s[c].wrapping_add(s[d]);
+        s[b] = (s[b] ^ s[c]).rotate_right(7);
+    }
+
+    fn round(s: &mut [u32; 16], m: &[u32; 16]) {
+        g(s, 0, 4, 8, 12, m[0], m[1]);
+        g(s, 1, 5, 9, 13, m[2], m[3]);
+        g(s, 2, 6, 10, 14, m[4], m[5]);
+        g(s, 3, 7, 11, 15, m[6], m[7]);
+        g(s, 0, 5, 10, 15, m[8], m[9]);
+        g(s, 1, 6, 11, 12, m[10], m[11]);
+        g(s, 2, 7, 8, 13, m[12], m[13]);
+        g(s, 3, 4, 9, 14, m[14], m[15]);
+    }
+
+    fn compress(
+        cv: &[u32; 8],
+        block: &[u8; 64],
+        block_len: u32,
+        counter: u64,
+        flags: u32,
+    ) -> [u32; 16] {
+        let mut m = [0u32; 16];
+        for i in 0..16 {
+            m[i] = u32::from_le_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        let mut s = [
+            cv[0],
+            cv[1],
+            cv[2],
+            cv[3],
+            cv[4],
+            cv[5],
+            cv[6],
+            cv[7],
+            IV[0],
+            IV[1],
+            IV[2],
+            IV[3],
+            counter as u32,
+            (counter >> 32) as u32,
+            block_len,
+            flags,
+        ];
+        for r in 0..7 {
+            round(&mut s, &m);
+            if r < 6 {
+                let mut next = [0u32; 16];
+                for i in 0..16 {
+                    next[i] = m[MSG_PERMUTATION[i]];
+                }
+                m = next;
+            }
+        }
+        for i in 0..8 {
+            s[i] ^= s[i + 8];
+            s[i + 8] ^= cv[i];
+        }
+        s
+    }
+
+    fn first8(out: &[u32; 16]) -> [u32; 8] {
+        out[..8].try_into().unwrap()
+    }
+
+    fn parent_block(left: &[u32; 8], right: &[u32; 8]) -> [u8; 64] {
+        let mut b = [0u8; 64];
+        for (i, &w) in left.iter().chain(right.iter()).enumerate() {
+            b[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        b
+    }
+
+    struct ChunkOutput {
+        cv: [u32; 8],
+        block: [u8; 64],
+        block_len: u32,
+        counter: u64,
+        flags: u32,
+    }
+
+    impl ChunkOutput {
+        fn chaining_value(&self) -> [u32; 8] {
+            first8(&compress(
+                &self.cv,
+                &self.block,
+                self.block_len,
+                self.counter,
+                self.flags,
+            ))
+        }
+
+        fn root_bytes(&self) -> [u8; 32] {
+            let words = compress(&self.cv, &self.block, self.block_len, 0, self.flags | ROOT);
+            let mut out = [0u8; 32];
+            for i in 0..8 {
+                out[i * 4..i * 4 + 4].copy_from_slice(&words[i].to_le_bytes());
+            }
+            out
+        }
+    }
+
+    fn chunk_output(chunk: &[u8], counter: u64) -> ChunkOutput {
+        let mut cv = IV;
+        if chunk.is_empty() {
+            return ChunkOutput {
+                cv,
+                block: [0u8; 64],
+                block_len: 0,
+                counter,
+                flags: CHUNK_START | CHUNK_END,
+            };
+        }
+        let num_blocks = chunk.len().div_ceil(64);
+        for (bi, blk) in chunk.chunks(64).enumerate() {
+            let mut block = [0u8; 64];
+            block[..blk.len()].copy_from_slice(blk);
+            let mut flags = 0u32;
+            if bi == 0 {
+                flags |= CHUNK_START;
+            }
+            if bi + 1 == num_blocks {
+                return ChunkOutput {
+                    cv,
+                    block,
+                    block_len: blk.len() as u32,
+                    counter,
+                    flags: flags | CHUNK_END,
+                };
+            }
+            cv = first8(&compress(&cv, &block, 64, counter, flags));
+        }
+        unreachable!()
+    }
+
+    pub fn digest(data: &[u8]) -> [u8; 32] {
+        if data.len() <= 1024 {
+            return chunk_output(data, 0).root_bytes();
+        }
+        let mut cv_stack: Vec<[u32; 8]> = Vec::new();
+        let chunks: Vec<&[u8]> = data.chunks(1024).collect();
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let is_last = idx + 1 == chunks.len();
+            let co = chunk_output(chunk, idx as u64);
+            if !is_last {
+                let mut new_cv = co.chaining_value();
+                let mut total_chunks = (idx + 1) as u64;
+                while total_chunks & 1 == 0 {
+                    let left = cv_stack.pop().unwrap();
+                    let pb = parent_block(&left, &new_cv);
+                    new_cv = first8(&compress(&IV, &pb, 64, 0, PARENT));
+                    total_chunks >>= 1;
+                }
+                cv_stack.push(new_cv);
+            } else {
+                let mut cur = co;
+                while let Some(left) = cv_stack.pop() {
+                    let right = cur.chaining_value();
+                    cur = ChunkOutput {
+                        cv: IV,
+                        block: parent_block(&left, &right),
+                        block_len: 64,
+                        counter: 0,
+                        flags: PARENT,
+                    };
+                }
+                return cur.root_bytes();
+            }
+        }
+        unreachable!()
+    }
+
+    pub fn hex_digest(data: &[u8]) -> String {
+        super::to_hex(&digest(data))
+    }
+}
+
 /// Incremental fingerprint builder matching `com.google.devtools.build.lib.util.Fingerprint`.
 #[derive(Debug, Clone, Default)]
 pub struct Fingerprint {
@@ -759,6 +1242,51 @@ mod tests {
         assert!(sha256::hash_file(&dir).is_err());
         assert!(sha256::hash_file(&dir.join("missing.bin")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_sha1_sha384_sha512_blake3_vectors() {
+        assert_eq!(
+            sha1::hex_digest(b"abc"),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            sha512::hex_digest384(b"abc"),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+        );
+        assert_eq!(
+            sha512::hex_digest(b"abc"),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+        // Official BLAKE3 test vectors (len 0, 3, 65, 1025, 4096)
+        let seq = |n: usize| -> Vec<u8> { (0..n).map(|i| (i % 251) as u8).collect() };
+        assert_eq!(
+            blake3::hex_digest(&seq(0)),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+        assert_eq!(
+            blake3::hex_digest(&seq(3)),
+            "e1be4d7a8ab5560aa4199eea339849ba8e293d55ca0a81006726d184519e647f"
+        );
+        assert_eq!(
+            blake3::hex_digest(&seq(65)),
+            "de1e5fa0be70df6d2be8fffd0e99ceaa8eb6e8c93a63f2d8d1c30ecb6b263dee"
+        );
+        assert_eq!(
+            blake3::hex_digest(&seq(1025)),
+            "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"
+        );
+        assert_eq!(
+            blake3::hex_digest(&seq(2049)),
+            "5f4d72f40d7a5f82b15ca2b2e44b1de3c2ef86c426c95c1af0b6879522563030"
+        );
+        assert_eq!(
+            blake3::hex_digest(&seq(4096)),
+            "015094013f57a5277b59d8475c0501042c0b642e531b0a1c8f58d2163229e969"
+        );
+        let u = uuid_v4();
+        assert_eq!(u.len(), 36);
+        assert_eq!(&u[14..15], "4");
     }
 }
 

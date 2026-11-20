@@ -1052,6 +1052,98 @@ impl Regex {
         }
         None
     }
+
+    /// `matcher.replaceAll(replacement)`: replaces every non-overlapping match in `text`,
+    /// expanding `$0`, `$1`..`$99`, `\$`, and `\\` in `replacement`.
+    pub fn replace_all(&self, text: &str, replacement: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let rep_chars: Vec<char> = replacement.chars().collect();
+        let m = Matcher { chars: &chars };
+        let mut out = String::with_capacity(text.len());
+        let mut pos = 0usize;
+        let mut last_append = 0usize;
+        while pos <= chars.len() {
+            let mut caps = vec![None; self.groups + 1];
+            let mut end = None;
+            let mut final_caps = None;
+            if m.node(&self.root, pos, &mut caps, &mut |p, c| {
+                end = Some(p);
+                final_caps = Some(c.clone());
+                true
+            }) {
+                let match_end = end.unwrap();
+                let mut g = final_caps.unwrap();
+                g[0] = Some((pos, match_end));
+                for &ch in &chars[last_append..pos] {
+                    out.push(ch);
+                }
+                append_java_replacement(&mut out, &chars, &g, &rep_chars);
+                last_append = match_end;
+                if match_end == pos {
+                    if pos < chars.len() {
+                        out.push(chars[pos]);
+                        last_append = pos + 1;
+                    }
+                    pos += 1;
+                } else {
+                    pos = match_end;
+                }
+            } else {
+                pos += 1;
+            }
+        }
+        for &ch in &chars[last_append..] {
+            out.push(ch);
+        }
+        out
+    }
+}
+
+fn append_java_replacement(
+    out: &mut String,
+    chars: &[char],
+    caps: &[Option<(usize, usize)>],
+    rep: &[char],
+) {
+    let mut i = 0;
+    while i < rep.len() {
+        match rep[i] {
+            '\\' => {
+                i += 1;
+                if i < rep.len() {
+                    out.push(rep[i]);
+                    i += 1;
+                }
+            }
+            '$' => {
+                i += 1;
+                if i < rep.len() && rep[i].is_ascii_digit() {
+                    let mut idx = (rep[i] as u8 - b'0') as usize;
+                    i += 1;
+                    while i < rep.len() && rep[i].is_ascii_digit() {
+                        let next = idx * 10 + (rep[i] as u8 - b'0') as usize;
+                        if next < caps.len() {
+                            idx = next;
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Some(Some((s, e))) = caps.get(idx) {
+                        for &ch in &chars[*s..*e] {
+                            out.push(ch);
+                        }
+                    }
+                } else {
+                    out.push('$');
+                }
+            }
+            ch => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
 }
 
 type Caps = Vec<Option<(usize, usize)>>;

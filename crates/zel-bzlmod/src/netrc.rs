@@ -1,7 +1,7 @@
 //! Pure-Rust .netrc parsing and credential resolution.
 //!
-//! Mirrors `com.google.devtools.build.lib.authandtls.NetrcParser` and
-//! `GoogleAuthUtils.newCredentialsFromNetrc`.
+//! Mirrors `com.google.devtools.build.lib.authandtls.NetrcParser`,
+//! `NetrcCredentials`, and `GoogleAuthUtils.newCredentialsFromNetrc`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,21 +22,41 @@ pub struct Netrc {
 
 impl Netrc {
     /// Parse `.netrc` text into a `Netrc` structure.
+    ///
+    /// Matches Bazel's `NetrcParser`: `#` starts a comment ONLY when it is the very first
+    /// character of the raw line (before trimming); mid-line or indented `#` characters are
+    /// ordinary token characters (e.g. passwords containing `#`). `macdef` blocks consume lines
+    /// until the next blank line.
     pub fn parse(content: &str) -> Result<Self, String> {
-        let mut tokens = Vec::new();
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || line.is_empty() {
+        let mut tokens: Vec<String> = Vec::new();
+        let mut in_macdef_body = false;
+
+        for raw_line in content.lines() {
+            let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+            if in_macdef_body {
+                if line.trim().is_empty() {
+                    in_macdef_body = false;
+                }
                 continue;
             }
-            // Strip any comment starting with '#' mid-line
-            let clean_line = if let Some(idx) = line.find('#') {
-                &line[..idx]
-            } else {
-                line
-            };
-            for word in clean_line.split_whitespace() {
-                tokens.push(word);
+            if line.starts_with('#') {
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let line_tokens: Vec<&str> = trimmed.split_whitespace().collect();
+            let mut idx = 0usize;
+            while idx < line_tokens.len() {
+                let w = line_tokens[idx];
+                if w == "macdef" {
+                    // `macdef <name>` consumes the rest of this line and subsequent lines until an empty line.
+                    in_macdef_body = true;
+                    break;
+                }
+                tokens.push(w.to_string());
+                idx += 1;
             }
         }
 
@@ -45,14 +65,14 @@ impl Netrc {
         let mut pos = 0usize;
 
         while pos < tokens.len() {
-            let token = tokens[pos];
+            let token = tokens[pos].as_str();
             pos += 1;
             match token {
                 "machine" => {
                     if pos >= tokens.len() {
                         return Err("Unexpected EOF after 'machine' in .netrc".into());
                     }
-                    let name = tokens[pos].to_string();
+                    let name = tokens[pos].clone();
                     pos += 1;
                     let machine = parse_machine_tokens(&name, &tokens, &mut pos)?;
                     machines.insert(name, machine);
@@ -60,19 +80,6 @@ impl Netrc {
                 "default" => {
                     let machine = parse_machine_tokens("default", &tokens, &mut pos)?;
                     default_machine = Some(machine);
-                }
-                "macdef" => {
-                    // Skip macdef macro definition until empty line or next token
-                    if pos < tokens.len() {
-                        pos += 1;
-                    }
-                    while pos < tokens.len() {
-                        let t = tokens[pos];
-                        if t == "machine" || t == "default" || t == "macdef" {
-                            break;
-                        }
-                        pos += 1;
-                    }
                 }
                 other => {
                     return Err(format!("Unexpected token in .netrc: '{other}'"));
@@ -160,20 +167,62 @@ impl Netrc {
         None
     }
 
-    /// Look up credential for a host.
+    /// Look up credential for a host or URI host (`URI.getHost()` semantics: lowercased,
+    /// percent-decoded, IPv6 brackets stripped).
     pub fn get_credential(&self, host: &str) -> Option<&NetrcMachine> {
-        self.machines.get(host).or(self.default_machine.as_ref())
+        let normalized = normalize_uri_host(host);
+        self.machines
+            .get(&normalized)
+            .or_else(|| self.machines.get(host))
+            .or(self.default_machine.as_ref())
     }
 }
 
-fn url_host(url: &str) -> &str {
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn percent_decode_str(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(hi), Some(lo)) = (hex_nibble(b[i + 1]), hex_nibble(b[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Normalizes a host string the way `NetrcCredentials` normalizes `URI.getHost()`:
+/// strips `[...]`, percent-decodes, and ASCII-lowercases DNS names.
+pub fn normalize_uri_host(raw_host: &str) -> String {
+    let unbracketed = raw_host
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(raw_host);
+    percent_decode_str(unbracketed).to_ascii_lowercase()
+}
+
+pub fn url_host(url: &str) -> String {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let hostport = authority
         .rsplit_once('@')
         .map(|(_, h)| h)
         .unwrap_or(authority);
-    if hostport.starts_with('[') {
+    let raw = if hostport.starts_with('[') {
         hostport
             .split(']')
             .next()
@@ -181,7 +230,8 @@ fn url_host(url: &str) -> &str {
             .unwrap_or(hostport)
     } else {
         hostport.split(':').next().unwrap_or(hostport)
-    }
+    };
+    normalize_uri_host(raw)
 }
 
 fn helper_matches_host(scope: &str, host: &str) -> bool {
@@ -189,10 +239,9 @@ fn helper_matches_host(scope: &str, host: &str) -> bool {
         return true;
     }
     if let Some(sub) = scope.strip_prefix("*.") {
-        host.eq_ignore_ascii_case(sub)
-            || host
-                .to_ascii_lowercase()
-                .ends_with(&format!(".{}", sub.to_ascii_lowercase()))
+        let sub_lc = sub.to_ascii_lowercase();
+        let host_lc = host.to_ascii_lowercase();
+        host_lc == sub_lc || host_lc.ends_with(&format!(".{sub_lc}"))
     } else {
         host.eq_ignore_ascii_case(scope)
     }
@@ -242,6 +291,36 @@ fn find_matching_credential_helper<'a>(
     default_helper
 }
 
+fn is_etxtbsy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        // ETXTBSY == 26 on Linux, macOS, and BSDs: raised transiently when a concurrent
+        // thread forks while a newly-written executable's writable fd is closing.
+        err.raw_os_error() == Some(26)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+pub(crate) fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Ok(val) => return Ok(val),
+            Err(e) if is_etxtbsy(&e) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(
+                    (attempt as u64 * 2).min(20),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn run_credential_helper(
     helper: &Path,
     url: &str,
@@ -250,19 +329,24 @@ fn run_credential_helper(
     use std::io::Write;
     use std::process::{Command, Stdio};
     #[cfg(windows)]
-    let exec_helper = PathBuf::from(helper.to_string_lossy().replace('/', "\\"));
+    let exec_buf = PathBuf::from(helper.to_string_lossy().replace('/', "\\"));
+    #[cfg(windows)]
+    let exec_helper: &Path = exec_buf.as_path();
     #[cfg(not(windows))]
-    let exec_helper = helper;
-    let mut cmd = Command::new(exec_helper);
-    cmd.arg("get")
-        .env_remove("RUN_UNDER_RUNFILES")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if !client_env.is_empty() {
-        cmd.envs(client_env);
-    }
-    let mut child = cmd.spawn().map_err(|e| {
+    let exec_helper: &Path = helper;
+    let mut child = retry_etxtbsy(|| {
+        let mut cmd = Command::new(exec_helper);
+        cmd.arg("get")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !client_env.is_empty() {
+            cmd.envs(client_env);
+        }
+        cmd.env_remove("RUN_UNDER_RUNFILES");
+        cmd.spawn()
+    })
+    .map_err(|e| {
         format!(
             "Failed to invoke credential helper {}: {e}",
             helper.display()
@@ -335,7 +419,7 @@ pub fn resolve_credential_helper_headers(
     client_env: &BTreeMap<String, String>,
 ) -> Result<Option<Vec<(String, String)>>, String> {
     let host = url_host(url);
-    match find_matching_credential_helper(host, helpers) {
+    match find_matching_credential_helper(&host, helpers) {
         Some(helper) => run_credential_helper(helper, url, client_env).map(Some),
         None => Ok(None),
     }
@@ -357,7 +441,7 @@ pub fn resolve_netrc_headers(
 ) -> Vec<(String, String)> {
     let host = url_host(url);
     if let Some(netrc) = Netrc::load_from_client_env_only(client_env) {
-        if let Some(m) = netrc.get_credential(host) {
+        if let Some(m) = netrc.get_credential(&host) {
             if let Some(pwd) = &m.password {
                 let login = m.login.as_deref().unwrap_or("");
                 let b64 = crate::hash::base64_encode(format!("{login}:{pwd}").as_bytes());
@@ -383,7 +467,7 @@ pub fn resolve_auth_headers(
 
 fn parse_machine_tokens(
     name: &str,
-    tokens: &[&str],
+    tokens: &[String],
     pos: &mut usize,
 ) -> Result<NetrcMachine, String> {
     let mut machine = NetrcMachine {
@@ -394,14 +478,14 @@ fn parse_machine_tokens(
     };
 
     while *pos < tokens.len() {
-        let t = tokens[*pos];
+        let t = tokens[*pos].as_str();
         match t {
             "login" => {
                 *pos += 1;
                 if *pos >= tokens.len() {
                     return Err("Unexpected EOF after 'login' in .netrc".into());
                 }
-                machine.login = Some(tokens[*pos].to_string());
+                machine.login = Some(tokens[*pos].clone());
                 *pos += 1;
             }
             "password" => {
@@ -409,7 +493,7 @@ fn parse_machine_tokens(
                 if *pos >= tokens.len() {
                     return Err("Unexpected EOF after 'password' in .netrc".into());
                 }
-                machine.password = Some(tokens[*pos].to_string());
+                machine.password = Some(tokens[*pos].clone());
                 *pos += 1;
             }
             "account" => {
@@ -417,14 +501,13 @@ fn parse_machine_tokens(
                 if *pos >= tokens.len() {
                     return Err("Unexpected EOF after 'account' in .netrc".into());
                 }
-                machine.account = Some(tokens[*pos].to_string());
+                machine.account = Some(tokens[*pos].clone());
                 *pos += 1;
             }
             "machine" | "default" | "macdef" => {
                 break;
             }
             _ => {
-                // Ignore unknown per-machine tokens (e.g. force, port, etc.)
                 *pos += 1;
             }
         }
@@ -441,13 +524,23 @@ mod tests {
     fn parse_basic_netrc() {
         let text = r#"
 # comment line
-machine example.com login user1 password secret
+machine example.com login user1 password secret#with#hashes
 default login defuser password defpass
 "#;
         let netrc = Netrc::parse(text).unwrap();
         let m = netrc.get_credential("example.com").unwrap();
         assert_eq!(m.login.as_deref(), Some("user1"));
-        assert_eq!(m.password.as_deref(), Some("secret"));
+        assert_eq!(m.password.as_deref(), Some("secret#with#hashes"));
+
+        // Uppercase, percent-encoded, and IPv6 hosts match via URI.getHost() normalization.
+        assert_eq!(
+            netrc
+                .get_credential(&url_host("https://Ex%61mple.COM/path"))
+                .unwrap()
+                .login
+                .as_deref(),
+            Some("user1")
+        );
 
         let d = netrc.get_credential("other.com").unwrap();
         assert_eq!(d.login.as_deref(), Some("defuser"));
@@ -668,6 +761,138 @@ default login defuser password defpass
             )]
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn netrc_hash_only_starts_comment_at_column_zero() {
+        // Indented '#' is not a comment in Bazel's NetrcParser and triggers unexpected token.
+        assert!(Netrc::parse("  # indented").is_err());
+        // Column-0 '#' is ignored, while '#' inside password is kept intact.
+        let n = Netrc::parse("#header\nmachine ::1 login u password p#1\n").unwrap();
+        let m = n.get_credential(&url_host("https://[::1]:8443/x")).unwrap();
+        assert_eq!(m.machine, "::1");
+        assert_eq!(m.password.as_deref(), Some("p#1"));
+    }
+
+    #[test]
+    fn percent_decode_host_handles_multibyte_utf8_and_malformed_escapes_without_panicking() {
+        // `%` followed by 2-byte (`é`), 3-byte (`日`), and 4-byte (`🦀`) UTF-8 sequences
+        // must never slice across non-char boundaries; non-hex sequences stay literal.
+        assert_eq!(percent_decode_str("%é"), "%é");
+        assert_eq!(percent_decode_str("%日"), "%日");
+        assert_eq!(percent_decode_str("%🦀"), "%🦀");
+        assert_eq!(percent_decode_str("host%"), "host%");
+        assert_eq!(percent_decode_str("host%a"), "host%a");
+        assert_eq!(percent_decode_str("host%zz.example"), "host%zz.example");
+        // Valid UTF-8 percent-encoded sequence (`%C3%A9` -> `é`).
+        assert_eq!(percent_decode_str("caf%C3%A9.example"), "café.example");
+
+        // End-to-end through `url_host` and `Netrc::get_credential`.
+        let netrc = Netrc::parse(
+            "machine café.example login utf8user password utf8pass\n\
+             default login defuser password defpass\n",
+        )
+        .unwrap();
+        for malformed_url in [
+            "https://host%é.example/archive.tar.gz",
+            "https://host%日.example/archive.tar.gz",
+            "https://host%🦀.example/archive.tar.gz",
+            "https://host%/archive.tar.gz",
+            "https://host%a/archive.tar.gz",
+            "https://host%zz.example/archive.tar.gz",
+        ] {
+            let host = url_host(malformed_url);
+            let cred = netrc.get_credential(&host).unwrap();
+            assert_eq!(cred.login.as_deref(), Some("defuser"), "{malformed_url}");
+        }
+        // Malformed hosts passed directly to `get_credential` also must not panic.
+        assert_eq!(
+            netrc.get_credential("%日").unwrap().login.as_deref(),
+            Some("defuser")
+        );
+        assert_eq!(
+            netrc
+                .get_credential(&url_host("https://CAF%C3%A9.EXAMPLE/file.tgz"))
+                .unwrap()
+                .login
+                .as_deref(),
+            Some("utf8user")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retry_etxtbsy_retries_transient_busy_surfaces_persistent_and_skips_other_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // 1. Transient ETXTBSY (errno 26) succeeds once the busy fd closes.
+        let mut calls = 0u32;
+        let val = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 4 {
+                Err(std::io::Error::from_raw_os_error(26))
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!(val, 42);
+        assert_eq!(calls, 4);
+
+        // 2. Non-ETXTBSY errors (e.g. ENOENT) fail immediately without retrying.
+        let mut enoent_calls = 0u32;
+        let err = retry_etxtbsy::<()>(|| {
+            enoent_calls += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(enoent_calls, 1);
+
+        // 3. Persistent ETXTBSY surfaces the underlying os error 26 after bounded retries.
+        let mut persistent_calls = 0u32;
+        let err = retry_etxtbsy::<()>(|| {
+            persistent_calls += 1;
+            Err(std::io::Error::from_raw_os_error(26))
+        })
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(26));
+        assert_eq!(persistent_calls, 21);
+
+        // 4. Real open-write-fd race on an executable credential helper script.
+        let dir = std::env::temp_dir().join(format!("zel-netrc-etxtbsy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("helper_busy.sh");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer RETRIED\"]}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let write_fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&helper)
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(write_fd);
+        });
+
+        let hdrs = resolve_credential_helper_headers(
+            "https://example.com/archive.tar.gz",
+            &[("example.com".to_string(), helper)],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        releaser.join().unwrap();
+        assert_eq!(
+            hdrs,
+            vec![("Authorization".to_string(), "Bearer RETRIED".to_string())]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

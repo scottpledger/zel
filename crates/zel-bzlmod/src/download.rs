@@ -1295,7 +1295,13 @@ impl Downloader {
                 .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         };
         if !has_auth(&h) {
-            if let Some(a) = req.auth.get(url) {
+            let matched_auth = req.auth.get(url).or_else(|| {
+                req.auth
+                    .iter()
+                    .find(|(k, _)| java_uri_equals(k, url))
+                    .map(|(_, v)| v)
+            });
+            if let Some(a) = matched_auth {
                 let login = a.get("login").cloned().unwrap_or_default();
                 let password = a.get("password").cloned().unwrap_or_default();
                 match a.get("type").map(|s| s.as_str()) {
@@ -1404,7 +1410,7 @@ impl Downloader {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
         }
         cmd.arg(url);
-        let out = cmd.output().map_err(|e| {
+        let out = crate::netrc::retry_etxtbsy(|| cmd.output()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 fe(
                     format!(
@@ -2598,5 +2604,130 @@ fn java_io_reason(e: &std::io::Error) -> String {
                 None => s,
             }
         }
+    }
+}
+
+/// Normalizes a URI string into a canonical key matching `java.net.URI.equals(Object)`:
+/// - scheme and authority host are ASCII case-insensitive;
+/// - percent-encoding hex digits (`%2f` vs `%2F`) are case-insensitive;
+/// - explicit ports (even default ports like `:80` / `:443`), userinfo, path, query, and
+///   fragment are otherwise compared case-sensitively.
+pub fn canonical_java_uri_key(uri: &str) -> String {
+    fn normalize_pct(s: &str, lowercase_non_pct: bool) -> String {
+        let bytes = s.as_bytes();
+        let mut out = String::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && bytes[i + 1].is_ascii_hexdigit()
+                && bytes[i + 2].is_ascii_hexdigit()
+            {
+                out.push('%');
+                out.push((bytes[i + 1] as char).to_ascii_uppercase());
+                out.push((bytes[i + 2] as char).to_ascii_uppercase());
+                i += 3;
+            } else {
+                let ch = s[i..].chars().next().unwrap();
+                if lowercase_non_pct {
+                    out.push(ch.to_ascii_lowercase());
+                } else {
+                    out.push(ch);
+                }
+                i += ch.len_utf8();
+            }
+        }
+        out
+    }
+
+    let (without_frag, frag) = match uri.split_once('#') {
+        Some((pre, f)) => (pre, Some(f)),
+        None => (uri, None),
+    };
+    let (scheme, after_scheme) = match without_frag.split_once(':') {
+        Some((sc, rest))
+            if !sc.is_empty()
+                && sc.as_bytes()[0].is_ascii_alphabetic()
+                && sc
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.')) =>
+        {
+            (Some(sc.to_ascii_lowercase()), rest)
+        }
+        _ => (None, without_frag),
+    };
+
+    let mut out = String::with_capacity(uri.len());
+    if let Some(sc) = scheme {
+        out.push_str(&sc);
+        out.push(':');
+    }
+    if let Some(after_slashes) = after_scheme.strip_prefix("//") {
+        out.push_str("//");
+        let auth_end = after_slashes
+            .find(['/', '?', '#'])
+            .unwrap_or(after_slashes.len());
+        let authority = &after_slashes[..auth_end];
+        let path_and_query = &after_slashes[auth_end..];
+        let (userinfo, hostport) = match authority.rsplit_once('@') {
+            Some((u, hp)) => (Some(u), hp),
+            None => (None, authority),
+        };
+        if let Some(u) = userinfo {
+            out.push_str(&normalize_pct(u, false));
+            out.push('@');
+        }
+        let (host, port) = if hostport.starts_with('[') {
+            match hostport.find(']') {
+                Some(idx) => (&hostport[..=idx], &hostport[idx + 1..]),
+                None => (hostport, ""),
+            }
+        } else {
+            match hostport.rsplit_once(':') {
+                Some((h, _)) => (h, &hostport[h.len()..]),
+                None => (hostport, ""),
+            }
+        };
+        out.push_str(&normalize_pct(host, true));
+        out.push_str(port);
+        out.push_str(&normalize_pct(path_and_query, false));
+    } else {
+        out.push_str(&normalize_pct(after_scheme, false));
+    }
+    if let Some(f) = frag {
+        out.push('#');
+        out.push_str(&normalize_pct(f, false));
+    }
+    out
+}
+
+pub fn java_uri_equals(a: &str, b: &str) -> bool {
+    a == b || canonical_java_uri_key(a) == canonical_java_uri_key(b)
+}
+
+#[cfg(test)]
+mod static_credentials_uri_tests {
+    use super::*;
+
+    #[test]
+    fn java_uri_equality_matches_static_credentials_rules() {
+        assert!(java_uri_equals(
+            "HTTPS://Example.COM/a%2fb?x=%3a#Frag%2f",
+            "https://example.com/a%2Fb?x=%3A#Frag%2F"
+        ));
+        // Path case outside percent-escapes remains sensitive.
+        assert!(!java_uri_equals(
+            "https://example.com/Path",
+            "https://example.com/path"
+        ));
+        // Explicit default port is preserved and distinct from omitted port, just like java.net.URI.
+        assert!(!java_uri_equals(
+            "https://example.com:443/a",
+            "https://example.com/a"
+        ));
+        assert!(java_uri_equals(
+            "HTTPS://EXAMPLE.COM:443/a",
+            "https://example.com:443/a"
+        ));
     }
 }

@@ -786,6 +786,7 @@ fn channel_for(addr: &str, timeout: Duration) -> Option<Channel> {
             host: host.to_string(),
             port: port.parse().ok()?,
             connect_timeout: timeout,
+            authority_override: None,
         }),
         1,
         vec![],
@@ -864,10 +865,7 @@ pub fn update_terminal_size(
     timeout: Duration,
 ) -> Result<TerminalSizeResponse, GrpcStatus> {
     let Some(ch) = channel_for(&info.address, timeout) else {
-        return Err(GrpcStatus {
-            code: 14,
-            message: "failed to connect to server".into(),
-        });
+        return Err(GrpcStatus::new(14, "failed to connect to server"));
     };
     let req = TerminalSizeRequest {
         cookie: info.request_cookie.clone(),
@@ -885,10 +883,7 @@ pub fn update_terminal_size(
     );
     ch.close();
     let bytes = r?;
-    TerminalSizeResponse::decode(&bytes).map_err(|e| GrpcStatus {
-        code: 13,
-        message: e.to_string(),
-    })
+    TerminalSizeResponse::decode(&bytes).map_err(|e| GrpcStatus::new(13, e.to_string()))
 }
 
 const POST_SHUTDOWN_GRACE_SECS: u64 = 60;
