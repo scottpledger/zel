@@ -825,8 +825,7 @@ pub fn run_standalone(opt: &ProcessWrapperOptions) -> std::io::Result<(Terminati
         let _ = prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
     }
 
-    let mut cmd = Command::new(&opt.args[0]);
-    cmd.args(&opt.args[1..]);
+    let mut cmd = build_wrapped_command(&opt.args);
     cmd.stdin(Stdio::inherit());
     match effective_redirect_path(opt.stdout_path.as_deref()) {
         Some(p) => {
@@ -984,6 +983,31 @@ pub fn normalize_windows_argv0(argv0: &str) -> String {
     }
 }
 
+fn build_wrapped_command(args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let prog = normalize_windows_argv0(&args[0]);
+        let mut c = Command::new(&prog);
+        // `WindowsSubprocessFactory.escapeArgvRest`: when `argv0.equals("cmd.exe")`, pass
+        // remaining arguments verbatim without `CommandLineToArgvW` backslash-quote escaping.
+        if prog == "cmd.exe" {
+            for arg in &args[1..] {
+                c.raw_arg(arg);
+            }
+        } else {
+            c.args(&args[1..]);
+        }
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new(&args[0]);
+        c.args(&args[1..]);
+        c
+    }
+}
+
 /// Runs the wrapped command (`LegacyProcessWrapper::RunCommand`).
 ///
 /// `env`: when `Some`, the child environment is cleared and replaced by it. `cwd`: working
@@ -997,28 +1021,7 @@ pub fn run(
         return Err(crate::cancelled_error());
     }
     let started = Instant::now();
-    #[cfg(windows)]
-    let mut cmd = {
-        use std::os::windows::process::CommandExt;
-        let prog = normalize_windows_argv0(&opt.args[0]);
-        let mut c = Command::new(&prog);
-        // `WindowsSubprocessFactory.escapeArgvRest`: when `argv0.equals("cmd.exe")`, pass
-        // remaining arguments verbatim without `CommandLineToArgvW` backslash-quote escaping.
-        if prog == "cmd.exe" {
-            for arg in &opt.args[1..] {
-                c.raw_arg(arg);
-            }
-        } else {
-            c.args(&opt.args[1..]);
-        }
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = Command::new(&opt.args[0]);
-        c.args(&opt.args[1..]);
-        c
-    };
+    let mut cmd = build_wrapped_command(&opt.args);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
