@@ -1038,6 +1038,7 @@ impl Default for Downloader {
     }
 }
 
+#[derive(Debug)]
 struct FetchError {
     msg: String,
     retryable: bool,
@@ -3442,7 +3443,10 @@ mod tests {
         assert_eq!(noproxy_vals, vec!["*"], "args: {args:?}");
         assert!(!args.iter().any(|a| a == "--proxy"), "args: {args:?}");
 
-        let removed_envs: BTreeMap<String, Option<String>> = cmd
+        // On Windows, `std::process::Command` keys environment overrides ASCII-case-insensitively
+        // (keeping the first inserted casing, e.g. `"http_proxy"` when `"HTTP_PROXY"` is also
+        // removed), whereas Unix keeps distinct case-sensitive entries.
+        let envs: Vec<(String, Option<String>)> = cmd
             .get_envs()
             .map(|(k, v)| {
                 (
@@ -3451,21 +3455,15 @@ mod tests {
                 )
             })
             .collect();
-        for key in [
-            "http_proxy",
-            "HTTP_PROXY",
-            "https_proxy",
-            "HTTPS_PROXY",
-            "all_proxy",
-            "ALL_PROXY",
-            "no_proxy",
-            "NO_PROXY",
-        ] {
-            assert_eq!(
-                removed_envs.get(key),
-                Some(&None),
-                "missing env_remove({key})"
-            );
+        for key in AMBIENT_PROXY_ENV_VARS {
+            #[cfg(windows)]
+            let entry = envs
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                .map(|(_, v)| v);
+            #[cfg(not(windows))]
+            let entry = envs.iter().find(|(k, _)| k.as_str() == key).map(|(_, v)| v);
+            assert_eq!(entry, Some(&None), "missing env_remove({key}): {envs:?}");
         }
 
         // Unset `https_proxy` with `no_proxy` set also emits `--noproxy *` only.
@@ -3516,7 +3514,7 @@ mod tests {
 
             let dl_e2e = Downloader {
                 curl_binary: fake_curl.to_string_lossy().into_owned(),
-                client_env,
+                client_env: client_env.clone(),
                 ..quick()
             };
             let r = req(
@@ -3533,31 +3531,59 @@ mod tests {
                 logged, "noproxy=|*\nproxy=\nenv_https=\nenv_HTTPS=\n",
                 "{logged}"
             );
-            if std::env::var("ZEL_CURL_AMBIENT_SUBPROC").as_deref() == Ok("1") {
-                assert_eq!(
-                    std::env::var("https_proxy").as_deref(),
-                    Ok("http://bad-proxy:8080")
-                );
-            } else {
-                let exe = std::env::current_exe().unwrap();
-                let sub = Command::new(exe)
-                    .args([
-                        "--exact",
-                        "download::tests::curl_proxy_args_and_empty_https_proxy_not_overridden_by_no_proxy",
-                        "--nocapture",
-                    ])
-                    .env("ZEL_CURL_AMBIENT_SUBPROC", "1")
-                    .env("https_proxy", "http://bad-proxy:8080")
-                    .env("HTTPS_PROXY", "http://bad-proxy:8080")
-                    .output()
-                    .unwrap();
-                assert!(
-                    sub.status.success(),
-                    "subprocess failed:\n{}\n{}",
-                    String::from_utf8_lossy(&sub.stdout),
-                    String::from_utf8_lossy(&sub.stderr)
-                );
-            }
+        }
+
+        // Cross-platform real `curl` / `curl.exe` single-hop check (verifies `-D`/`-o` temp file
+        // sharing on Windows NTFS as well as ambient proxy stripping on all platforms).
+        if net_ok() && Command::new("curl").arg("--version").output().is_ok() {
+            let (port_direct, _) = serve(1, |_, _| {
+                b"HTTP/1.1 302 Found\r\nLocation: /next\r\nContent-Length: 0\r\n\r\n".to_vec()
+            });
+            let mut env_direct = client_env.clone();
+            env_direct.insert("http_proxy".to_string(), String::new());
+            env_direct.insert("no_proxy".to_string(), "other.example".to_string());
+            let dl_real = Downloader {
+                client_env: env_direct,
+                ..quick()
+            };
+            let target = Url::parse(&format!("http://127.0.0.1:{port_direct}/step")).unwrap();
+            let hop = dl_real.curl_single_hop(&target, &[], 0).unwrap();
+            assert_eq!(hop.code, 302);
+            assert!(
+                hop.headers
+                    .iter()
+                    .any(|(k, v)| k == "location" && v == "/next"),
+                "headers: {:?}",
+                hop.headers
+            );
+        }
+
+        if std::env::var("ZEL_CURL_AMBIENT_SUBPROC").as_deref() == Ok("1") {
+            assert_eq!(
+                std::env::var("https_proxy").as_deref(),
+                Ok("http://127.0.0.1:1")
+            );
+        } else {
+            let exe = std::env::current_exe().unwrap();
+            let sub = Command::new(exe)
+                .args([
+                    "--exact",
+                    "download::tests::curl_proxy_args_and_empty_https_proxy_not_overridden_by_no_proxy",
+                    "--nocapture",
+                ])
+                .env("ZEL_CURL_AMBIENT_SUBPROC", "1")
+                .env("http_proxy", "http://127.0.0.1:1")
+                .env("HTTP_PROXY", "http://127.0.0.1:1")
+                .env("https_proxy", "http://127.0.0.1:1")
+                .env("HTTPS_PROXY", "http://127.0.0.1:1")
+                .output()
+                .unwrap();
+            assert!(
+                sub.status.success(),
+                "subprocess failed:\n{}\n{}",
+                String::from_utf8_lossy(&sub.stdout),
+                String::from_utf8_lossy(&sub.stderr)
+            );
         }
     }
 
