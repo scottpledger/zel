@@ -320,8 +320,10 @@ pub enum TreeEntry {
     },
 }
 
-/// Flattens a REAPI `Tree` (root + children) into entries with paths relative to the tree root,
-/// in depth-first order. Errors on missing children or cycles/over-deep recursion.
+/// Flattens a REAPI `Tree` (root + children) into entries with paths relative to the tree root.
+/// Emits all `Directory` and `File` entries before `Symlink` entries so callers materializing
+/// entries in order always have intra-tree symlink targets on disk before planting symlinks.
+/// Errors on missing children or cycles/over-deep recursion.
 pub fn flatten_tree(tree: &Tree, digest_fn: DigestFn) -> Result<Vec<TreeEntry>, String> {
     let mut by_digest: HashMap<String, &Directory> = HashMap::new();
     let empty_dir = Directory::default();
@@ -331,11 +333,13 @@ pub fn flatten_tree(tree: &Tree, digest_fn: DigestFn) -> Result<Vec<TreeEntry>, 
     }
     let root = tree.root.as_ref().ok_or("tree has no root")?;
     let mut out = Vec::new();
+    let mut symlinks = Vec::new();
     fn walk(
         dir: &Directory,
         prefix: &str,
         by: &HashMap<String, &Directory>,
         out: &mut Vec<TreeEntry>,
+        symlinks: &mut Vec<TreeEntry>,
         depth: usize,
     ) -> Result<(), String> {
         if depth > 256 {
@@ -356,7 +360,7 @@ pub fn flatten_tree(tree: &Tree, digest_fn: DigestFn) -> Result<Vec<TreeEntry>, 
             });
         }
         for s in &dir.symlinks {
-            out.push(TreeEntry::Symlink {
+            symlinks.push(TreeEntry::Symlink {
                 path: join(&s.name),
                 target: s.target.clone(),
             });
@@ -368,12 +372,70 @@ pub fn flatten_tree(tree: &Tree, digest_fn: DigestFn) -> Result<Vec<TreeEntry>, 
             let child = by
                 .get(&dd.hash)
                 .ok_or_else(|| format!("missing child directory {} in tree", dd.hash))?;
-            walk(child, &p, by, out, depth + 1)?;
+            walk(child, &p, by, out, symlinks, depth + 1)?;
         }
         Ok(())
     }
-    walk(root, "", &by_digest, &mut out, 0)?;
+    walk(root, "", &by_digest, &mut out, &mut symlinks, 0)?;
+    out.extend(symlinks);
     Ok(out)
+}
+
+/// Materializes a REAPI `Tree` into `dest` in two passes (matching Bazel's
+/// `RemoteExecutionService.downloadOutputs`): subdirectories and regular files
+/// across the whole tree are written first, and all `SymlinkNode`s are planted
+/// second so cross-subtree directory targets exist when Windows `plant_symlink`
+/// classifies directory vs file symlinks.
+pub fn flatten_to_local_dir(
+    tree: &Tree,
+    digest_fn: DigestFn,
+    dest: &Path,
+    mut fetch_blob: impl FnMut(&Digest) -> io::Result<Vec<u8>>,
+) -> io::Result<()> {
+    let entries =
+        flatten_tree(tree, digest_fn).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let _ = std::fs::remove_dir_all(dest);
+    std::fs::create_dir_all(dest)?;
+
+    let mut known_dirs: HashSet<String> = HashSet::new();
+    known_dirs.insert(String::new());
+    let mut known_files: HashSet<String> = HashSet::new();
+    let mut symlinks: Vec<(String, String)> = Vec::new();
+
+    for entry in entries {
+        match entry {
+            TreeEntry::Directory { path } => {
+                record_ancestors_as_dirs(&path, &mut known_dirs);
+                known_dirs.insert(path.clone());
+                std::fs::create_dir_all(dest.join(&path))?;
+            }
+            TreeEntry::File {
+                path,
+                digest,
+                executable,
+            } => {
+                record_ancestors_as_dirs(&path, &mut known_dirs);
+                known_files.insert(path.clone());
+                let data = if digest.size_bytes == 0 {
+                    Vec::new()
+                } else {
+                    fetch_blob(&digest)?
+                };
+                crate::disk_cache::write_atomic_output(&dest.join(&path), &data, executable)?;
+            }
+            TreeEntry::Symlink { path, target } => {
+                record_ancestors_as_dirs(&path, &mut known_dirs);
+                symlinks.push((path, target));
+            }
+        }
+    }
+
+    propagate_symlink_kinds(&symlinks, dest, &mut known_dirs, &mut known_files);
+    for (path, target) in &symlinks {
+        let hint = infer_root_relative_symlink_hint(path, target, dest, &known_dirs, &known_files);
+        plant_symlink(&dest.join(path), target, hint)?;
+    }
+    Ok(())
 }
 
 /// Builds a REAPI `Tree` from a local directory (`UploadManifest` rules: `is_executable = true`
@@ -387,9 +449,157 @@ pub fn tree_from_local_dir(
     tree_from_local_dir_ext(dir, digest_fn, false, blobs)
 }
 
-/// Removes an existing file, file symlink, or directory symlink/junction at `p`
-/// without recursing into target directories. On Windows, directory symlinks
-/// and NTFS junctions require `remove_dir` rather than `remove_file`.
+/// Target type hint when planting a symbolic link on platforms (Windows) where
+/// directory and file symlinks use distinct reparse point flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymlinkKindHint {
+    Auto,
+    File,
+    Dir,
+}
+
+pub(crate) fn record_ancestors_as_dirs(rel_path: &str, known_dirs: &mut HashSet<String>) {
+    let mut cur = rel_path;
+    while let Some((parent, _)) = cur.rsplit_once('/') {
+        if !parent.is_empty() {
+            known_dirs.insert(parent.to_string());
+        }
+        cur = parent;
+    }
+}
+
+/// Resolves `target` from a symlink at `link_rel` inside `root`, returning
+/// `Some("")` when it resolves to `root` itself or `Some("a/b")` inside `root`,
+/// and `None` when it escapes `root` or points outside `root`.
+pub(crate) fn resolve_root_or_rel_symlink(
+    link_rel: &str,
+    target: &str,
+    root: &Path,
+) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let clean_target = strip_windows_device_prefix(target);
+        if is_windows_path_str_absolute(&clean_target) {
+            let clean_root = strip_windows_device_prefix(&root.to_string_lossy());
+            let rel = strip_windows_prefix_case_insensitive(&clean_target, &clean_root)?;
+            return normalize_rel_allowing_empty(&rel);
+        }
+        let parent = link_rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let joined = if parent.is_empty() {
+            clean_target.replace('\\', "/")
+        } else {
+            format!("{parent}/{}", clean_target.replace('\\', "/"))
+        };
+        normalize_rel_allowing_empty(&joined)
+    }
+    #[cfg(not(windows))]
+    {
+        let tp = Path::new(target);
+        if tp.is_absolute() {
+            let rel = tp.strip_prefix(root).ok()?;
+            return normalize_rel_allowing_empty(&rel.to_string_lossy());
+        }
+        let parent = link_rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+        let joined = if parent.is_empty() {
+            target.to_string()
+        } else {
+            format!("{parent}/{target}")
+        };
+        normalize_rel_allowing_empty(&joined)
+    }
+}
+
+fn normalize_rel_allowing_empty(raw: &str) -> Option<String> {
+    let mut stack: Vec<&str> = Vec::new();
+    for seg in raw.split(['/', '\\']) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                stack.pop()?;
+            }
+            other => stack.push(other),
+        }
+    }
+    Some(stack.join("/"))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn strip_windows_prefix_case_insensitive(path: &str, root: &str) -> Option<String> {
+    let p_norm = path.replace('/', r"\");
+    let mut r_norm = root.replace('/', r"\");
+    while r_norm.len() > 3 && r_norm.ends_with('\\') && !r_norm.ends_with(r":\") {
+        r_norm.pop();
+    }
+    let rest = strip_prefix_ignore_ascii_case(&p_norm, &r_norm)?;
+    if rest.is_empty() {
+        Some(String::new())
+    } else if r_norm.ends_with('\\') {
+        Some(rest.to_string())
+    } else {
+        rest.strip_prefix('\\').map(|s| s.to_string())
+    }
+}
+
+pub(crate) fn propagate_symlink_kinds(
+    symlinks: &[(String, String)],
+    root: &Path,
+    known_dirs: &mut HashSet<String>,
+    known_files: &mut HashSet<String>,
+) {
+    for _ in 0..32 {
+        let mut changed = false;
+        for (link_rel, target) in symlinks {
+            if known_dirs.contains(link_rel) || known_files.contains(link_rel) {
+                continue;
+            }
+            if target.ends_with('/') || target.ends_with('\\') {
+                known_dirs.insert(link_rel.clone());
+                changed = true;
+                continue;
+            }
+            if let Some(resolved_rel) = resolve_root_or_rel_symlink(link_rel, target, root) {
+                if known_dirs.contains(&resolved_rel) {
+                    known_dirs.insert(link_rel.clone());
+                    changed = true;
+                } else if known_files.contains(&resolved_rel) {
+                    known_files.insert(link_rel.clone());
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+}
+
+pub(crate) fn infer_root_relative_symlink_hint(
+    link_rel: &str,
+    target: &str,
+    root: &Path,
+    known_dirs: &HashSet<String>,
+    known_files: &HashSet<String>,
+) -> SymlinkKindHint {
+    if known_dirs.contains(link_rel) || target.ends_with('/') || target.ends_with('\\') {
+        return SymlinkKindHint::Dir;
+    }
+    if known_files.contains(link_rel) {
+        return SymlinkKindHint::File;
+    }
+    if let Some(resolved_rel) = resolve_root_or_rel_symlink(link_rel, target, root) {
+        if known_dirs.contains(&resolved_rel) {
+            return SymlinkKindHint::Dir;
+        }
+        if known_files.contains(&resolved_rel) {
+            return SymlinkKindHint::File;
+        }
+    }
+    SymlinkKindHint::Auto
+}
+
+/// Removes an existing file, file symlink, directory symlink/junction, or empty
+/// directory at `p` without recursing into non-empty directories. On Windows,
+/// directory symlinks and NTFS junctions require `remove_dir` rather than `remove_file`.
 pub(crate) fn remove_existing_entry(p: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -405,14 +615,52 @@ pub(crate) fn remove_existing_entry(p: &Path) -> io::Result<()> {
     }
     #[cfg(not(windows))]
     {
-        std::fs::remove_file(p)
+        std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p))
     }
+}
+
+#[cfg(any(not(unix), test))]
+fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    s.as_bytes()
+        .get(..prefix.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(prefix.as_bytes()))
+        .then(|| &s[prefix.len()..])
+}
+
+/// Strips Windows verbatim (`\\?\`, `\\?\UNC\`) and NT object (`\??\`, `\??\UNC\`)
+/// prefixes into standard Win32 drive or UNC paths while preserving original casing.
+#[cfg(any(not(unix), test))]
+pub(crate) fn strip_windows_device_prefix(raw: &str) -> String {
+    let norm_sep = raw.replace('/', r"\");
+    if let Some(unc) = strip_prefix_ignore_ascii_case(&norm_sep, r"\\?\UNC\")
+        .or_else(|| strip_prefix_ignore_ascii_case(&norm_sep, r"\??\UNC\"))
+    {
+        let start = raw.len() - unc.len();
+        return format!(r"\\{}", &raw[start..]);
+    }
+    if let Some(rest) = norm_sep
+        .strip_prefix(r"\\?\")
+        .or_else(|| norm_sep.strip_prefix(r"\??\"))
+    {
+        let start = raw.len() - rest.len();
+        return raw[start..].to_string();
+    }
+    raw.to_string()
+}
+
+#[cfg(any(not(unix), test))]
+pub(crate) fn is_windows_path_str_absolute(s: &str) -> bool {
+    let b = s.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+        || s.starts_with(r"\\")
+        || s.starts_with("//")
 }
 
 pub(crate) fn is_absolute_symlink_target(target: &Path) -> bool {
     #[cfg(windows)]
     {
-        target.is_absolute() || target.to_string_lossy().starts_with(r"\??\")
+        let stripped = strip_windows_device_prefix(&target.to_string_lossy());
+        Path::new(&stripped).is_absolute() || is_windows_path_str_absolute(&stripped)
     }
     #[cfg(not(windows))]
     {
@@ -420,17 +668,117 @@ pub(crate) fn is_absolute_symlink_target(target: &Path) -> bool {
     }
 }
 
+#[cfg(any(windows, test))]
+pub(crate) fn classify_windows_symlink(
+    link: &Path,
+    target: &str,
+    hint: SymlinkKindHint,
+    existing_dir: bool,
+    existing_file: bool,
+) -> (String, PathBuf, bool) {
+    let win_target = strip_windows_device_prefix(target);
+    let resolved = if is_windows_path_str_absolute(&win_target) {
+        PathBuf::from(&win_target)
+    } else {
+        link.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(&win_target)
+    };
+    let trailing_sep = target.ends_with('/') || target.ends_with('\\');
+    let is_dir_link = match hint {
+        SymlinkKindHint::Dir => true,
+        SymlinkKindHint::File => false,
+        SymlinkKindHint::Auto => {
+            if existing_dir {
+                true
+            } else if existing_file {
+                false
+            } else {
+                trailing_sep
+            }
+        }
+    };
+    (win_target, resolved, is_dir_link)
+}
+
+/// Plants a symbolic link at `link -> target`, honoring `hint` and Bazel
+/// `WindowsFileSystem.createSymbolicLink` fallback rules on Windows (normalizing
+/// NT `\??\` prefixes, using `symlink_dir` / NTFS junction `mklink /J` for
+/// directories, and `symlink_file` / copy fallback for files).
+pub fn plant_symlink(link: &Path, target: &str, hint: SymlinkKindHint) -> io::Result<()> {
+    if let Some(p) = link.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let _ = remove_existing_entry(link);
+    #[cfg(unix)]
+    {
+        let _ = hint;
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        let probe_target = strip_windows_device_prefix(target);
+        let probe_resolved = if is_windows_path_str_absolute(&probe_target) {
+            PathBuf::from(&probe_target)
+        } else {
+            link.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&probe_target)
+        };
+        let stat_follow = std::fs::metadata(&probe_resolved).ok();
+        let existing_dir = stat_follow.as_ref().is_some_and(|m| m.is_dir());
+        let existing_file = stat_follow.as_ref().is_some_and(|m| m.is_file());
+        let (win_target, resolved, is_dir_link) =
+            classify_windows_symlink(link, target, hint, existing_dir, existing_file);
+        if is_dir_link {
+            match std::os::windows::fs::symlink_dir(&win_target, link) {
+                Ok(()) => Ok(()),
+                Err(sym_err) => {
+                    let junc_target = if is_windows_path_str_absolute(&win_target) {
+                        resolved
+                    } else {
+                        std::env::current_dir()
+                            .map(|cwd| cwd.join(&resolved))
+                            .unwrap_or(resolved)
+                    };
+                    let ok = std::process::Command::new("cmd")
+                        .args(["/c", "mklink", "/J"])
+                        .arg(link)
+                        .arg(&junc_target)
+                        .output()
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if ok {
+                        Ok(())
+                    } else {
+                        Err(sym_err)
+                    }
+                }
+            }
+        } else {
+            match std::os::windows::fs::symlink_file(&win_target, link) {
+                Ok(()) => Ok(()),
+                Err(sym_err) if sym_err.raw_os_error() == Some(1314) && existing_file => {
+                    std::fs::copy(&resolved, link).map(|_| ())
+                }
+                Err(sym_err) => Err(sym_err),
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, hint);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlinks unsupported",
+        ))
+    }
+}
+
 #[cfg(any(not(unix), test))]
 fn normalize_windows_canonical_path(raw: &str) -> String {
-    let mut s = raw.replace('/', r"\");
-    if let Some(unc) = s
-        .strip_prefix(r"\\?\UNC\")
-        .or_else(|| s.strip_prefix(r"\\?\unc\"))
-    {
-        s = format!(r"\\{unc}");
-    } else if let Some(rest) = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\??\")) {
-        s = rest.to_string();
-    }
+    let replaced = raw.replace('/', r"\");
+    let mut s = strip_windows_device_prefix(&replaced);
     while s.len() > 3 && s.ends_with('\\') && !s.ends_with(r":\") {
         s.pop();
     }
@@ -876,9 +1224,143 @@ mod tests {
             r"c:\users\runner\out"
         );
         assert_eq!(normalize_windows_canonical_path(r"\\?\C:\"), r"c:\");
+        // Verbatim UNC (`\\?\UNC\...`), NT UNC (`\??\UNC\...`), and plain UNC (`\\...`)
+        // must all normalize to the identical `\\server\share\dir` identity.
+        let unc_verbatim = normalize_windows_canonical_path(r"\\?\UNC\Server\Share\Dir\");
+        let unc_nt = normalize_windows_canonical_path(r"\??\UNC\server\share\dir");
+        let unc_nt_mixed = normalize_windows_canonical_path(r"\??\Unc\Server\Share\Dir\");
+        let unc_plain = normalize_windows_canonical_path(r"\\server\share\dir");
+        assert_eq!(unc_verbatim, r"\\server\share\dir");
+        assert_eq!(unc_nt, unc_verbatim);
+        assert_eq!(unc_nt_mixed, unc_verbatim);
+        assert_eq!(unc_plain, unc_verbatim);
         assert_eq!(
-            normalize_windows_canonical_path(r"\\?\UNC\Server\Share\Dir\"),
-            r"\\server\share\dir"
+            strip_windows_prefix_case_insensitive(r"C:\Ws\ExecRoot\out\a", r"c:/ws/execroot/"),
+            Some(r"out\a".to_string())
         );
+    }
+
+    #[test]
+    fn windows_symlink_classification_handles_nt_prefixes_hints_and_dangling_targets() {
+        let link = Path::new(r"C:\ws\execroot\out\link_node");
+
+        // NT `\??\C:\...` junction target is stripped to `C:\...` and treated as absolute
+        // (never joined onto `link.parent()`), classifying as a directory symlink when target exists.
+        let (win_t, resolved, is_dir) = classify_windows_symlink(
+            link,
+            r"\??\C:\ext\shared_dir",
+            SymlinkKindHint::Auto,
+            true,
+            false,
+        );
+        assert_eq!(win_t, r"C:\ext\shared_dir");
+        assert_eq!(resolved, PathBuf::from(r"C:\ext\shared_dir"));
+        assert!(is_dir);
+
+        // NT `\??\UNC\...` target rewrites to `\\server\share\...` and is treated as absolute.
+        let (win_unc, resolved_unc, is_dir_unc) = classify_windows_symlink(
+            link,
+            r"\??\UNC\Server\Share\dir",
+            SymlinkKindHint::Auto,
+            true,
+            false,
+        );
+        assert_eq!(win_unc, r"\\Server\Share\dir");
+        assert_eq!(resolved_unc, PathBuf::from(r"\\Server\Share\dir"));
+        assert!(is_dir_unc);
+
+        // Explicit `SymlinkKindHint::Dir` (`output_directory_symlinks` or declared tree output)
+        // classifies even a dangling relative target as a directory symlink.
+        let (_, _, is_dangling_dir) = classify_windows_symlink(
+            link,
+            "../dangling_future_dir",
+            SymlinkKindHint::Dir,
+            false,
+            false,
+        );
+        assert!(is_dangling_dir);
+
+        // Explicit `SymlinkKindHint::File` (`output_file_symlinks`) classifies as file symlink.
+        let (_, _, is_dangling_file) = classify_windows_symlink(
+            link,
+            "../dangling_file",
+            SymlinkKindHint::File,
+            false,
+            false,
+        );
+        assert!(!is_dangling_file);
+
+        // `Auto` with trailing `/` or `\` on a dangling target classifies as a directory symlink.
+        let (_, _, is_trailing_slash_dir) = classify_windows_symlink(
+            link,
+            "../dangling_dir/",
+            SymlinkKindHint::Auto,
+            false,
+            false,
+        );
+        assert!(is_trailing_slash_dir);
+    }
+
+    #[test]
+    fn flatten_to_local_dir_plants_cross_subtree_directory_symlinks_traversably() {
+        // `a_early/link_to_z -> ../z_late/nested` appears alphabetically BEFORE `z_late/nested`
+        // in the `Tree`; two-pass materialization ensures `z_late/nested` already exists on disk
+        // when `a_early/link_to_z` is planted, so Windows creates a directory symlink (`symlink_dir`)
+        // that can be traversed both by `std::fs::read_dir` and `tree_from_local_dir`.
+        let base = std::env::temp_dir().join(format!("zel-merkle-xtree-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let c = MerkleTreeComputer::new(DigestFn::Sha256);
+        let built = c
+            .build(&[
+                MerkleInput::symlink("a_early/link_to_z", "../z_late/nested"),
+                MerkleInput::symlink("a_early/chain_to_z", "link_to_z"),
+                MerkleInput::bytes(
+                    "z_late/nested/payload.txt",
+                    b"cross-tree-ok".to_vec(),
+                    false,
+                ),
+            ])
+            .unwrap();
+        let mut children = Vec::new();
+        for (dg, src) in &built.blobs {
+            if *dg != built.root_digest {
+                if let BlobSource::Bytes(b) = src {
+                    if let Ok(dir_proto) = Directory::decode(b) {
+                        if !dir_proto.files.is_empty()
+                            || !dir_proto.directories.is_empty()
+                            || !dir_proto.symlinks.is_empty()
+                        {
+                            children.push(dir_proto);
+                        }
+                    }
+                }
+            }
+        }
+        let tree = Tree {
+            root: Some(built.root.clone()),
+            children,
+        };
+
+        let dest = base.join("materialized");
+        flatten_to_local_dir(&tree, DigestFn::Sha256, &dest, |dg| {
+            match built.blobs.get(dg) {
+                Some(BlobSource::Bytes(b)) => Ok(b.clone()),
+                _ => Err(io::Error::new(io::ErrorKind::NotFound, "missing test blob")),
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("a_early/link_to_z/payload.txt")).unwrap(),
+            b"cross-tree-ok"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("a_early/chain_to_z/payload.txt")).unwrap(),
+            b"cross-tree-ok"
+        );
+
+        let _ = remove_existing_entry(&dest.join("a_early/chain_to_z"));
+        let _ = remove_existing_entry(&dest.join("a_early/link_to_z"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

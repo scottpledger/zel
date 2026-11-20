@@ -1287,7 +1287,7 @@ struct StagedResult {
     files: Vec<(String, Vec<u8>, bool)>,
     unmaterialized_files: Vec<String>,
     trees: Vec<StagedTreeOutput>,
-    symlinks: BTreeMap<String, String>,
+    symlinks: BTreeMap<String, (String, crate::merkle::SymlinkKindHint)>,
     lazy_updates: Vec<(String, RemoteOutput)>,
 }
 
@@ -1308,22 +1308,46 @@ impl RemoteSpawnRunner {
         let stderr = self.inline_or_fetch(&r.stderr_raw, &r.stderr_digest, meta)?;
 
         // Collect and deduplicate symlinks first so conflicting symlink paths fail before writes.
-        let mut symlinks_to_plant: BTreeMap<String, String> = BTreeMap::new();
-        for s in r
+        // Merge hints across REAPI v2.1 (`output_symlinks`) and v2.0 (`output_file_symlinks` /
+        // `output_directory_symlinks`) plus declared tree outputs so directory symlinks retain
+        // `SymlinkKindHint::Dir` even when both fields are populated or targets are dangling.
+        let declared_trees = tree_outputs(spawn);
+        let mut symlinks_to_plant: BTreeMap<String, (String, crate::merkle::SymlinkKindHint)> =
+            BTreeMap::new();
+        let hinted_symlinks = r
             .output_symlinks
             .iter()
-            .chain(&r.output_file_symlinks)
-            .chain(&r.output_directory_symlinks)
-        {
-            if let Some(prev) = symlinks_to_plant.get(&s.path) {
-                if prev != &s.target {
+            .map(|s| {
+                let h = if declared_trees.contains(&s.path) {
+                    crate::merkle::SymlinkKindHint::Dir
+                } else {
+                    crate::merkle::SymlinkKindHint::Auto
+                };
+                (s, h)
+            })
+            .chain(
+                r.output_file_symlinks
+                    .iter()
+                    .map(|s| (s, crate::merkle::SymlinkKindHint::File)),
+            )
+            .chain(
+                r.output_directory_symlinks
+                    .iter()
+                    .map(|s| (s, crate::merkle::SymlinkKindHint::Dir)),
+            );
+        for (s, hint) in hinted_symlinks {
+            if let Some((prev_target, prev_hint)) = symlinks_to_plant.get_mut(&s.path) {
+                if prev_target != &s.target {
                     return Err(RemoteError::Other(format!(
                         "Conflicting output symlinks for {}: '{}' vs '{}'",
-                        s.path, prev, s.target
+                        s.path, prev_target, s.target
                     )));
                 }
+                if *prev_hint == crate::merkle::SymlinkKindHint::Auto {
+                    *prev_hint = hint;
+                }
             } else {
-                symlinks_to_plant.insert(s.path.clone(), s.target.clone());
+                symlinks_to_plant.insert(s.path.clone(), (s.target.clone(), hint));
             }
         }
 
@@ -1448,29 +1472,98 @@ impl RemoteSpawnRunner {
         spawn: &Spawn,
         execroot: &Path,
     ) -> Result<(Vec<u8>, Vec<u8>, bool), RemoteError> {
+        let mut known_dirs: HashSet<String> = tree_outputs(spawn).into_iter().collect();
+        known_dirs.insert(String::new());
+        let mut known_files: HashSet<String> = HashSet::new();
+
         for (rel, bytes, executable) in &staged.files {
+            crate::merkle::record_ancestors_as_dirs(rel, &mut known_dirs);
+            known_files.insert(rel.clone());
             write_atomic_output(&execroot.join(rel), bytes, *executable)?;
         }
         for rel in &staged.unmaterialized_files {
+            crate::merkle::record_ancestors_as_dirs(rel, &mut known_dirs);
+            known_files.insert(rel.clone());
             let _ = crate::merkle::remove_existing_entry(&execroot.join(rel));
         }
+        // Pass 1: materialize all output directory trees (directories and files) BEFORE planting
+        // any symlinks (`RemoteExecutionService.downloadOutputs` / `createSymlinks`), so cross-tree
+        // and cross-output directory targets already exist on disk when Windows classifies links.
+        let mut all_symlinks_for_inference: Vec<(String, String)> = Vec::new();
         for t in &staged.trees {
+            crate::merkle::record_ancestors_as_dirs(&t.rel_dir, &mut known_dirs);
+            known_dirs.insert(t.rel_dir.clone());
             let base = execroot.join(&t.rel_dir);
             let _ = std::fs::remove_dir_all(&base);
             std::fs::create_dir_all(&base)?;
             for sd in &t.subdirs {
+                let full_sd = format!("{}/{sd}", t.rel_dir);
+                crate::merkle::record_ancestors_as_dirs(&full_sd, &mut known_dirs);
+                known_dirs.insert(full_sd);
                 std::fs::create_dir_all(base.join(sd))?;
             }
             for (path, bytes, executable) in &t.files {
+                let full_f = format!("{}/{path}", t.rel_dir);
+                crate::merkle::record_ancestors_as_dirs(&full_f, &mut known_dirs);
+                known_files.insert(full_f);
                 write_atomic_output(&base.join(path), bytes, *executable)?;
             }
             for (path, target) in &t.symlinks {
-                make_symlink(&base.join(path), target)?;
+                let full_s = format!("{}/{path}", t.rel_dir);
+                crate::merkle::record_ancestors_as_dirs(&full_s, &mut known_dirs);
+                all_symlinks_for_inference.push((full_s, target.clone()));
             }
         }
-        // Plant top-level symlinks AFTER all regular files and directories are materialized.
-        for (rel_path, target) in &staged.symlinks {
-            make_symlink(&execroot.join(rel_path), target)?;
+        for (rel_path, (target, explicit_hint)) in &staged.symlinks {
+            crate::merkle::record_ancestors_as_dirs(rel_path, &mut known_dirs);
+            match explicit_hint {
+                crate::merkle::SymlinkKindHint::Dir => {
+                    known_dirs.insert(rel_path.clone());
+                }
+                crate::merkle::SymlinkKindHint::File => {
+                    known_files.insert(rel_path.clone());
+                }
+                crate::merkle::SymlinkKindHint::Auto => {}
+            }
+            all_symlinks_for_inference.push((rel_path.clone(), target.clone()));
+        }
+
+        crate::merkle::propagate_symlink_kinds(
+            &all_symlinks_for_inference,
+            execroot,
+            &mut known_dirs,
+            &mut known_files,
+        );
+
+        // Pass 2: plant all in-tree and top-level symlinks after files and directories exist.
+        for t in &staged.trees {
+            let base = execroot.join(&t.rel_dir);
+            for (path, target) in &t.symlinks {
+                let full_s = format!("{}/{path}", t.rel_dir);
+                let hint = crate::merkle::infer_root_relative_symlink_hint(
+                    &full_s,
+                    target,
+                    execroot,
+                    &known_dirs,
+                    &known_files,
+                );
+                crate::merkle::plant_symlink(&base.join(path), target, hint)?;
+            }
+        }
+        for (rel_path, (target, explicit_hint)) in &staged.symlinks {
+            let hint = match *explicit_hint {
+                crate::merkle::SymlinkKindHint::Auto => {
+                    crate::merkle::infer_root_relative_symlink_hint(
+                        rel_path,
+                        target,
+                        execroot,
+                        &known_dirs,
+                        &known_files,
+                    )
+                }
+                other => other,
+            };
+            crate::merkle::plant_symlink(&execroot.join(rel_path), target, hint)?;
         }
 
         let mut lazy = self.lazy.lock().unwrap();
@@ -2374,52 +2467,36 @@ fn write_atomic_output(dest: &Path, data: &[u8], executable: bool) -> io::Result
     Ok(())
 }
 
-fn make_symlink(link: &Path, target: &str) -> io::Result<()> {
-    if let Some(p) = link.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    let _ = crate::merkle::remove_existing_entry(link);
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(target, link)
-    }
-    #[cfg(windows)]
-    {
-        let resolved = {
-            let tp = Path::new(target);
-            if tp.is_absolute() {
-                tp.to_path_buf()
-            } else {
-                link.parent().unwrap_or_else(|| Path::new(".")).join(tp)
-            }
-        };
-        if resolved.is_dir() {
-            std::os::windows::fs::symlink_dir(target, link)
-        } else {
-            std::os::windows::fs::symlink_file(target, link)
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = target;
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "symlinks unsupported",
-        ))
-    }
-}
-
 /// Resolves `target` relative to `link_rel`'s parent directory, returning an execroot-relative
 /// `/`-separated path if it remains inside `execroot`.
 fn resolve_execroot_symlink(link_rel: &str, target: &Path, execroot: &Path) -> Option<String> {
-    if target.is_absolute() {
-        let rel = target.strip_prefix(execroot).ok()?;
-        return normalize_rel_components(rel);
+    #[cfg(windows)]
+    {
+        let target_s = crate::merkle::strip_windows_device_prefix(&target.to_string_lossy());
+        if crate::merkle::is_windows_path_str_absolute(&target_s) {
+            let root_s = crate::merkle::strip_windows_device_prefix(&execroot.to_string_lossy());
+            let rel = crate::merkle::strip_windows_prefix_case_insensitive(&target_s, &root_s)?;
+            if rel.is_empty() {
+                return None;
+            }
+            return normalize_rel_components(Path::new(&rel.replace('\\', "/")));
+        }
+        let parent = Path::new(link_rel)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        normalize_rel_components(&parent.join(target_s.replace('\\', "/")))
     }
-    let parent = Path::new(link_rel)
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
-    normalize_rel_components(&parent.join(target))
+    #[cfg(not(windows))]
+    {
+        if target.is_absolute() {
+            let rel = target.strip_prefix(execroot).ok()?;
+            return normalize_rel_components(rel);
+        }
+        let parent = Path::new(link_rel)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        normalize_rel_components(&parent.join(target))
+    }
 }
 
 fn normalize_rel_components(p: &Path) -> Option<String> {

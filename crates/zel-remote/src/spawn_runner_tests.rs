@@ -1093,3 +1093,148 @@ fn credential_helper_failure_aborts_spawn_even_in_remote_spawn_cache_mode() {
         .unwrap();
     assert!(init_err.contains("Credential helper"), "{init_err}");
 }
+
+#[test]
+fn materialize_action_result_plants_cross_tree_and_dangling_directory_symlinks() {
+    use crate::digest::DigestFn;
+
+    let server = FakeReapiServer::new();
+    server.set_executor(|ctx| {
+        let leaf_dg = ctx.server.put_blob(b"from-out-b");
+
+        // `out_a` has an intra-action cross-tree symlink `to_b -> ../out_b/sub` even though
+        // `out_a` precedes `out_b` in `output_directories`.
+        let dir_a_root = Directory {
+            symlinks: vec![SymlinkNode {
+                name: "to_b".into(),
+                target: "../out_b/sub".into(),
+                node_properties: None,
+            }],
+            ..Default::default()
+        };
+        let tree_a_dg = ctx.server.put_blob(
+            &Tree {
+                root: Some(dir_a_root),
+                children: vec![],
+            }
+            .encode_to_vec(),
+        );
+
+        let dir_b_sub = Directory {
+            files: vec![FileNode {
+                name: "inside.txt".into(),
+                digest: Some(leaf_dg),
+                is_executable: false,
+                node_properties: None,
+            }],
+            ..Default::default()
+        };
+        let dir_b_sub_dg = DigestFn::Sha256.digest(&dir_b_sub.encode_to_vec());
+        let dir_b_root = Directory {
+            directories: vec![DirectoryNode {
+                name: "sub".into(),
+                digest: Some(dir_b_sub_dg),
+            }],
+            ..Default::default()
+        };
+        let tree_b_dg = ctx.server.put_blob(
+            &Tree {
+                root: Some(dir_b_root),
+                children: vec![dir_b_sub],
+            }
+            .encode_to_vec(),
+        );
+
+        Ok(ActionResult {
+            exit_code: 0,
+            output_directories: vec![
+                OutputDirectory {
+                    path: "out_a".into(),
+                    tree_digest: Some(tree_a_dg),
+                    ..Default::default()
+                },
+                OutputDirectory {
+                    path: "out_b".into(),
+                    tree_digest: Some(tree_b_dg),
+                    ..Default::default()
+                },
+            ],
+            // Populate both `output_symlinks` and `output_directory_symlinks` (like UploadManifest)
+            // for `dangling_dir_sym -> future_dir`, plus a multi-hop chain `a_chain -> z_top_dir -> out_b/sub`.
+            output_symlinks: vec![
+                OutputSymlink {
+                    path: "a_chain".into(),
+                    target: "z_top_dir".into(),
+                    node_properties: None,
+                },
+                OutputSymlink {
+                    path: "z_top_dir".into(),
+                    target: "out_b/sub".into(),
+                    node_properties: None,
+                },
+                OutputSymlink {
+                    path: "dangling_dir_sym".into(),
+                    target: "future_dir".into(),
+                    node_properties: None,
+                },
+            ],
+            output_directory_symlinks: vec![OutputSymlink {
+                path: "dangling_dir_sym".into(),
+                target: "future_dir".into(),
+                node_properties: None,
+            }],
+            ..Default::default()
+        })
+    });
+
+    let ws = tmp("xtree-dir-sym");
+    std::fs::write(ws.join("i"), "x").unwrap();
+    let r = runner(
+        &server,
+        true,
+        &["--remote_download_outputs=all"],
+        counting(),
+    );
+    let s = spawn(
+        &["tool"],
+        &["i"],
+        &["out_a", "out_b", "a_chain", "z_top_dir", "dangling_dir_sym"],
+    );
+    let res = LocalFileSystem::default();
+    let exec_res = r
+        .exec(&s, &PathFragment::create(&ws.to_string_lossy()), &res)
+        .unwrap();
+    assert_eq!(exec_res.status, SpawnStatus::Success);
+
+    // 1. Cross-tree symlink `out_a/to_b -> ../out_b/sub` traverses as a directory.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out_a/to_b/inside.txt")).unwrap(),
+        "from-out-b"
+    );
+    // 2. Multi-hop out-of-order top-level symlink chain `a_chain -> z_top_dir -> out_b/sub` traverses.
+    assert_eq!(
+        std::fs::read_to_string(ws.join("a_chain/inside.txt")).unwrap(),
+        "from-out-b"
+    );
+    // 3. `dangling_dir_sym` was planted as a directory symlink even though `future_dir` did not exist yet;
+    // creating `future_dir/later.txt` afterwards makes `dangling_dir_sym/later.txt` traversable on Windows too.
+    std::fs::create_dir_all(ws.join("future_dir")).unwrap();
+    std::fs::write(ws.join("future_dir/later.txt"), "dangling-ok").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(ws.join("dangling_dir_sym/later.txt")).unwrap(),
+        "dangling-ok"
+    );
+
+    // 4. Re-uploading `out_a` via `tree_from_local_dir` also succeeds cleanly.
+    let mut blobs = BTreeMap::new();
+    let reuploaded =
+        crate::merkle::tree_from_local_dir(&ws.join("out_a"), DigestFn::Sha256, &mut blobs)
+            .unwrap();
+    assert_eq!(reuploaded.root.unwrap().symlinks.len(), 1);
+
+    let _ = crate::merkle::remove_existing_entry(&ws.join("a_chain"));
+    let _ = crate::merkle::remove_existing_entry(&ws.join("z_top_dir"));
+    let _ = crate::merkle::remove_existing_entry(&ws.join("dangling_dir_sym"));
+    let _ = crate::merkle::remove_existing_entry(&ws.join("out_a/to_b"));
+    let _ = std::fs::remove_dir_all(&ws);
+}
