@@ -239,7 +239,7 @@ extern "C" {
     fn flock(fd: i32, operation: i32) -> i32;
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn isatty(fd: i32) -> i32;
-    fn ttyname(fd: i32) -> *const i8;
+    fn ttyname(fd: i32) -> *const std::ffi::c_char;
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
