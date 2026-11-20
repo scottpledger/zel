@@ -1073,7 +1073,7 @@ impl FileSystem for LocalFileSystem {
                 (mtime, perms, 0)
             }
         };
-        let is_link = !follow_symlinks && is_metadata_junction_or_symlink(&std_path, &meta);
+        let is_link = !follow_symlinks && is_metadata_junction_or_symlink(&meta);
         Ok(FileStatus {
             is_file: !is_link && ft.is_file(),
             is_directory: !is_link && ft.is_dir(),
@@ -1131,7 +1131,7 @@ impl FileSystem for LocalFileSystem {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let ft = entry.file_type()?;
-            let dirent_type = if ft.is_symlink() || is_junction_or_symlink(&entry.path()) {
+            let dirent_type = if is_dirent_junction_or_symlink(&entry, &ft) {
                 DirentType::Symlink
             } else if ft.is_dir() {
                 DirentType::Directory
@@ -1150,7 +1150,7 @@ impl FileSystem for LocalFileSystem {
         let p = Self::to_std_path(path);
         match fs::symlink_metadata(&p) {
             Ok(meta) => {
-                if is_metadata_junction_or_symlink(&p, &meta) {
+                if is_metadata_junction_or_symlink(&meta) {
                     remove_junction_or_symlink(&p)?;
                     return Ok(true);
                 }
@@ -1280,12 +1280,18 @@ pub enum WindowsUnlinkAction {
     RemoveFile,
 }
 
+/// Returns `true` when Win32 `dwFileAttributes` or `FileType::is_symlink()` indicates a reparse
+/// point or symlink (`IsSymlinkOrJunction` in `src/main/native/windows/file.cc:99-125`).
+pub fn is_windows_reparse_or_symlink(file_attributes: u32, is_symlink: bool) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    is_symlink || (file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
 /// Classifies how `UnlinkPathW` handles a path with Win32 `dwFileAttributes` and `FileType::is_symlink()`.
 pub fn classify_windows_unlink(file_attributes: u32, is_symlink: bool) -> WindowsUnlinkAction {
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
     if (file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
-        if (file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || is_symlink {
+        if is_windows_reparse_or_symlink(file_attributes, is_symlink) {
             WindowsUnlinkAction::RemoveDirReparsePoint
         } else {
             WindowsUnlinkAction::SkipDirectory
@@ -1394,27 +1400,39 @@ pub fn link_target_matches_str(
     norm(actual_link_target) == norm(expected_target)
 }
 
-fn is_metadata_junction_or_symlink(path: &StdPath, meta: &fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
+fn is_dirent_junction_or_symlink(entry: &fs::DirEntry, ft: &fs::FileType) -> bool {
+    if ft.is_symlink() {
         return true;
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-            return fs::read_link(path).is_ok();
-        }
+        entry
+            .metadata()
+            .is_ok_and(|meta| is_metadata_junction_or_symlink(&meta))
     }
     #[cfg(not(windows))]
-    let _ = path;
-    false
+    {
+        let _ = entry;
+        false
+    }
 }
 
-/// Returns `true` if `path` is a symbolic link or Windows NTFS directory junction without
-/// following the link (`IsSymlinkOrJunction` in `file_windows.cc`).
+fn is_metadata_junction_or_symlink(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        is_windows_reparse_or_symlink(meta.file_attributes(), meta.file_type().is_symlink())
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// Returns `true` if `path` is a symbolic link or Windows NTFS reparse point / junction without
+/// following the link (`IsSymlinkOrJunction` in `src/main/native/windows/file.cc:99-125`).
 pub fn is_junction_or_symlink(path: &StdPath) -> bool {
-    fs::symlink_metadata(path).is_ok_and(|meta| is_metadata_junction_or_symlink(path, &meta))
+    fs::symlink_metadata(path).is_ok_and(|meta| is_metadata_junction_or_symlink(&meta))
 }
 
 /// Removes a symbolic link or Windows NTFS directory junction without following it or modifying
@@ -2865,7 +2883,13 @@ mod tests {
                 .is_symlink());
         }
 
-        // Verify `UnlinkPathW` Windows attribute classification across junctions, real dirs, and files.
+        // Verify `IsSymlinkOrJunction` and `UnlinkPathW` Windows attribute classification across
+        // reparse points (without requiring `read_link`), junctions, real dirs, and files.
+        assert!(!is_windows_reparse_or_symlink(0x0010, false));
+        assert!(!is_windows_reparse_or_symlink(0x0080, false));
+        assert!(is_windows_reparse_or_symlink(0x0010 | 0x0400, false));
+        assert!(is_windows_reparse_or_symlink(0x0400, false));
+        assert!(is_windows_reparse_or_symlink(0x0010, true));
         assert_eq!(
             classify_windows_unlink(0x0010, false),
             WindowsUnlinkAction::SkipDirectory
