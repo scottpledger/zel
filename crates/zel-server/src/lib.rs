@@ -898,6 +898,7 @@ impl BlazeRuntime {
             Some(&parsed),
             command,
             &self.dirs.output_base.to_string(),
+            self.dirs.workspace_dir.path_string(),
             env_inv_id.as_deref(),
             &self.client_env(),
         );

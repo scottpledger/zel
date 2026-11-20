@@ -1061,7 +1061,7 @@ impl ReapiClient {
                     if e.code == code::UNAUTHENTICATED
                         && !e.credential_helper_error
                         && !refreshed_auth
-                        && self.cache.credentials().is_some() =>
+                        && self.cache.has_refreshable_credentials() =>
                 {
                     refreshed_auth = true;
                     self.cache.refresh_credentials()?;

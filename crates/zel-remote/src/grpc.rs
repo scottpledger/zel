@@ -479,7 +479,7 @@ impl Channel {
                 connector.authority()
             )
         } else {
-            cfg.auth_uri
+            crate::credentials::normalize_credential_uri(&cfg.auth_uri)
         };
         Self {
             connector,
@@ -514,8 +514,18 @@ impl Channel {
         self.connector.authority()
     }
 
+    pub fn auth_uri(&self) -> &str {
+        &self.auth_uri
+    }
+
     pub fn credentials(&self) -> Option<&Arc<dyn CallCredentialsProvider>> {
         self.credentials.as_ref()
+    }
+
+    pub fn has_refreshable_credentials(&self) -> bool {
+        self.credentials
+            .as_ref()
+            .is_some_and(|c| c.supports_refresh(&self.auth_uri))
     }
 
     pub fn refresh_credentials(&self) -> Result<(), GrpcStatus> {
@@ -774,7 +784,7 @@ impl Channel {
             Err(e)
                 if e.code == code::UNAUTHENTICATED
                     && !e.credential_helper_error
-                    && self.credentials.is_some() =>
+                    && self.has_refreshable_credentials() =>
             {
                 self.refresh_credentials()?;
                 run_once()
@@ -803,7 +813,7 @@ impl Channel {
                 if !yielded_any
                     && e.code == code::UNAUTHENTICATED
                     && !e.credential_helper_error
-                    && self.credentials.is_some() =>
+                    && self.has_refreshable_credentials() =>
             {
                 self.refresh_credentials()?;
                 let mut reqs2 = std::iter::once(request.to_vec());
