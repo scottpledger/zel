@@ -1624,12 +1624,20 @@ fn dispatch_inner(
                 ))
             })?;
             // Overrides of non-root modules are ignored, so their patch labels are not checked.
-            let root_apparent = s.repo_name.as_deref().unwrap_or(s.name.as_str());
-            if s.opts_key.is_root() {
+            let root_apparent = s
+                .repo_name
+                .as_deref()
+                .unwrap_or(s.name.as_str())
+                .to_string();
+            let patches = if s.opts_key.is_root() {
+                let mut canonical_patches = Vec::with_capacity(patches.len());
                 for p in &patches {
-                    validate_patch_label(p, root_apparent)?;
+                    canonical_patches.push(convert_and_validate_patch_label(p, &root_apparent)?);
                 }
-            }
+                canonical_patches
+            } else {
+                patches
+            };
             add_override(
                 &mut s,
                 module_name,
@@ -1698,8 +1706,10 @@ fn dispatch_inner(
                 if k == "patches" && s.opts_key.is_root() {
                     let mut l: Vec<AttrVal> = Vec::new();
                     for p in v.str_list() {
-                        validate_patch_label(&p, &root_apparent)?;
-                        l.push(AttrVal::Str(patch_label_to_canonical(&p, &root_apparent)));
+                        l.push(AttrVal::Str(convert_and_validate_patch_label(
+                            &p,
+                            &root_apparent,
+                        )?));
                     }
                     spec_attrs.push((k, AttrVal::List(l)));
                 } else {
@@ -1735,8 +1745,10 @@ fn dispatch_inner(
                 if k == "patches" && s.opts_key.is_root() {
                     let mut l: Vec<AttrVal> = Vec::new();
                     for p in v.str_list() {
-                        validate_patch_label(&p, &root_apparent)?;
-                        l.push(AttrVal::Str(patch_label_to_canonical(&p, &root_apparent)));
+                        l.push(AttrVal::Str(convert_and_validate_patch_label(
+                            &p,
+                            &root_apparent,
+                        )?));
                     }
                     spec_attrs.push((k, AttrVal::List(l)));
                 } else {
@@ -1778,77 +1790,135 @@ fn dispatch_inner(
     }
 }
 
-fn validate_patch_label(raw: &str, root_apparent: &str) -> Result<(), StarlarkError> {
-    if raw.starts_with("//")
-        || raw.starts_with("@//")
-        || raw.starts_with("@@//")
-        || raw.starts_with(':')
-    {
+/// Mirrors `ModuleFileGlobals.convertAndValidatePatchLabel` (`ModuleFileGlobals.java:522-546`):
+/// parses `raw` with `PackageIdentifier.EMPTY_PACKAGE_ID` and a `RepositoryMapping` containing
+/// only `"" -> MAIN` and `<root_apparent> -> MAIN`.
+/// - Canonical `@@<repo>//...` labels (such as `@@bazel_tools//...` or `@@other_repo//:p.diff`)
+///   bypass `repoMapping` (`Label.computeRepoNameWithRepoContext`, `Label.java:190`) and retain
+///   their exact canonical repo name (`@@bazel_tools`, never `@@bazel_tools+`).
+/// - Apparent `@<repo>//...` labels other than `@//...` and `@<root_apparent>//...` are not
+///   visible and fail with `only patches in the main repository can be applied, not from '@...'`.
+fn convert_and_validate_patch_label(
+    raw: &str,
+    root_apparent: &str,
+) -> Result<String, StarlarkError> {
+    fn validate_repo_syntax(raw: &str, repo: &str) -> Result<(), StarlarkError> {
+        if repo.is_empty() {
+            return Ok(());
+        }
+        if repo == "." || repo == ".." {
+            return err(format!(
+                "invalid label \"{raw}\" in 'patches': invalid repository name '{repo}': repo names are not allowed to be '{repo}'"
+            ));
+        }
+        if !repo
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
+        {
+            return err(format!(
+                "invalid label \"{raw}\" in 'patches': invalid repository name '{repo}': repo names may contain only A-Z, a-z, 0-9, '-', '_', '.' and '+'"
+            ));
+        }
         Ok(())
-    } else if raw.starts_with('@') && !raw.starts_with("@@") {
-        let repo = raw[1..].split("//").next().unwrap_or("");
-        if (!root_apparent.is_empty() && repo == root_apparent) || repo == "bazel_tools" {
-            Ok(())
-        } else {
-            err(format!(
-                "no repo visible as '@{repo}' here (patch label '{raw}' must refer to the root module)"
-            ))
-        }
-    } else if let Some(rest) = raw.strip_prefix("@@") {
-        let repo = rest.split("//").next().unwrap_or("");
-        err(format!(
-            "no repo visible as '@@{repo}' here (patch label '{raw}' must refer to the root module)"
-        ))
-    } else {
-        err(format!(
-            "invalid label \"{raw}\" in 'patches': absolute label must begin with '@' or '//'"
-        ))
     }
-}
 
-fn patch_label_to_canonical(raw: &str, root_apparent: &str) -> String {
-    let stripped_root;
-    let raw = if !root_apparent.is_empty() {
-        if let Some(rest) = raw.strip_prefix(&format!("@{root_apparent}//")) {
-            stripped_root = format!("//{rest}");
-            stripped_root.as_str()
-        } else if raw == format!("@{root_apparent}") {
-            stripped_root = format!("//:{root_apparent}");
-            stripped_root.as_str()
-        } else {
-            raw
+    fn parse_pkg_and_target(
+        raw: &str,
+        after_slashes: &str,
+    ) -> Result<(String, String), StarlarkError> {
+        let (pkg, target) = match after_slashes.split_once(':') {
+            Some((p, t)) => (p.to_string(), t.to_string()),
+            None => (
+                after_slashes.to_string(),
+                after_slashes.rsplit('/').next().unwrap_or("").to_string(),
+            ),
+        };
+        if pkg == "..." || pkg.ends_with("/...") {
+            return err(format!(
+                "invalid label \"{raw}\" in 'patches': invalid label '{raw}': package name cannot contain '...'"
+            ));
         }
-    } else {
-        raw
-    };
-    if let Some(rest) = raw.strip_prefix("@bazel_tools//") {
-        let (pkg, name) = match rest.split_once(':') {
-            Some((p, n)) => (p.to_string(), n.to_string()),
-            None => (
-                rest.to_string(),
-                rest.rsplit('/').next().unwrap_or("").to_string(),
-            ),
-        };
-        return format!("@@bazel_tools+//{pkg}:{name}");
+        validate_target_syntax(raw, &target)?;
+        Ok((pkg, target))
     }
-    let r = raw.trim_start_matches('@');
-    let r = if let Some(x) = r.strip_prefix("//") {
-        format!("//{x}")
-    } else {
-        r.to_string()
-    };
-    if r.starts_with("//") {
-        let (pkg, name) = match r.trim_start_matches("//").split_once(':') {
-            Some((p, n)) => (p.to_string(), n.to_string()),
-            None => (
-                r.trim_start_matches("//").to_string(),
-                r.rsplit('/').next().unwrap_or("").to_string(),
-            ),
-        };
-        format!("@@//{pkg}:{name}")
-    } else {
-        format!("@@//:{}", r.trim_start_matches(':').replace("//", ""))
+
+    fn validate_target_syntax(raw: &str, target: &str) -> Result<(), StarlarkError> {
+        if target.is_empty() {
+            return err(format!(
+                "invalid label \"{raw}\" in 'patches': invalid target name '': empty target name"
+            ));
+        }
+        if target.contains(':') {
+            return err(format!(
+                "invalid label \"{raw}\" in 'patches': invalid target name '{target}': target names may not contain ':'"
+            ));
+        }
+        Ok(())
     }
+
+    if let Some(rest) = raw.strip_prefix("@@") {
+        let (repo, pkg, target) = match rest.split_once("//") {
+            Some((r, after)) => {
+                validate_repo_syntax(raw, r)?;
+                let (p, t) = parse_pkg_and_target(raw, after)?;
+                (r, p, t)
+            }
+            None => {
+                validate_repo_syntax(raw, rest)?;
+                validate_target_syntax(raw, rest)?;
+                (rest, String::new(), rest.to_string())
+            }
+        };
+        return if repo.is_empty() {
+            Ok(format!("@@//{pkg}:{target}"))
+        } else {
+            Ok(format!("@@{repo}//{pkg}:{target}"))
+        };
+    }
+
+    if let Some(rest) = raw.strip_prefix('@') {
+        let (repo, pkg, target) = match rest.split_once("//") {
+            Some((r, after)) => {
+                validate_repo_syntax(raw, r)?;
+                let (p, t) = parse_pkg_and_target(raw, after)?;
+                (r, p, t)
+            }
+            None => {
+                validate_repo_syntax(raw, rest)?;
+                validate_target_syntax(raw, rest)?;
+                (rest, String::new(), rest.to_string())
+            }
+        };
+        if repo.is_empty() || (!root_apparent.is_empty() && repo == root_apparent) {
+            return Ok(format!("@@//{pkg}:{target}"));
+        }
+        return err(format!(
+            "invalid label in 'patches': only patches in the main repository can be applied, not from '@{repo}'"
+        ));
+    }
+
+    if let Some(after) = raw.strip_prefix("//") {
+        let (pkg, target) = parse_pkg_and_target(raw, after)?;
+        return Ok(format!("@@//{pkg}:{target}"));
+    }
+
+    if let Some(target) = raw.strip_prefix(':') {
+        validate_target_syntax(raw, target)?;
+        return Ok(format!("@@//:{target}"));
+    }
+
+    if raw.contains(':') {
+        return err(format!(
+            "invalid label \"{raw}\" in 'patches': invalid label '{raw}': absolute label must begin with '@' or '//'"
+        ));
+    }
+    if raw == "..." || raw.ends_with("/...") {
+        return err(format!(
+            "invalid label \"{raw}\" in 'patches': invalid label '{raw}': package name cannot contain '...'"
+        ));
+    }
+    validate_target_syntax(raw, raw)?;
+    Ok(format!("@@//:{raw}"))
 }
 
 fn add_override(
@@ -2251,5 +2321,83 @@ local_path_override(module_name = "devonly", path = "../x")
             m.to_string(),
             "MultipleVersionOverride[versions=[1.0, 1.1], registry=http://x]"
         );
+    }
+
+    #[test]
+    fn patch_labels_canonicalize_bazel_tools_and_root_apparent_and_reject_other_apparent_repos() {
+        let r = eval_module_file(
+            r#"
+module(name = "root_mod", repo_name = "my_main")
+archive_override(
+    module_name = "dep_a",
+    urls = ["https://example.com/a.tgz"],
+    patches = [
+        "@@bazel_tools//tools/build_defs/repo:fix.patch",
+        "@@other_repo//:ext.patch",
+        "@my_main//:root.patch",
+        ":colon.patch",
+        "bare.patch",
+        "//sub/pkg:nested.patch",
+    ],
+)
+single_version_override(
+    module_name = "dep_b",
+    patches = ["@@bazel_tools//tools:svo.patch", "@my_main//sub:svo2.patch"],
+)
+"#,
+            opts(true),
+        )
+        .unwrap();
+
+        let (_, ov_a) = r
+            .overrides
+            .iter()
+            .find(|(n, _)| n == "dep_a")
+            .expect("dep_a override");
+        match ov_a {
+            ModuleOverride::NonRegistry(spec) => {
+                assert_eq!(
+                    spec.attr("patches").map(|v| v.str_list()),
+                    Some(vec![
+                        "@@bazel_tools//tools/build_defs/repo:fix.patch".to_string(),
+                        "@@other_repo//:ext.patch".to_string(),
+                        "@@//:root.patch".to_string(),
+                        "@@//:colon.patch".to_string(),
+                        "@@//:bare.patch".to_string(),
+                        "@@//sub/pkg:nested.patch".to_string(),
+                    ])
+                );
+            }
+            other => panic!("unexpected override: {other:?}"),
+        }
+
+        let (_, ov_b) = r
+            .overrides
+            .iter()
+            .find(|(n, _)| n == "dep_b")
+            .expect("dep_b override");
+        match ov_b {
+            ModuleOverride::SingleVersion { patches, .. } => {
+                assert_eq!(
+                    patches,
+                    &vec![
+                        "@@bazel_tools//tools:svo.patch".to_string(),
+                        "@@//sub:svo2.patch".to_string(),
+                    ]
+                );
+            }
+            other => panic!("unexpected override: {other:?}"),
+        }
+
+        for bad in ["@unknown_repo//:p.patch", "@bazel_tools//tools:p.patch"] {
+            let repo = bad[1..].split("//").next().unwrap();
+            let err = err_of(&format!(
+                "module(name = \"root\", repo_name = \"my_main\")\narchive_override(module_name = \"dep\", urls = [\"https://example.com/a.tgz\"], patches = [\"{bad}\"])"
+            ));
+            let expected = format!(
+                "invalid label in 'patches': only patches in the main repository can be applied, not from '@{repo}'"
+            );
+            assert!(err.contains(&expected), "expected `{expected}` in:\n{err}");
+        }
     }
 }
