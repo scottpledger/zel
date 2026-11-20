@@ -1673,19 +1673,86 @@ fn add_files_to_run_inputs(fields: &BTreeMap<String, Value>, out: &mut Vec<Artif
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FingerprintNodeKind {
+    List,
+    Dict,
+    Set,
+    Depset,
+    Struct,
+    UserFunction,
+    ClosureScope,
+    Module,
+}
+
+#[derive(Default)]
+struct StarlarkFingerprintState {
+    active: Vec<(FingerprintNodeKind, usize)>,
+    memo: std::collections::HashMap<(FingerprintNodeKind, usize), String>,
+}
+
+fn merge_min_anc(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+impl StarlarkFingerprintState {
+    fn enter_node<F>(
+        &mut self,
+        fp: &mut zel_util::Fingerprint,
+        kind: FingerprintNodeKind,
+        tag: &str,
+        ptr: usize,
+        build: F,
+    ) -> Option<usize>
+    where
+        F: FnOnce(&mut Self, &mut zel_util::Fingerprint) -> Option<usize>,
+    {
+        let my_depth = self.active.len();
+        if let Some(pos) = self.active.iter().rposition(|&(k, p)| k == kind && p == ptr) {
+            let rel_depth = (my_depth - 1 - pos) as u64;
+            fp.add_str("Cycle").add_str(tag).add_u64(rel_depth);
+            return Some(pos);
+        }
+        if let Some(cached) = self.memo.get(&(kind, ptr)) {
+            fp.add_str(tag).add_str(cached);
+            return None;
+        }
+        self.active.push((kind, ptr));
+        let mut sub_fp = zel_util::Fingerprint::new();
+        let min_anc = build(self, &mut sub_fp);
+        self.active.pop();
+        let digest = sub_fp.hex_digest_and_reset();
+        fp.add_str(tag).add_str(&digest);
+        let self_contained = match min_anc {
+            None => true,
+            Some(idx) => idx >= my_depth,
+        };
+        if self_contained {
+            self.memo.insert((kind, ptr), digest);
+            None
+        } else {
+            min_anc
+        }
+    }
+}
+
 fn fingerprint_starlark_value(
     fp: &mut zel_util::Fingerprint,
     val: &Value,
-    visited_fns: &mut std::collections::HashSet<usize>,
-    visited_mods: &mut std::collections::HashSet<usize>,
-) {
+    state: &mut StarlarkFingerprintState,
+) -> Option<usize> {
     if let Some(art) = artifact_of(val) {
         fp.add_str("Artifact")
             .add_str(art.exec_path.path_string())
             .add_bool(art.is_source)
             .add_bool(art.is_tree_artifact)
             .add_bool(art.is_unresolved_symlink);
-        return;
+        return None;
     }
     if let Some(rf) = runfiles_of(val) {
         fp.add_str("Runfiles")
@@ -1703,86 +1770,138 @@ fn fingerprint_starlark_value(
         for (k, a) in rsyms {
             fp.add_str(&k).add_str(a.exec_path.path_string());
         }
-        return;
+        return None;
     }
     match val {
         Value::None => {
             fp.add_str("None");
+            None
         }
         Value::Bool(b) => {
             fp.add_str("Bool").add_bool(*b);
+            None
         }
         Value::Int(i) => {
             fp.add_str("Int").add_str(&i.to_string());
+            None
         }
         Value::Float(f) => {
             fp.add_str("Float").add_u64(f.to_bits());
+            None
         }
         Value::String(s) => {
             fp.add_str("String").add_str(s);
+            None
         }
         Value::Label(l) => {
             fp.add_str("Label").add_str(&l.unambiguous_canonical_form());
+            None
         }
         Value::Range(_) => {
             fp.add_str("Range").add_str(&val.repr());
+            None
         }
-        Value::SelectorList(_) => {
-            fp.add_str("SelectorList").add_str(&val.repr());
+        Value::SelectorList(sel) => {
+            fp.add_str("SelectorList").add_u64(sel.elements.len() as u64);
+            let mut min_anc = None;
+            for elem in &sel.elements {
+                match elem {
+                    zel_starlark::SelectorElement::Native(v) => {
+                        fp.add_str("Native");
+                        min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(fp, v, state));
+                    }
+                    zel_starlark::SelectorElement::Select(entries) => {
+                        fp.add_str("Select").add_u64(entries.len() as u64);
+                        for (k, v) in entries {
+                            fp.add_str(k);
+                            min_anc =
+                                merge_min_anc(min_anc, fingerprint_starlark_value(fp, v, state));
+                        }
+                    }
+                }
+            }
+            min_anc
         }
         Value::List(l) => {
-            let elems = l.lock().unwrap().elements.clone();
-            fp.add_str("List").add_u64(elems.len() as u64);
-            for e in &elems {
-                fingerprint_starlark_value(fp, e, visited_fns, visited_mods);
-            }
+            let ptr = Arc::as_ptr(l) as usize;
+            state.enter_node(fp, FingerprintNodeKind::List, "List", ptr, |st, sub| {
+                let elems = l.lock().unwrap().elements.clone();
+                sub.add_u64(elems.len() as u64);
+                let mut min_anc = None;
+                for e in &elems {
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, e, st));
+                }
+                min_anc
+            })
         }
         Value::Tuple(elems) => {
             fp.add_str("Tuple").add_u64(elems.len() as u64);
+            let mut min_anc = None;
             for e in elems {
-                fingerprint_starlark_value(fp, e, visited_fns, visited_mods);
+                min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(fp, e, state));
             }
+            min_anc
         }
         Value::Dict(d) => {
-            let items = d.lock().unwrap().items();
-            fp.add_str("Dict").add_u64(items.len() as u64);
-            for (k, v) in &items {
-                fingerprint_starlark_value(fp, k, visited_fns, visited_mods);
-                fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
-            }
+            let ptr = Arc::as_ptr(d) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Dict, "Dict", ptr, |st, sub| {
+                let items = d.lock().unwrap().items();
+                sub.add_u64(items.len() as u64);
+                let mut min_anc = None;
+                for (k, v) in &items {
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, k, st));
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, v, st));
+                }
+                min_anc
+            })
         }
         Value::Set(s) => {
-            let mut reprs: Vec<String> = s
-                .lock()
-                .unwrap()
-                .elements
-                .iter()
-                .map(Value::repr)
-                .collect();
-            reprs.sort();
-            fp.add_str("Set").add_u64(reprs.len() as u64);
-            for r in &reprs {
-                fp.add_str(r);
-            }
+            let ptr = Arc::as_ptr(s) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Set, "Set", ptr, |st, sub| {
+                let elems = s.lock().unwrap().elements.clone();
+                sub.add_u64(elems.len() as u64);
+                let mut min_anc = None;
+                let mut elem_digests = Vec::with_capacity(elems.len());
+                for e in &elems {
+                    let mut efp = zel_util::Fingerprint::new();
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(&mut efp, e, st));
+                    elem_digests.push(efp.hex_digest_and_reset());
+                }
+                elem_digests.sort();
+                for d in &elem_digests {
+                    sub.add_str(d);
+                }
+                min_anc
+            })
         }
         Value::Depset(d) => {
-            let items = d.to_list();
-            fp.add_str("Depset").add_u64(items.len() as u64);
-            for item in &items {
-                fingerprint_starlark_value(fp, item, visited_fns, visited_mods);
-            }
+            let ptr = Arc::as_ptr(d) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Depset, "Depset", ptr, |st, sub| {
+                let items = d.to_list();
+                sub.add_str(d.order.as_str()).add_u64(items.len() as u64);
+                let mut min_anc = None;
+                for item in &items {
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, item, st));
+                }
+                min_anc
+            })
         }
         Value::Struct(s) => {
-            fp.add_str("Struct")
-                .add_str(s.opaque_class.as_deref().unwrap_or(""))
-                .add_u64(s.fields.len() as u64);
-            for (k, v) in &s.fields {
-                fp.add_str(k);
-                fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
-            }
+            let ptr = Arc::as_ptr(s) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Struct, "Struct", ptr, |st, sub| {
+                sub.add_str(s.opaque_class.as_deref().unwrap_or(""))
+                    .add_u64(s.fields.len() as u64);
+                let mut min_anc = None;
+                for (k, v) in &s.fields {
+                    sub.add_str(k);
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, v, st));
+                }
+                min_anc
+            })
         }
         Value::Provider { name } => {
             fp.add_str("Provider").add_str(name);
+            None
         }
         Value::ProviderInstance {
             provider_name,
@@ -1791,10 +1910,12 @@ fn fingerprint_starlark_value(
             fp.add_str("ProviderInstance")
                 .add_str(provider_name)
                 .add_u64(fields.len() as u64);
+            let mut min_anc = None;
             for (k, v) in fields {
                 fp.add_str(k);
-                fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+                min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(fp, v, state));
             }
+            min_anc
         }
         Value::RuleCallable {
             rule_class,
@@ -1805,63 +1926,100 @@ fn fingerprint_starlark_value(
                 .add_str(rule_class)
                 .add_bool(*executable)
                 .add_bool(*test);
+            None
         }
         Value::BuiltinFunction(name) => {
             fp.add_str("BuiltinFunction").add_str(name);
+            None
         }
         Value::UserFunction(u) => {
             let ptr = Arc::as_ptr(u) as usize;
-            if !visited_fns.insert(ptr) {
-                fp.add_str("UserFunctionRef")
-                    .add_str(&u.name)
-                    .add_str(&u.location.to_string());
-                return;
-            }
-            fp.add_str("UserFunction")
-                .add_str(&u.name)
-                .add_str(&u.location.to_string())
-                .add_str(u.repr_override.as_deref().unwrap_or(""))
-                .add_str(&format!("{:?}", u.params))
-                .add_str(&format!("{:?}", u.body));
-            fp.add_u64(u.closure.scopes.len() as u64);
-            for scope in &u.closure.scopes {
-                let vars: Vec<(String, Value)> = scope
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                fp.add_u64(vars.len() as u64);
-                for (k, v) in &vars {
-                    fp.add_str(k);
-                    fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
-                }
-            }
-            if let Some(m) = &u.module {
-                let mptr = Arc::as_ptr(m) as usize;
-                let mlabel = m.label_string.lock().unwrap().clone().unwrap_or_default();
-                fp.add_str(&mlabel);
-                if visited_mods.insert(mptr) {
-                    let globals: Vec<(String, Value)> = m
-                        .globals
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    fp.add_u64(globals.len() as u64);
-                    for (k, v) in &globals {
-                        fp.add_str(k);
-                        fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+            state.enter_node(
+                fp,
+                FingerprintNodeKind::UserFunction,
+                "UserFunction",
+                ptr,
+                |st, sub| {
+                    sub.add_str(&u.name)
+                        .add_str(&u.location.to_string())
+                        .add_str(u.repr_override.as_deref().unwrap_or(""))
+                        .add_str(&format!("{:?}", u.params))
+                        .add_str(&format!("{:?}", u.body));
+                    sub.add_u64(u.closure.scopes.len() as u64);
+                    let mut min_anc = None;
+                    for scope in &u.closure.scopes {
+                        let sptr = Arc::as_ptr(scope) as usize;
+                        min_anc = merge_min_anc(
+                            min_anc,
+                            st.enter_node(
+                                sub,
+                                FingerprintNodeKind::ClosureScope,
+                                "ClosureScope",
+                                sptr,
+                                |st2, ssub| {
+                                    let vars: Vec<(String, Value)> = scope
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    ssub.add_u64(vars.len() as u64);
+                                    let mut sm = None;
+                                    for (k, v) in &vars {
+                                        ssub.add_str(k);
+                                        sm = merge_min_anc(
+                                            sm,
+                                            fingerprint_starlark_value(ssub, v, st2),
+                                        );
+                                    }
+                                    sm
+                                },
+                            ),
+                        );
                     }
-                }
-            }
+                    if let Some(m) = &u.module {
+                        let mptr = Arc::as_ptr(m) as usize;
+                        let mlabel = m.label_string.lock().unwrap().clone().unwrap_or_default();
+                        sub.add_str(&mlabel);
+                        min_anc = merge_min_anc(
+                            min_anc,
+                            st.enter_node(
+                                sub,
+                                FingerprintNodeKind::Module,
+                                "Module",
+                                mptr,
+                                |st2, msub| {
+                                    let globals: Vec<(String, Value)> = m
+                                        .globals
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    msub.add_u64(globals.len() as u64);
+                                    let mut mm = None;
+                                    for (k, v) in &globals {
+                                        msub.add_str(k);
+                                        mm = merge_min_anc(
+                                            mm,
+                                            fingerprint_starlark_value(msub, v, st2),
+                                        );
+                                    }
+                                    mm
+                                },
+                            ),
+                        );
+                    }
+                    min_anc
+                },
+            )
         }
         Value::Host(k, id) => {
             fp.add_str("Host").add_str(k);
             if k == "path" || k == "dotted_version" || k == "obj" {
                 fp.add_str(id);
             }
+            None
         }
     }
 }
@@ -2417,9 +2575,8 @@ fn map_directory_action(
     }
 
     let mut fp = zel_util::Fingerprint::new();
-    let mut visited_fns = std::collections::HashSet::new();
-    let mut visited_mods = std::collections::HashSet::new();
-    fingerprint_starlark_value(&mut fp, &imp, &mut visited_fns, &mut visited_mods);
+    let mut fp_state = StarlarkFingerprintState::default();
+    fingerprint_starlark_value(&mut fp, &imp, &mut fp_state);
     fp.add_str(&expanded_mnemonic);
     fp.add_u64(input_directories.len() as u64);
     for (k, a) in &input_directories {
@@ -2431,18 +2588,18 @@ fn map_directory_action(
     }
     fp.add_u64(additional_params.len() as u64);
     for (k, v) in &additional_params {
-        fp.add_str(&k.repr());
-        fingerprint_starlark_value(&mut fp, v, &mut visited_fns, &mut visited_mods);
+        fingerprint_starlark_value(&mut fp, k, &mut fp_state);
+        fingerprint_starlark_value(&mut fp, v, &mut fp_state);
     }
     fp.add_u64(additional_inputs.len() as u64);
     for (k, v) in &additional_inputs {
-        fp.add_str(&k.repr());
-        fingerprint_starlark_value(&mut fp, v, &mut visited_fns, &mut visited_mods);
+        fingerprint_starlark_value(&mut fp, k, &mut fp_state);
+        fingerprint_starlark_value(&mut fp, v, &mut fp_state);
     }
     fp.add_u64(tools.len() as u64);
     for (k, v) in &tools {
-        fp.add_str(&k.repr());
-        fingerprint_starlark_value(&mut fp, v, &mut visited_fns, &mut visited_mods);
+        fingerprint_starlark_value(&mut fp, k, &mut fp_state);
+        fingerprint_starlark_value(&mut fp, v, &mut fp_state);
     }
     let fingerprint = fp.hex_digest_and_reset();
 

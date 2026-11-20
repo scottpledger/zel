@@ -5266,3 +5266,199 @@ merge_check(
         "from_vec,from_map|root_from_vec,root_from_map|from_map,from_vec|root_from_map,root_from_vec"
     );
 }
+
+#[test]
+fn apple_fragment_watchos_device_and_simulator_cpus_in_starlark_rules() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _impl(ctx):
+    a = ctx.fragments.apple
+    p = a.single_arch_platform
+    cpus = a.apple_cpus
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}|{}|{}|{}".format(
+            a.single_arch_cpu,
+            p.name,
+            p.name_in_plist,
+            p.platform_type,
+            p.is_device,
+            ",".join(list(cpus.watchos_cpus)),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+apple_probe = rule(
+    implementation = _impl,
+    fragments = ["apple"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "apple_probe")
+apple_probe(name = "probe")
+"#,
+        ),
+    ]);
+
+    for (cpu, expected) in [
+        (
+            "watchos_device_arm64",
+            "arm64|watchos_device|WatchOS|watchos|True|device_arm64",
+        ),
+        (
+            "watchos_device_arm64e",
+            "arm64e|watchos_device|WatchOS|watchos|True|device_arm64e",
+        ),
+        (
+            "watchos_arm64_32",
+            "arm64_32|watchos_device|WatchOS|watchos|True|arm64_32",
+        ),
+        (
+            "watchos_arm64",
+            "arm64|watchos_simulator|WatchSimulator|watchos|False|arm64",
+        ),
+    ] {
+        let cfg = BuildConfigurationKey::target(cpu, "fastbuild");
+        let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+        let ct = r
+            .analyze(&Label::parse_canonical("//:probe").unwrap(), &cfg)
+            .unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!("expected FileWrite");
+        };
+        assert_eq!(
+            String::from_utf8(content.render()).unwrap(),
+            expected,
+            "unexpected apple fragment values for {cpu}"
+        );
+    }
+}
+
+#[test]
+fn map_directory_fingerprints_cyclic_bzl_globals_and_params_deterministically() {
+    let make_bzl = |tag: &str, cyclic: bool| {
+        if cyclic {
+            format!(
+                r#"
+LIST = ["{tag}"]
+LIST.append(LIST)
+
+DICT = {{"tag": "{tag}"}}
+DICT["self"] = DICT
+
+HOLDER = []
+WRAPPED = struct(items = HOLDER)
+HOLDER.append(WRAPPED)
+
+CYCLE_A = ["{tag}"]
+CYCLE_B = [CYCLE_A]
+CYCLE_A.append(CYCLE_B)
+
+def _make_helper():
+    local_cycle = ["{tag}"]
+    local_cycle.append(local_cycle)
+    def _helper():
+        return local_cycle
+    return _helper
+
+_HELPER = _make_helper()
+
+def _expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    _ = (LIST, DICT, WRAPPED, CYCLE_A, _HELPER)
+
+def _impl(ctx):
+    in_dir = ctx.actions.declare_directory(ctx.label.name + "_in")
+    ctx.actions.run(outputs = [in_dir], executable = "/bin/mkdir")
+    out_dir = ctx.actions.declare_directory(ctx.label.name + "_out")
+    ctx.actions.map_directory(
+        input_directories = {{"src": in_dir}},
+        output_directories = {{"dst": out_dir}},
+        additional_params = {{"mode": "ok"}},
+        implementation = _expand,
+    )
+    return [DefaultInfo(files = depset([out_dir]))]
+
+cyclic_map = rule(implementation = _impl)
+"#
+            )
+        } else {
+            format!(
+                r#"
+LIST = ["{tag}", []]
+DICT = {{"tag": "{tag}", "self": {{}}}}
+HOLDER = [struct(items = [])]
+WRAPPED = struct(items = HOLDER)
+
+CYCLE_A = ["{tag}", [[]]]
+CYCLE_B = [CYCLE_A]
+
+def _make_helper():
+    local_cycle = ["{tag}", []]
+    def _helper():
+        return local_cycle
+    return _helper
+
+_HELPER = _make_helper()
+
+def _expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    _ = (LIST, DICT, WRAPPED, CYCLE_A, _HELPER)
+
+def _impl(ctx):
+    in_dir = ctx.actions.declare_directory(ctx.label.name + "_in")
+    ctx.actions.run(outputs = [in_dir], executable = "/bin/mkdir")
+    out_dir = ctx.actions.declare_directory(ctx.label.name + "_out")
+    ctx.actions.map_directory(
+        input_directories = {{"src": in_dir}},
+        output_directories = {{"dst": out_dir}},
+        additional_params = {{"mode": "ok"}},
+        implementation = _expand,
+    )
+    return [DefaultInfo(files = depset([out_dir]))]
+
+cyclic_map = rule(implementation = _impl)
+"#
+            )
+        }
+    };
+
+    let analyze_key = |bzl: &str| -> String {
+        let ws = Ws::new(&[
+            ("defs.bzl", bzl),
+            (
+                "BUILD",
+                "load(\":defs.bzl\", \"cyclic_map\")\ncyclic_map(name = \"m\")\n",
+            ),
+        ]);
+        let ct = ws.analyze("//:m").unwrap();
+        let map_action = ct
+            .typed_actions
+            .iter()
+            .find(|a| matches!(a.kind, ActionKind::MapDirectory { .. }))
+            .expect("MapDirectory action");
+        map_action.key()
+    };
+
+    let cyc_v1_run1 = analyze_key(&make_bzl("v1", true));
+    let cyc_v1_run2 = analyze_key(&make_bzl("v1", true));
+    let cyc_v2 = analyze_key(&make_bzl("v2", true));
+    let non_cyc_v1 = analyze_key(&make_bzl("v1", false));
+
+    assert_eq!(
+        cyc_v1_run1, cyc_v1_run2,
+        "cyclic Starlark globals must produce deterministic action keys across evaluations"
+    );
+    assert_ne!(
+        cyc_v1_run1, cyc_v2,
+        "distinct cyclic globals must produce distinct action keys"
+    );
+    assert_ne!(
+        cyc_v1_run1, non_cyc_v1,
+        "cyclic vs non-cyclic globals must produce distinct action keys"
+    );
+}

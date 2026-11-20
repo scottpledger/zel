@@ -260,6 +260,17 @@ fn apple_platform_struct(name: &str, plist: &str, platform_type: &str, is_device
     ])
 }
 
+fn parse_apple_target_cpu(cpu: &str) -> Option<(&'static str, &str)> {
+    cpu.strip_prefix("darwin_")
+        .or_else(|| cpu.strip_prefix("macos_"))
+        .map(|a| ("macos", a))
+        .or_else(|| cpu.strip_prefix("ios_").map(|a| ("ios", a)))
+        .or_else(|| cpu.strip_prefix("visionos_").map(|a| ("visionos", a)))
+        .or_else(|| cpu.strip_prefix("watchos_").map(|a| ("watchos", a)))
+        .or_else(|| cpu.strip_prefix("tvos_").map(|a| ("tvos", a)))
+        .or_else(|| cpu.strip_prefix("catalyst_").map(|a| ("catalyst", a)))
+}
+
 /// Resolves a `{platform}_{arch}` (`darwin_{arch}` on macOS) string against Bazel's fixed
 /// `ApplePlatform.forTargetCpu` sets.
 pub fn apple_platform_for_target_cpu(target_cpu: &str) -> Result<Value, String> {
@@ -292,7 +303,8 @@ pub fn apple_platform_for_target_cpu(target_cpu: &str) -> Result<Value, String> 
             apple_platform_struct("tvos_device", "AppleTVOS", "tvos", true)
         }
         "catalyst_x86_64" => apple_platform_struct("catalyst", "MacOSX", "catalyst", true),
-        "darwin_x86_64" | "darwin_arm64" | "darwin_arm64e" => {
+        "darwin_x86_64" | "darwin_arm64" | "darwin_arm64e" | "macos_x86_64" | "macos_arm64"
+        | "macos_arm64e" => {
             apple_platform_struct("macos", "MacOSX", "macos", true)
         }
         _ => {
@@ -341,7 +353,10 @@ fn default_apple_cpu_for_platform(ptype: &str, cfg_cpu: &str) -> Result<String, 
             }
         }
         "macos" => {
-            if let Some(r) = cfg_cpu.strip_prefix("darwin_") {
+            if let Some(r) = cfg_cpu
+                .strip_prefix("darwin_")
+                .or_else(|| cfg_cpu.strip_prefix("macos_"))
+            {
                 r.to_string()
             } else if is_aarch64 {
                 "arm64".to_string()
@@ -384,7 +399,14 @@ pub fn apple_multi_arch_platform(
 ) -> Result<Value, String> {
     let o = Opts::new(cfg);
     let ptype = platform_type.to_ascii_lowercase();
-    let cfg_ptype = o.s("apple_platform_type", "macos").to_ascii_lowercase();
+    let cfg_ptype = if o.has_explicit("apple_platform_type") {
+        o.s("apple_platform_type", "macos").to_ascii_lowercase()
+    } else {
+        parse_apple_target_cpu(&cfg.cpu)
+            .map(|(pt, _)| pt)
+            .unwrap_or("macos")
+            .to_string()
+    };
     let split = o.s("apple_split_cpu", "");
     let raw_cpu = if ptype == cfg_ptype && !split.is_empty() {
         split
@@ -394,7 +416,10 @@ pub fn apple_multi_arch_platform(
     let target_cpu = if ptype == "macos" {
         format!(
             "darwin_{}",
-            raw_cpu.strip_prefix("darwin_").unwrap_or(&raw_cpu)
+            raw_cpu
+                .strip_prefix("darwin_")
+                .or_else(|| raw_cpu.strip_prefix("macos_"))
+                .unwrap_or(&raw_cpu)
         )
     } else {
         let prefix = format!("{ptype}_");
@@ -1152,7 +1177,14 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
             ])
         }
         "apple" => {
-            let ptype = o.s("apple_platform_type", "macos").to_ascii_lowercase();
+            let ptype = if o.has_explicit("apple_platform_type") {
+                o.s("apple_platform_type", "macos").to_ascii_lowercase()
+            } else {
+                parse_apple_target_cpu(&cfg.cpu)
+                    .map(|(pt, _)| pt)
+                    .unwrap_or("macos")
+                    .to_string()
+            };
             let split_cpu = o.s("apple_split_cpu", "");
             let ptype_cpus = apple_cpus_for_platform(&o, &ptype)?;
             let raw_cpu = if !split_cpu.is_empty() {
@@ -1161,7 +1193,10 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 ptype_cpus[0].clone()
             };
             let stripped_prefix = if ptype == "macos" {
-                raw_cpu.strip_prefix("darwin_").unwrap_or(&raw_cpu)
+                raw_cpu
+                    .strip_prefix("darwin_")
+                    .or_else(|| raw_cpu.strip_prefix("macos_"))
+                    .unwrap_or(&raw_cpu)
             } else {
                 let prefix = format!("{ptype}_");
                 raw_cpu.strip_prefix(&prefix).unwrap_or(&raw_cpu)
@@ -1182,6 +1217,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
             let tvos_cpus = apple_cpus_for_platform(&o, "tvos")?;
             let macos_cpus = apple_cpus_for_platform(&o, "macos")?;
             let catalyst_cpus = apple_cpus_for_platform(&o, "catalyst")?;
+            let tuple_strs = |items: &[String]| Value::Tuple(items.iter().map(|s| sv(s)).collect());
             let cpus_struct = mk_struct(vec![
                 (
                     "apple_split_cpu",
@@ -1191,30 +1227,12 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                         sv(&split_cpu)
                     },
                 ),
-                (
-                    "ios_multi_cpus",
-                    mk_list(ios_cpus.into_iter().map(Value::String).collect()),
-                ),
-                (
-                    "visionos_cpus",
-                    mk_list(visionos_cpus.into_iter().map(Value::String).collect()),
-                ),
-                (
-                    "watchos_cpus",
-                    mk_list(watchos_cpus.into_iter().map(Value::String).collect()),
-                ),
-                (
-                    "tvos_cpus",
-                    mk_list(tvos_cpus.into_iter().map(Value::String).collect()),
-                ),
-                (
-                    "macos_cpus",
-                    mk_list(macos_cpus.into_iter().map(Value::String).collect()),
-                ),
-                (
-                    "catalyst_cpus",
-                    mk_list(catalyst_cpus.into_iter().map(Value::String).collect()),
-                ),
+                ("ios_multi_cpus", tuple_strs(&ios_cpus)),
+                ("visionos_cpus", tuple_strs(&visionos_cpus)),
+                ("watchos_cpus", tuple_strs(&watchos_cpus)),
+                ("tvos_cpus", tuple_strs(&tvos_cpus)),
+                ("macos_cpus", tuple_strs(&macos_cpus)),
+                ("catalyst_cpus", tuple_strs(&catalyst_cpus)),
             ]);
             mk_struct(vec![
                 ("apple_platform_type", sv(&ptype)),
@@ -1844,6 +1862,290 @@ mod tests {
                 "-DFOO=a, b".to_string(),
                 "-O3".to_string(),
             ]))
+        );
+    }
+
+    fn apple_fields(cfg: &BuildConfigurationKey) -> (String, String, String, String, bool, Value) {
+        let Value::Struct(apple) = fragment("apple", cfg).unwrap().expect("apple fragment") else {
+            panic!("expected struct");
+        };
+        let single_arch_cpu = apple.fields["single_arch_cpu"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let apple_platform_type = apple.fields["apple_platform_type"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let Value::Struct(plat) = &apple.fields["single_arch_platform"] else {
+            panic!("expected platform struct");
+        };
+        let plat_name = plat.fields["name"].as_str().unwrap().to_string();
+        let plist = plat.fields["name_in_plist"].as_str().unwrap().to_string();
+        let plat_type = plat.fields["platform_type"].as_str().unwrap();
+        assert_eq!(plat_type, apple_platform_type);
+        let Value::Bool(is_device) = plat.fields["is_device"] else {
+            panic!("expected bool is_device");
+        };
+        (
+            single_arch_cpu,
+            plat_name,
+            plist,
+            apple_platform_type,
+            is_device,
+            apple.fields["apple_cpus"].clone(),
+        )
+    }
+
+    #[test]
+    fn apple_fragment_maps_all_bazel_apple_platform_target_cpus() {
+        let cases = [
+            // iOS simulator & device
+            (
+                "ios_x86_64",
+                "x86_64",
+                "ios_simulator",
+                "iPhoneSimulator",
+                "ios",
+                false,
+            ),
+            (
+                "ios_i386",
+                "i386",
+                "ios_simulator",
+                "iPhoneSimulator",
+                "ios",
+                false,
+            ),
+            (
+                "ios_sim_arm64",
+                "arm64",
+                "ios_simulator",
+                "iPhoneSimulator",
+                "ios",
+                false,
+            ),
+            (
+                "ios_sim_arm64e",
+                "arm64e",
+                "ios_simulator",
+                "iPhoneSimulator",
+                "ios",
+                false,
+            ),
+            ("ios_armv6", "armv6", "ios_device", "iPhoneOS", "ios", true),
+            ("ios_arm64", "arm64", "ios_device", "iPhoneOS", "ios", true),
+            ("ios_armv7", "armv7", "ios_device", "iPhoneOS", "ios", true),
+            (
+                "ios_armv7s",
+                "armv7s",
+                "ios_device",
+                "iPhoneOS",
+                "ios",
+                true,
+            ),
+            (
+                "ios_arm64e",
+                "arm64e",
+                "ios_device",
+                "iPhoneOS",
+                "ios",
+                true,
+            ),
+            // visionOS simulator & device
+            (
+                "visionos_sim_arm64",
+                "arm64",
+                "visionos_simulator",
+                "XRSimulator",
+                "visionos",
+                false,
+            ),
+            (
+                "visionos_sim_arm64e",
+                "arm64e",
+                "visionos_simulator",
+                "XRSimulator",
+                "visionos",
+                false,
+            ),
+            (
+                "visionos_arm64",
+                "arm64",
+                "visionos_device",
+                "XROS",
+                "visionos",
+                true,
+            ),
+            (
+                "visionos_arm64e",
+                "arm64e",
+                "visionos_device",
+                "XROS",
+                "visionos",
+                true,
+            ),
+            // watchOS simulator & device
+            (
+                "watchos_i386",
+                "i386",
+                "watchos_simulator",
+                "WatchSimulator",
+                "watchos",
+                false,
+            ),
+            (
+                "watchos_x86_64",
+                "x86_64",
+                "watchos_simulator",
+                "WatchSimulator",
+                "watchos",
+                false,
+            ),
+            (
+                "watchos_arm64",
+                "arm64",
+                "watchos_simulator",
+                "WatchSimulator",
+                "watchos",
+                false,
+            ),
+            (
+                "watchos_sim_arm64e",
+                "arm64e",
+                "watchos_simulator",
+                "WatchSimulator",
+                "watchos",
+                false,
+            ),
+            (
+                "watchos_armv7k",
+                "armv7k",
+                "watchos_device",
+                "WatchOS",
+                "watchos",
+                true,
+            ),
+            (
+                "watchos_arm64_32",
+                "arm64_32",
+                "watchos_device",
+                "WatchOS",
+                "watchos",
+                true,
+            ),
+            (
+                "watchos_device_arm64",
+                "arm64",
+                "watchos_device",
+                "WatchOS",
+                "watchos",
+                true,
+            ),
+            (
+                "watchos_device_arm64e",
+                "arm64e",
+                "watchos_device",
+                "WatchOS",
+                "watchos",
+                true,
+            ),
+            // tvOS simulator & device
+            (
+                "tvos_x86_64",
+                "x86_64",
+                "tvos_simulator",
+                "AppleTVSimulator",
+                "tvos",
+                false,
+            ),
+            (
+                "tvos_sim_arm64",
+                "arm64",
+                "tvos_simulator",
+                "AppleTVSimulator",
+                "tvos",
+                false,
+            ),
+            (
+                "tvos_sim_arm64e",
+                "arm64e",
+                "tvos_simulator",
+                "AppleTVSimulator",
+                "tvos",
+                false,
+            ),
+            (
+                "tvos_arm64",
+                "arm64",
+                "tvos_device",
+                "AppleTVOS",
+                "tvos",
+                true,
+            ),
+            (
+                "tvos_arm64e",
+                "arm64e",
+                "tvos_device",
+                "AppleTVOS",
+                "tvos",
+                true,
+            ),
+            // Catalyst & macOS
+            (
+                "catalyst_x86_64",
+                "x86_64",
+                "catalyst",
+                "MacOSX",
+                "catalyst",
+                true,
+            ),
+            ("darwin_x86_64", "x86_64", "macos", "MacOSX", "macos", true),
+            ("darwin_arm64", "arm64", "macos", "MacOSX", "macos", true),
+            ("darwin_arm64e", "arm64e", "macos", "MacOSX", "macos", true),
+            ("macos_arm64", "arm64", "macos", "MacOSX", "macos", true),
+        ];
+
+        for (target_cpu, want_arch, want_plat, want_plist, want_ptype, want_device) in cases {
+            let cfg = BuildConfigurationKey::target(target_cpu, "fastbuild");
+            let (arch, plat, plist, ptype, is_device, _) = apple_fields(&cfg);
+            assert_eq!(arch, want_arch, "single_arch_cpu mismatch for {target_cpu}");
+            assert_eq!(plat, want_plat, "platform.name mismatch for {target_cpu}");
+            assert_eq!(plist, want_plist, "name_in_plist mismatch for {target_cpu}");
+            assert_eq!(ptype, want_ptype, "platform_type mismatch for {target_cpu}");
+            assert_eq!(
+                is_device, want_device,
+                "is_device mismatch for {target_cpu}"
+            );
+        }
+    }
+
+    #[test]
+    fn apple_fragment_honors_split_cpu_and_exposes_apple_cpus_struct() {
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg.options
+            .insert("apple_platform_type".into(), "WatchOS".into());
+        cfg.options
+            .insert("apple_split_cpu".into(), "device_arm64".into());
+        cfg.options
+            .insert("watchos_cpus".into(), "arm64_32,device_arm64e".into());
+        let (arch, plat, plist, ptype, is_device, apple_cpus) = apple_fields(&cfg);
+        assert_eq!(arch, "arm64");
+        assert_eq!(plat, "watchos_device");
+        assert_eq!(plist, "WatchOS");
+        assert_eq!(ptype, "watchos");
+        assert!(is_device);
+
+        let Value::Struct(cpus_struct) = apple_cpus else {
+            panic!("expected apple_cpus struct");
+        };
+        assert_eq!(
+            cpus_struct.fields["apple_split_cpu"].as_str(),
+            Some("device_arm64")
+        );
+        assert_eq!(
+            cpus_struct.fields["watchos_cpus"],
+            Value::Tuple(vec![sv("arm64_32"), sv("device_arm64e")])
         );
     }
 }

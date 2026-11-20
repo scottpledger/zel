@@ -194,6 +194,7 @@ const CONFIG_OPTIONS: &[&str] = &[
     "tvos_cpus",
     "watchos_cpus",
     "visionos_cpus",
+    "catalyst_cpus",
     "ios_sdk_version",
     "macos_sdk_version",
     "tvos_sdk_version",

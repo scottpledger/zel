@@ -268,23 +268,81 @@ impl Value {
     }
 
     pub fn freeze(&self) {
+        let mut visited = std::collections::HashSet::new();
+        self.freeze_inner(&mut visited);
+    }
+
+    fn freeze_inner(&self, visited: &mut std::collections::HashSet<usize>) {
         match self {
-            Self::List(l) => l.lock().unwrap().freeze(),
-            Self::Dict(d) => d.lock().unwrap().freeze(),
-            Self::Set(s) => s.lock().unwrap().freeze(),
+            Self::List(l) => {
+                let ptr = Arc::as_ptr(l) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
+                let elems = {
+                    let mut guard = l.lock().unwrap();
+                    if guard.is_frozen() {
+                        return;
+                    }
+                    guard.frozen = true;
+                    guard.elements.clone()
+                };
+                for elem in &elems {
+                    elem.freeze_inner(visited);
+                }
+            }
+            Self::Dict(d) => {
+                let ptr = Arc::as_ptr(d) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
+                let entries = {
+                    let mut guard = d.lock().unwrap();
+                    if guard.is_frozen() {
+                        return;
+                    }
+                    guard.frozen = true;
+                    guard.entries.clone()
+                };
+                for (k, v) in &entries {
+                    k.freeze_inner(visited);
+                    v.freeze_inner(visited);
+                }
+            }
+            Self::Set(s) => {
+                let ptr = Arc::as_ptr(s) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
+                let elems = {
+                    let mut guard = s.lock().unwrap();
+                    if guard.is_frozen() {
+                        return;
+                    }
+                    guard.frozen = true;
+                    guard.elements.clone()
+                };
+                for elem in &elems {
+                    elem.freeze_inner(visited);
+                }
+            }
             Self::Tuple(items) => {
                 for item in items {
-                    item.freeze();
+                    item.freeze_inner(visited);
                 }
             }
             Self::Struct(s) => {
+                let ptr = Arc::as_ptr(s) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
                 for v in s.fields.values() {
-                    v.freeze();
+                    v.freeze_inner(visited);
                 }
             }
             Self::ProviderInstance { fields, .. } => {
                 for v in fields.values() {
-                    v.freeze();
+                    v.freeze_inner(visited);
                 }
             }
             _ => {}
@@ -1100,5 +1158,40 @@ impl fmt::Display for Value {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_cyclic_containers_without_deadlock_or_overflow() {
+        let list = Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![]))));
+        if let Value::List(l) = &list {
+            l.lock().unwrap().append(list.clone()).unwrap();
+        }
+        list.freeze();
+        assert!(list.is_immutable());
+
+        let dict = Value::Dict(Arc::new(Mutex::new(StarlarkDict::new())));
+        if let Value::Dict(d) = &dict {
+            d.lock()
+                .unwrap()
+                .insert(Value::String("self".into()), dict.clone())
+                .unwrap();
+        }
+        dict.freeze();
+        assert!(dict.is_immutable());
+
+        let holder = Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![]))));
+        let mut fields = BTreeMap::new();
+        fields.insert("items".into(), holder.clone());
+        let wrapped = Value::Struct(Arc::new(StructValue::new(fields)));
+        if let Value::List(l) = &holder {
+            l.lock().unwrap().append(wrapped.clone()).unwrap();
+        }
+        wrapped.freeze();
+        assert!(wrapped.is_immutable());
     }
 }
