@@ -2039,7 +2039,6 @@ impl BlazeRuntime {
     /// Checks `target_compatible_with` constraints for analyzed configured targets against the
     /// target platform (`TopLevelConstraintSemantics.checkPlatformRestrictions`).
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn check_platform_incompatibility(
         &self,
         parsed: &ParsedCommandOptions,
