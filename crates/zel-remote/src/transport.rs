@@ -18,12 +18,14 @@
 //! (used by in-process fake servers).
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::ffi::OsString;
+use std::io::{self, BufRead, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// A connected byte stream split into halves plus a shutdown hook.
 pub struct Transport {
@@ -224,32 +226,344 @@ pub struct TlsConnector {
     pub unix_proxy: Option<String>,
 }
 
+/// Detected capabilities of an `openssl` CLI binary's `s_client` subcommand.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct OpenSslCapabilities {
+    version: String,
+    verify_hostname: bool,
+    verify_ip: bool,
+    unix_socket: bool,
+    verify_return_error: bool,
+    servername: bool,
+    alpn: bool,
+    quiet: bool,
+    brief: bool,
+    no_capath: bool,
+    no_castore: bool,
+}
+
+impl OpenSslCapabilities {
+    fn supports_strict_tls(&self) -> bool {
+        self.verify_hostname && self.verify_ip && self.verify_return_error
+    }
+
+    fn missing_strict_flags(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if !self.verify_hostname {
+            missing.push("-verify_hostname");
+        }
+        if !self.verify_ip {
+            missing.push("-verify_ip");
+        }
+        if !self.verify_return_error {
+            missing.push("-verify_return_error");
+        }
+        missing
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenSslBinary {
+    path: PathBuf,
+    caps: OpenSslCapabilities,
+}
+
+fn help_has_option(help_text: &str, opt: &str) -> bool {
+    for line in help_text.lines() {
+        let Some(first) = line.split_whitespace().next() else {
+            continue;
+        };
+        let token = first
+            .trim_start_matches('[')
+            .trim_end_matches(&[']', ',', ';'][..]);
+        if token == opt {
+            return true;
+        }
+    }
+    false
+}
+
+fn parse_s_client_capabilities(version_text: &str, help_text: &str) -> OpenSslCapabilities {
+    let version = version_text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string();
+    OpenSslCapabilities {
+        version,
+        verify_hostname: help_has_option(help_text, "-verify_hostname"),
+        verify_ip: help_has_option(help_text, "-verify_ip"),
+        unix_socket: help_has_option(help_text, "-unix"),
+        verify_return_error: help_has_option(help_text, "-verify_return_error"),
+        servername: help_has_option(help_text, "-servername"),
+        alpn: help_has_option(help_text, "-alpn"),
+        quiet: help_has_option(help_text, "-quiet"),
+        brief: help_has_option(help_text, "-brief"),
+        no_capath: help_has_option(help_text, "-no-CApath"),
+        no_castore: help_has_option(help_text, "-no-CAstore"),
+    }
+}
+
+fn default_openssl_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from("openssl")];
+    #[cfg(unix)]
+    {
+        for p in [
+            "/opt/homebrew/opt/openssl@3/bin/openssl",
+            "/opt/homebrew/opt/openssl/bin/openssl",
+            "/opt/homebrew/opt/openssl@1.1/bin/openssl",
+            "/opt/homebrew/bin/openssl",
+            "/usr/local/opt/openssl@3/bin/openssl",
+            "/usr/local/opt/openssl/bin/openssl",
+            "/usr/local/opt/openssl@1.1/bin/openssl",
+            "/usr/local/bin/openssl",
+            "/opt/local/bin/openssl",
+            "/usr/bin/openssl",
+        ] {
+            candidates.push(PathBuf::from(p));
+        }
+    }
+    #[cfg(windows)]
+    {
+        for p in [
+            r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe",
+            r"C:\Program Files\OpenSSL\bin\openssl.exe",
+            r"C:\Program Files\Git\usr\bin\openssl.exe",
+            r"C:\Program Files\Git\mingw64\bin\openssl.exe",
+        ] {
+            candidates.push(PathBuf::from(p));
+        }
+    }
+    candidates
+}
+
+fn combined_output_text(out: &std::process::Output) -> String {
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    if !out.stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&out.stderr));
+    }
+    text
+}
+
+fn probe_openssl_binary(path: &Path) -> Option<OpenSslBinary> {
+    if path.is_absolute() && !path.is_file() {
+        return None;
+    }
+    let version_out = Command::new(path).arg("version").output().ok()?;
+    let version_text = combined_output_text(&version_out);
+    if !version_out.status.success() && version_text.trim().is_empty() {
+        return None;
+    }
+    // Note: LibreSSL and some OpenSSL versions exit non-zero for `s_client -help` while writing
+    // usage to stderr, so capture both stdout and stderr regardless of exit status.
+    let help_out = Command::new(path)
+        .args(["s_client", "-help"])
+        .output()
+        .ok()?;
+    let help_text = combined_output_text(&help_out);
+    let caps = parse_s_client_capabilities(&version_text, &help_text);
+    Some(OpenSslBinary {
+        path: path.to_path_buf(),
+        caps,
+    })
+}
+
+fn select_openssl_with<F>(candidates: &[PathBuf], mut probe: F) -> Result<OpenSslBinary, String>
+where
+    F: FnMut(&Path) -> Option<OpenSslBinary>,
+{
+    let mut best_strict_without_unix: Option<OpenSslBinary> = None;
+    let mut first_unsupported: Option<OpenSslBinary> = None;
+
+    for cand in candidates {
+        let Some(bin) = probe(cand) else {
+            continue;
+        };
+        if bin.caps.supports_strict_tls() {
+            if cfg!(not(unix)) || bin.caps.unix_socket {
+                return Ok(bin);
+            }
+            if best_strict_without_unix.is_none() {
+                best_strict_without_unix = Some(bin);
+            }
+        } else if first_unsupported.is_none() {
+            first_unsupported = Some(bin);
+        }
+    }
+
+    if let Some(bin) = best_strict_without_unix {
+        return Ok(bin);
+    }
+
+    if let Some(bin) = first_unsupported {
+        let missing = bin.caps.missing_strict_flags().join("/");
+        let detected = if bin.caps.version.is_empty() {
+            bin.path.display().to_string()
+        } else {
+            format!("{} (at {})", bin.caps.version, bin.path.display())
+        };
+        return Err(format!(
+            "TLS requires OpenSSL 1.1+ or 3+ with s_client -verify_hostname/-verify_ip support, \
+             but only found {detected}, which does not support {missing}. \
+             Install OpenSSL 3 (e.g. `brew install openssl@3` on macOS) and ensure it is installed or on PATH."
+        ));
+    }
+
+    Err(
+        "failed to find an openssl binary for TLS connection; install OpenSSL 1.1+ or 3+ \
+         (e.g. `brew install openssl@3` on macOS) and ensure it is on PATH"
+            .to_string(),
+    )
+}
+
+fn resolve_default_openssl() -> Result<&'static OpenSslBinary, String> {
+    static OPENSSL_BIN: OnceLock<Result<OpenSslBinary, String>> = OnceLock::new();
+    match OPENSSL_BIN
+        .get_or_init(|| select_openssl_with(&default_openssl_candidates(), probe_openssl_binary))
+    {
+        Ok(bin) => Ok(bin),
+        Err(msg) => Err(msg.clone()),
+    }
+}
+
+const MAX_CAPTURED_STDERR_LINES: usize = 64;
+
+#[derive(Default)]
+struct StderrState {
+    established: bool,
+    eof: bool,
+    pre_lines: Vec<String>,
+    post_error_lines: Vec<String>,
+}
+
+fn is_brief_info_line(line: &str) -> bool {
+    let t = line.trim();
+    t == "CONNECTION ESTABLISHED"
+        || t == "Can't use SSL_get_servername"
+        || t.starts_with("Protocol version:")
+        || t.starts_with("Ciphersuite:")
+        || t.starts_with("Peer certificate:")
+        || t.starts_with("Hash used:")
+        || t.starts_with("Signature type:")
+        || t.starts_with("Verification: OK")
+        || t.starts_with("Verified peername:")
+        || t.starts_with("Server Temp Key:")
+        || t.starts_with("Supported Elliptic Curve Point Formats:")
+        || t.starts_with("Negotiated protocol:")
+        || t.starts_with("ALPN protocol:")
+        || t.starts_with("Reused,")
+        || t.starts_with("depth=")
+        || t.starts_with("verify return:1")
+}
+
+fn classify_tls_error_kind(detail: &str) -> io::ErrorKind {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("connection refused") || lower.contains("actively refused") {
+        io::ErrorKind::ConnectionRefused
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        io::ErrorKind::TimedOut
+    } else if lower.contains("no such file or directory") {
+        io::ErrorKind::NotFound
+    } else if lower.contains("permission denied") {
+        io::ErrorKind::PermissionDenied
+    } else {
+        io::ErrorKind::Other
+    }
+}
+
 struct TlsProcState {
     child: Mutex<Child>,
-    stderr: Arc<Mutex<String>>,
+    stderr: Arc<(Mutex<StderrState>, Condvar)>,
+    killed: AtomicBool,
 }
 
 impl TlsProcState {
-    fn error_detail(&self) -> Option<String> {
-        let mut child = self.child.lock().unwrap();
-        if let Ok(Some(status)) = child.try_wait() {
-            if !status.success() {
-                drop(child);
-                let msg = self.stderr.lock().unwrap().trim().to_string();
-                if !msg.is_empty() {
-                    return Some(msg);
+    fn wait_exit_bounded(&self, max_wait: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + max_wait;
+        loop {
+            if let Ok(mut child) = self.child.lock() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Some(status);
                 }
-                return Some(format!("TLS handshake/connection failed ({status})"));
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn format_stderr_for_status(&self, status: ExitStatus) -> String {
+        let (lock, _) = &*self.stderr;
+        let st = lock.lock().unwrap();
+        let msg = if !st.established && !st.pre_lines.is_empty() {
+            st.pre_lines.join("\n")
+        } else if !st.post_error_lines.is_empty() {
+            st.post_error_lines.join("\n")
+        } else if !st.pre_lines.is_empty() {
+            st.pre_lines.join("\n")
+        } else {
+            String::new()
+        };
+        if !msg.is_empty() {
+            msg
+        } else {
+            format!("TLS handshake/connection failed ({status})")
+        }
+    }
+
+    fn wait_error_detail(&self, max_wait: Duration) -> Option<String> {
+        if self.killed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let deadline = Instant::now() + max_wait;
+        {
+            let (lock, cv) = &*self.stderr;
+            let mut st = lock.lock().unwrap();
+            while !st.eof {
+                if self.killed.load(Ordering::SeqCst) {
+                    return None;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    break;
+                }
+                let (next_st, _) = cv.wait_timeout(st, deadline - now).unwrap();
+                st = next_st;
             }
         }
-        None
+        if self.killed.load(Ordering::SeqCst) {
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let status = self.wait_exit_bounded(remaining)?;
+        if status.success() {
+            return None;
+        }
+        Some(self.format_stderr_for_status(status))
     }
 
     fn kill(&self) {
+        self.killed.store(true, Ordering::SeqCst);
+        {
+            let (lock, cv) = &*self.stderr;
+            let _g = lock.lock();
+            cv.notify_all();
+        }
         if let Ok(mut child) = self.child.lock() {
             let _ = child.kill();
             let _ = child.wait();
         }
+    }
+}
+
+impl Drop for TlsProcState {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -262,31 +576,14 @@ impl Read for TlsReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self.stdout.read(buf) {
             Ok(0) => {
-                // Give stderr reader a brief moment if process just exited on handshake failure.
-                for _ in 0..20 {
-                    if let Some(detail) = self.state.error_detail() {
-                        return Err(io::Error::new(io::ErrorKind::ConnectionRefused, detail));
-                    }
-                    let done = self
-                        .state
-                        .child
-                        .lock()
-                        .ok()
-                        .and_then(|mut c| c.try_wait().ok().flatten())
-                        .is_some();
-                    if done {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-                if let Some(detail) = self.state.error_detail() {
-                    return Err(io::Error::new(io::ErrorKind::ConnectionRefused, detail));
+                if let Some(detail) = self.state.wait_error_detail(Duration::from_millis(200)) {
+                    return Err(io::Error::new(classify_tls_error_kind(&detail), detail));
                 }
                 Ok(0)
             }
             Ok(n) => Ok(n),
             Err(e) => {
-                if let Some(detail) = self.state.error_detail() {
+                if let Some(detail) = self.state.wait_error_detail(Duration::from_millis(100)) {
                     return Err(io::Error::new(e.kind(), detail));
                 }
                 Err(e)
@@ -311,7 +608,7 @@ impl Write for TlsWriter {
         match stdin.write(buf) {
             Ok(n) => Ok(n),
             Err(e) => {
-                if let Some(detail) = self.state.error_detail() {
+                if let Some(detail) = self.state.wait_error_detail(Duration::from_millis(100)) {
                     return Err(io::Error::new(e.kind(), detail));
                 }
                 Err(e)
@@ -364,21 +661,136 @@ fn resolve_verify_peer<'a>(host: &'a str, authority_override: Option<&'a str>) -
         .unwrap_or_else(|| strip_ipv6_brackets(host))
 }
 
-impl Connector for TlsConnector {
-    fn connect(&self) -> io::Result<Transport> {
+fn build_s_client_args(
+    connector: &TlsConnector,
+    openssl: &OpenSslBinary,
+    connect_target: Option<&str>,
+) -> io::Result<(Vec<OsString>, bool)> {
+    let caps = &openssl.caps;
+    let bin_desc = if caps.version.is_empty() {
+        openssl.path.display().to_string()
+    } else {
+        format!("{} ({})", caps.version, openssl.path.display())
+    };
+    if !caps.verify_return_error {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "TLS requires OpenSSL 1.1+ or 3+ with s_client -verify_return_error support, \
+                 but {bin_desc} does not support -verify_return_error"
+            ),
+        ));
+    }
+
+    let mut args = vec![OsString::from("s_client")];
+    if caps.quiet {
+        args.push(OsString::from("-quiet"));
+    }
+    let use_brief = caps.brief;
+    if use_brief {
+        args.push(OsString::from("-brief"));
+    }
+    args.push(OsString::from("-verify_return_error"));
+
+    if let Some(unix_path) = &connector.unix_proxy {
+        if !caps.unix_socket {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "TLS over a Unix socket proxy requires an openssl binary with s_client -unix \
+                     support, but {bin_desc} does not support -unix"
+                ),
+            ));
+        }
+        args.push(OsString::from("-unix"));
+        args.push(OsString::from(unix_path));
+    } else if let Some(target) = connect_target {
+        args.push(OsString::from("-connect"));
+        args.push(OsString::from(target));
+    }
+
+    let verify_peer =
+        resolve_verify_peer(&connector.host, connector.tls.authority_override.as_deref());
+    if let Ok(ip) = verify_peer.parse::<IpAddr>() {
+        if !caps.verify_ip {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "TLS IP verification requires OpenSSL 1.1+ or 3+ with s_client -verify_ip \
+                     support, but {bin_desc} does not support -verify_ip"
+                ),
+            ));
+        }
+        args.push(OsString::from("-verify_ip"));
+        args.push(OsString::from(ip.to_string()));
+    } else {
+        if !caps.verify_hostname {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "TLS hostname verification requires OpenSSL 1.1+ or 3+ with s_client \
+                     -verify_hostname support, but {bin_desc} does not support -verify_hostname"
+                ),
+            ));
+        }
+        if caps.servername {
+            args.push(OsString::from("-servername"));
+            args.push(OsString::from(verify_peer));
+        }
+        args.push(OsString::from("-verify_hostname"));
+        args.push(OsString::from(verify_peer));
+    }
+
+    if let Some(alpn) = &connector.alpn {
+        if !caps.alpn {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "TLS ALPN negotiation ({alpn}) requires an openssl binary with s_client -alpn \
+                     support, but {bin_desc} does not support -alpn"
+                ),
+            ));
+        }
+        args.push(OsString::from("-alpn"));
+        args.push(OsString::from(alpn));
+    }
+
+    if let Some(ca) = &connector.tls.ca_certificate {
+        args.push(OsString::from("-CAfile"));
+        args.push(ca.as_os_str().to_os_string());
+        if caps.no_capath {
+            args.push(OsString::from("-no-CApath"));
+        }
+        if caps.no_castore {
+            args.push(OsString::from("-no-CAstore"));
+        }
+    }
+
+    if let (Some(cert), Some(key)) = (&connector.tls.client_certificate, &connector.tls.client_key)
+    {
+        args.push(OsString::from("-cert"));
+        args.push(cert.as_os_str().to_os_string());
+        args.push(OsString::from("-key"));
+        args.push(key.as_os_str().to_os_string());
+    }
+
+    Ok((args, use_brief))
+}
+
+impl TlsConnector {
+    fn connect_with_binary(
+        &self,
+        timeout: Duration,
+        openssl: &OpenSslBinary,
+    ) -> io::Result<Transport> {
         self.tls
             .validate()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-        let verify_peer = resolve_verify_peer(&self.host, self.tls.authority_override.as_deref());
+        let deadline = (!timeout.is_zero()).then(|| Instant::now() + timeout);
 
-        let mut cmd = Command::new("openssl");
-        cmd.arg("s_client")
-            .arg("-quiet")
-            .arg("-verify_return_error");
-
-        if let Some(unix_path) = &self.unix_proxy {
-            cmd.arg("-unix").arg(unix_path);
+        let connect_target = if self.unix_proxy.is_some() {
+            None
         } else {
             // Ensure hostname resolves first so DNS failures surface immediately and cleanly,
             // while passing the host to `openssl s_client` so OpenSSL can fall back across all
@@ -392,32 +804,17 @@ impl Connector for TlsConnector {
                     "no addresses resolved",
                 ));
             }
-            cmd.arg("-connect").arg(connect_target);
-        }
+            Some(connect_target)
+        };
 
-        if let Ok(ip) = verify_peer.parse::<IpAddr>() {
-            cmd.arg("-verify_ip").arg(ip.to_string());
-        } else {
-            cmd.arg("-servername")
-                .arg(verify_peer)
-                .arg("-verify_hostname")
-                .arg(verify_peer);
-        }
+        let (args, use_brief) = build_s_client_args(self, openssl, connect_target.as_deref())?;
 
-        if let Some(alpn) = &self.alpn {
-            cmd.arg("-alpn").arg(alpn);
-        }
-
+        let mut cmd = Command::new(&openssl.path);
+        cmd.args(&args);
         if let Some(ca) = &self.tls.ca_certificate {
             // Isolate trust store to the explicitly configured `--tls_certificate` root bundle.
-            cmd.arg("-CAfile")
-                .arg(ca)
-                .env("SSL_CERT_FILE", ca)
+            cmd.env("SSL_CERT_FILE", ca)
                 .env("SSL_CERT_DIR", "/var/empty");
-        }
-
-        if let (Some(cert), Some(key)) = (&self.tls.client_certificate, &self.tls.client_key) {
-            cmd.arg("-cert").arg(cert).arg("-key").arg(key);
         }
 
         cmd.stdin(Stdio::piped())
@@ -427,27 +824,158 @@ impl Connector for TlsConnector {
         let mut child = cmd.spawn().map_err(|e| {
             io::Error::new(
                 e.kind(),
-                format!("failed to invoke openssl for TLS connection: {e}"),
+                format!(
+                    "failed to invoke openssl ({}) for TLS connection: {e}",
+                    openssl.path.display()
+                ),
             )
         })?;
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
-        let mut stderr_pipe = child.stderr.take().unwrap();
-        let stderr_buf = Arc::new(Mutex::new(String::new()));
-        let stderr_clone = stderr_buf.clone();
+        let stderr_pipe = child.stderr.take().unwrap();
+        let stderr_sync = Arc::new((Mutex::new(StderrState::default()), Condvar::new()));
+        let stderr_bg = stderr_sync.clone();
         std::thread::spawn(move || {
-            let mut s = String::new();
-            let _ = stderr_pipe.read_to_string(&mut s);
-            if !s.is_empty() {
-                *stderr_clone.lock().unwrap() = s;
+            let mut reader = io::BufReader::new(stderr_pipe);
+            let mut raw = Vec::new();
+            loop {
+                raw.clear();
+                match reader.read_until(b'\n', &mut raw) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let line = String::from_utf8_lossy(&raw);
+                        let trimmed = line.trim_end_matches(&['\r', '\n'][..]).to_string();
+                        let (lock, cv) = &*stderr_bg;
+                        let mut st = lock.lock().unwrap();
+                        if !st.established {
+                            if trimmed.contains("CONNECTION ESTABLISHED") {
+                                st.established = true;
+                                cv.notify_all();
+                            } else if !trimmed.is_empty()
+                                && st.pre_lines.len() < MAX_CAPTURED_STDERR_LINES
+                            {
+                                st.pre_lines.push(trimmed);
+                            }
+                        } else if !trimmed.is_empty()
+                            && !is_brief_info_line(&trimmed)
+                            && st.post_error_lines.len() < MAX_CAPTURED_STDERR_LINES
+                        {
+                            st.post_error_lines.push(trimmed);
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
+            let (lock, cv) = &*stderr_bg;
+            let mut st = lock.lock().unwrap();
+            st.eof = true;
+            cv.notify_all();
         });
 
         let state = Arc::new(TlsProcState {
             child: Mutex::new(child),
-            stderr: stderr_buf,
+            stderr: stderr_sync.clone(),
+            killed: AtomicBool::new(false),
         });
+
+        if use_brief {
+            let (lock, cv) = &*stderr_sync;
+            let mut st = lock.lock().unwrap();
+            loop {
+                if st.established || st.eof {
+                    break;
+                }
+                if let Some(dl) = deadline {
+                    let now = Instant::now();
+                    if now >= dl {
+                        drop(st);
+                        state.kill();
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("TLS connection/handshake timed out after {timeout:?}"),
+                        ));
+                    }
+                    let (next_st, _) = cv.wait_timeout(st, dl - now).unwrap();
+                    st = next_st;
+                } else {
+                    st = cv.wait(st).unwrap();
+                }
+            }
+            let established = st.established;
+            let pre_err = st.pre_lines.join("\n");
+            drop(st);
+
+            if !established {
+                let status = state.wait_exit_bounded(Duration::from_millis(250));
+                let detail = if !pre_err.is_empty() {
+                    pre_err
+                } else if let Some(s) = status {
+                    format!("TLS handshake/connection failed ({s})")
+                } else {
+                    "TLS handshake/connection failed (openssl exited before handshake completed)"
+                        .to_string()
+                };
+                state.kill();
+                return Err(io::Error::new(classify_tls_error_kind(&detail), detail));
+            }
+
+            // Catch immediate post-handshake exit (e.g. fatal alert right after establishment).
+            if let Ok(mut child) = state.child.lock() {
+                if let Ok(Some(status)) = child.try_wait() {
+                    drop(child);
+                    if !status.success() {
+                        let detail = state
+                            .wait_error_detail(Duration::from_millis(100))
+                            .unwrap_or_else(|| state.format_stderr_for_status(status));
+                        state.kill();
+                        return Err(io::Error::new(classify_tls_error_kind(&detail), detail));
+                    }
+                }
+            }
+        } else {
+            // Without `-brief`, bound a short early-exit check to surface immediate startup/CLI
+            // errors instead of returning silent EOF on the first read.
+            let probe_wait = deadline
+                .map(|dl| {
+                    dl.saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(50))
+                })
+                .unwrap_or(Duration::from_millis(50));
+            let probe_deadline = Instant::now() + probe_wait;
+            let (lock, cv) = &*stderr_sync;
+            let mut st = lock.lock().unwrap();
+            while !st.eof {
+                let now = Instant::now();
+                if now >= probe_deadline {
+                    break;
+                }
+                let (next_st, _) = cv.wait_timeout(st, probe_deadline - now).unwrap();
+                st = next_st;
+            }
+            let eof = st.eof;
+            drop(st);
+
+            let exited = if eof {
+                state.wait_exit_bounded(Duration::from_millis(250))
+            } else {
+                state
+                    .child
+                    .lock()
+                    .ok()
+                    .and_then(|mut c| c.try_wait().ok().flatten())
+            };
+            if let Some(status) = exited {
+                if !status.success() {
+                    let detail = state
+                        .wait_error_detail(Duration::from_millis(100))
+                        .unwrap_or_else(|| state.format_stderr_for_status(status));
+                    state.kill();
+                    return Err(io::Error::new(classify_tls_error_kind(&detail), detail));
+                }
+            }
+        }
+
         let shutdown_state = state.clone();
 
         Ok(Transport {
@@ -463,6 +991,18 @@ impl Connector for TlsConnector {
                 shutdown_state.kill();
             }),
         })
+    }
+}
+
+impl Connector for TlsConnector {
+    fn connect(&self) -> io::Result<Transport> {
+        self.connect_with_timeout(self.connect_timeout)
+    }
+
+    fn connect_with_timeout(&self, timeout: Duration) -> io::Result<Transport> {
+        let openssl = resolve_default_openssl()
+            .map_err(|msg| io::Error::new(io::ErrorKind::Unsupported, msg))?;
+        self.connect_with_binary(timeout, openssl)
     }
 
     fn authority(&self) -> String {
@@ -773,17 +1313,404 @@ mod tests {
         );
     }
 
+    #[test]
+    fn openssl_capability_parsing_and_candidate_selection() {
+        let openssl3_help = "\
+Usage: s_client [options] [host:port]
+ -connect val               TCP/IP where to connect
+ -unix val                  Connect over the specified Unix-domain socket
+ -quiet                     No s_client output
+ -brief                     Restrict output to brief summary
+ -servername val            Set TLS extension servername (SNI)
+ -alpn val                  Enable ALPN extension
+ -verify_hostname val       expected peer hostname
+ -verify_ip val             expected peer IP address
+ -verify_return_error       Close connection on verification error
+ -no-CApath                 Do not load default CA dir
+ -no-CAstore                Do not load default CA store
+";
+        let caps3 = parse_s_client_capabilities("OpenSSL 3.2.1 30 Jan 2024", openssl3_help);
+        assert_eq!(caps3.version, "OpenSSL 3.2.1 30 Jan 2024");
+        assert!(caps3.supports_strict_tls());
+        assert!(caps3.unix_socket);
+        assert!(caps3.brief);
+        assert!(caps3.alpn);
+        assert!(caps3.no_capath && caps3.no_castore);
+
+        let libressl_help = "\
+usage: s_client args
+ -connect host:port - who to connect to (note: unlike -verify_hostname in OpenSSL)
+ -verify depth      - turn on peer certificate verification
+ -verify_return_error - return verification errors
+ -servername host   - Set TLS extension servername in ClientHello
+ -alpn arg          - enable the ALPN extension
+ -quiet             - No s_client output
+";
+        let caps_libre = parse_s_client_capabilities("LibreSSL 3.3.6", libressl_help);
+        assert_eq!(caps_libre.version, "LibreSSL 3.3.6");
+        assert!(!caps_libre.verify_hostname);
+        assert!(!caps_libre.verify_ip);
+        assert!(!caps_libre.unix_socket);
+        assert!(!caps_libre.brief);
+        assert!(!caps_libre.supports_strict_tls());
+        assert_eq!(
+            caps_libre.missing_strict_flags(),
+            vec!["-verify_hostname", "-verify_ip"]
+        );
+
+        let win_openssl_help = "\
+Usage: s_client [options]
+ -connect val
+ -quiet
+ -brief
+ -servername val
+ -alpn val
+ -verify_hostname val
+ -verify_ip val
+ -verify_return_error
+";
+        let caps_win = parse_s_client_capabilities("OpenSSL 3.1.4", win_openssl_help);
+        assert!(caps_win.supports_strict_tls());
+        assert!(!caps_win.unix_socket);
+
+        // Candidate selection skips LibreSSL and picks Homebrew OpenSSL 3.
+        let libre_path = PathBuf::from("/usr/bin/openssl");
+        let brew_path = PathBuf::from("/opt/homebrew/opt/openssl@3/bin/openssl");
+        let picked = select_openssl_with(&[libre_path.clone(), brew_path.clone()], |p| {
+            if p == libre_path {
+                Some(OpenSslBinary {
+                    path: p.to_path_buf(),
+                    caps: caps_libre.clone(),
+                })
+            } else if p == brew_path {
+                Some(OpenSslBinary {
+                    path: p.to_path_buf(),
+                    caps: caps3.clone(),
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(picked.path, brew_path);
+
+        // On Unix, prefer an OpenSSL binary with -unix support when a later candidate has it.
+        #[cfg(unix)]
+        {
+            let win_path = PathBuf::from("/custom/openssl-no-unix");
+            let picked_unix = select_openssl_with(&[win_path.clone(), brew_path.clone()], |p| {
+                if p == win_path {
+                    Some(OpenSslBinary {
+                        path: p.to_path_buf(),
+                        caps: caps_win.clone(),
+                    })
+                } else if p == brew_path {
+                    Some(OpenSslBinary {
+                        path: p.to_path_buf(),
+                        caps: caps3.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+            assert_eq!(picked_unix.path, brew_path);
+        }
+
+        // Only LibreSSL found -> actionable error instead of silent downgrade.
+        let err = select_openssl_with(std::slice::from_ref(&libre_path), |p| {
+            Some(OpenSslBinary {
+                path: p.to_path_buf(),
+                caps: caps_libre.clone(),
+            })
+        })
+        .unwrap_err();
+        assert!(err.contains("LibreSSL 3.3.6"), "{err}");
+        assert!(err.contains("-verify_hostname/-verify_ip"), "{err}");
+        assert!(err.contains("brew install openssl@3"), "{err}");
+
+        // No openssl found -> actionable error.
+        let err_none =
+            select_openssl_with(std::slice::from_ref(&libre_path), |_| None).unwrap_err();
+        assert!(
+            err_none.contains("failed to find an openssl binary"),
+            "{err_none}"
+        );
+    }
+
+    #[test]
+    fn build_s_client_args_respects_capabilities_and_target_types() {
+        let full_bin = OpenSslBinary {
+            path: PathBuf::from("/opt/homebrew/opt/openssl@3/bin/openssl"),
+            caps: OpenSslCapabilities {
+                version: "OpenSSL 3.2.0".into(),
+                verify_hostname: true,
+                verify_ip: true,
+                unix_socket: true,
+                verify_return_error: true,
+                servername: true,
+                alpn: true,
+                quiet: true,
+                brief: true,
+                no_capath: true,
+                no_castore: true,
+            },
+        };
+
+        let host_conn = TlsConnector {
+            host: "remote.example.com".into(),
+            port: 443,
+            connect_timeout: Duration::from_secs(5),
+            alpn: Some("h2".into()),
+            tls: TlsConfig {
+                ca_certificate: Some(PathBuf::from("/tmp/ca.pem")),
+                client_certificate: Some(PathBuf::from("/tmp/cli.pem")),
+                client_key: Some(PathBuf::from("/tmp/cli.key")),
+                authority_override: None,
+            },
+            unix_proxy: None,
+        };
+        let (args, use_brief) =
+            build_s_client_args(&host_conn, &full_bin, Some("remote.example.com:443")).unwrap();
+        let has_arg = |a: &[OsString], s: &str| a.iter().any(|x| x == s);
+        assert!(use_brief);
+        assert!(has_arg(&args, "-quiet"));
+        assert!(has_arg(&args, "-brief"));
+        assert!(has_arg(&args, "-verify_return_error"));
+        assert!(has_arg(&args, "-servername"));
+        assert!(has_arg(&args, "-verify_hostname"));
+        assert!(!has_arg(&args, "-verify_ip"));
+        assert!(has_arg(&args, "-alpn"));
+        assert!(has_arg(&args, "-no-CApath"));
+        assert!(has_arg(&args, "-no-CAstore"));
+        assert!(has_arg(&args, "-cert"));
+        assert!(has_arg(&args, "-key"));
+
+        // IPv6 peer uses -verify_ip, never -servername / -verify_hostname.
+        let ip_conn = TlsConnector {
+            host: "[::1]".into(),
+            port: 8443,
+            connect_timeout: Duration::from_secs(5),
+            alpn: None,
+            tls: TlsConfig::default(),
+            unix_proxy: None,
+        };
+        let (ip_args, _) = build_s_client_args(&ip_conn, &full_bin, Some("[::1]:8443")).unwrap();
+        assert!(has_arg(&ip_args, "-verify_ip"));
+        assert!(has_arg(&ip_args, "::1"));
+        assert!(!has_arg(&ip_args, "-servername"));
+        assert!(!has_arg(&ip_args, "-verify_hostname"));
+
+        // Unix proxy uses -unix and fails clearly when openssl lacks -unix.
+        let unix_conn = TlsConnector {
+            host: "remote.example.com".into(),
+            port: 443,
+            connect_timeout: Duration::from_secs(5),
+            alpn: Some("h2".into()),
+            tls: TlsConfig::default(),
+            unix_proxy: Some("/tmp/proxy.sock".into()),
+        };
+        let (unix_args, _) = build_s_client_args(&unix_conn, &full_bin, None).unwrap();
+        assert!(has_arg(&unix_args, "-unix"));
+        assert!(has_arg(&unix_args, "/tmp/proxy.sock"));
+        assert!(!has_arg(&unix_args, "-connect"));
+
+        let mut no_unix_bin = full_bin.clone();
+        no_unix_bin.caps.unix_socket = false;
+        let unix_err = build_s_client_args(&unix_conn, &no_unix_bin, None).unwrap_err();
+        assert_eq!(unix_err.kind(), io::ErrorKind::Unsupported);
+        assert!(unix_err.to_string().contains("-unix"), "{unix_err}");
+
+        // LibreSSL missing -verify_hostname returns Unsupported without weakening verification.
+        let mut libre_bin = full_bin.clone();
+        libre_bin.caps.version = "LibreSSL 3.3.6".into();
+        libre_bin.caps.verify_hostname = false;
+        libre_bin.caps.verify_ip = false;
+        libre_bin.caps.brief = false;
+        let host_err = build_s_client_args(&host_conn, &libre_bin, Some("remote.example.com:443"))
+            .unwrap_err();
+        assert_eq!(host_err.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            host_err.to_string().contains("-verify_hostname"),
+            "{host_err}"
+        );
+        let ip_err = build_s_client_args(&ip_conn, &libre_bin, Some("[::1]:8443")).unwrap_err();
+        assert_eq!(ip_err.kind(), io::ErrorKind::Unsupported);
+        assert!(ip_err.to_string().contains("-verify_ip"), "{ip_err}");
+    }
+
+    #[test]
+    fn tls_connect_with_timeout_bounds_hanging_server() {
+        if resolve_default_openssl().is_err() {
+            return;
+        }
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("{e}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let accept_thread = std::thread::spawn(move || {
+            if let Ok((_conn, _)) = listener.accept() {
+                let _ = done_rx.recv_timeout(Duration::from_secs(5));
+            }
+        });
+
+        let tls_conn = TlsConnector {
+            host: "127.0.0.1".into(),
+            port,
+            connect_timeout: Duration::from_secs(30),
+            alpn: Some("h2".into()),
+            tls: TlsConfig::default(),
+            unix_proxy: None,
+        };
+        let started = Instant::now();
+        let err = match tls_conn.connect_with_timeout(Duration::from_millis(200)) {
+            Ok(_) => panic!("expected TLS handshake against silent server to time out"),
+            Err(e) => e,
+        };
+        let elapsed = started.elapsed();
+        let _ = done_tx.send(());
+        let _ = accept_thread.join();
+
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut, "err={err}");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "connect_with_timeout took too long: {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tls_early_exit_and_candidate_probing_via_scripts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("zel-tls-fake-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let make_script = |name: &str, body: &str| -> PathBuf {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            let mut perms = std::fs::metadata(&p).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&p, perms).unwrap();
+            p
+        };
+
+        // 1) Fake LibreSSL + fake OpenSSL 3 probing.
+        let fake_libressl = make_script(
+            "fake-libressl",
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"version\" ]; then\n\
+               echo \"LibreSSL 3.3.6\"\n\
+               exit 0\n\
+             fi\n\
+             echo \"usage: s_client args\" >&2\n\
+             echo \" -connect host:port - target\" >&2\n\
+             echo \" -verify_return_error - fail on verify error\" >&2\n\
+             echo \" -servername host - SNI\" >&2\n\
+             echo \" -alpn arg - ALPN\" >&2\n\
+             echo \" -quiet - quiet\" >&2\n\
+             exit 1\n",
+        );
+        let fake_openssl3 = make_script(
+            "fake-openssl3",
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"version\" ]; then\n\
+               echo \"OpenSSL 3.2.0 23 Nov 2023\"\n\
+               exit 0\n\
+             fi\n\
+             echo \"Usage: s_client [options]\" >&2\n\
+             echo \" -connect val\" >&2\n\
+             echo \" -unix val\" >&2\n\
+             echo \" -quiet\" >&2\n\
+             echo \" -brief\" >&2\n\
+             echo \" -servername val\" >&2\n\
+             echo \" -alpn val\" >&2\n\
+             echo \" -verify_hostname val\" >&2\n\
+             echo \" -verify_ip val\" >&2\n\
+             echo \" -verify_return_error\" >&2\n\
+             exit 0\n",
+        );
+
+        let selected = select_openssl_with(
+            &[fake_libressl.clone(), fake_openssl3.clone()],
+            probe_openssl_binary,
+        )
+        .unwrap();
+        assert_eq!(selected.path, fake_openssl3);
+        assert!(selected.caps.supports_strict_tls());
+        assert!(selected.caps.brief);
+
+        let only_libre_err =
+            select_openssl_with(std::slice::from_ref(&fake_libressl), probe_openssl_binary)
+                .unwrap_err();
+        assert!(
+            only_libre_err.contains("LibreSSL 3.3.6"),
+            "{only_libre_err}"
+        );
+        assert!(
+            only_libre_err.contains("-verify_hostname/-verify_ip"),
+            "{only_libre_err}"
+        );
+
+        // 2) Early failure on startup surfaces stderr synchronously for both brief and non-brief.
+        let failing_bin_path = make_script(
+            "fake-failing-openssl",
+            "#!/bin/sh\n\
+             echo \"s_client: unknown option -verify_hostname\" >&2\n\
+             exit 1\n",
+        );
+        let conn = TlsConnector {
+            host: "127.0.0.1".into(),
+            port: 443,
+            connect_timeout: Duration::from_secs(2),
+            alpn: Some("h2".into()),
+            tls: TlsConfig::default(),
+            unix_proxy: None,
+        };
+        for brief in [true, false] {
+            let fake_bin = OpenSslBinary {
+                path: failing_bin_path.clone(),
+                caps: OpenSslCapabilities {
+                    version: "OpenSSL 3.2.0".into(),
+                    verify_hostname: true,
+                    verify_ip: true,
+                    unix_socket: true,
+                    verify_return_error: true,
+                    servername: true,
+                    alpn: true,
+                    quiet: true,
+                    brief,
+                    no_capath: false,
+                    no_castore: false,
+                },
+            };
+            let err = match conn.connect_with_binary(Duration::from_secs(2), &fake_bin) {
+                Ok(_) => panic!("expected early exit error (brief={brief})"),
+                Err(e) => e,
+            };
+            assert!(
+                err.to_string().contains("unknown option -verify_hostname"),
+                "brief={brief}, err={err}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn tls_and_mtls_loopback_via_openssl_if_available() {
-        let has_openssl = Command::new("openssl")
-            .arg("version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_openssl {
+        let Ok(openssl) = resolve_default_openssl() else {
             return;
-        }
+        };
         let Ok(probe) = std::net::TcpListener::bind("127.0.0.1:0") else {
             return;
         };
@@ -805,7 +1732,7 @@ mod tests {
 
         std::fs::write(&srv_ext, "subjectAltName=DNS:localhost,IP:127.0.0.1\n").unwrap();
         let run_ok = |args: &[&str]| -> bool {
-            Command::new("openssl")
+            Command::new(&openssl.path)
                 .args(args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -888,8 +1815,8 @@ mod tests {
             "1",
         ]));
 
-        // Launch an mTLS `openssl s_server` accepting 1 connection with ALPN h2.
-        let mut srv = Command::new("openssl")
+        // Launch an mTLS `openssl s_server` accepting connections with ALPN h2.
+        let mut srv = Command::new(&openssl.path)
             .args([
                 "s_server",
                 "-accept",
@@ -906,16 +1833,12 @@ mod tests {
                 "-alpn",
                 "h2",
                 "-quiet",
-                "-naccept",
-                "1",
             ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
-
-        std::thread::sleep(Duration::from_millis(120));
 
         let tls_conn = TlsConnector {
             host: "127.0.0.1".into(),
@@ -930,16 +1853,54 @@ mod tests {
             },
             unix_proxy: None,
         };
-        if let Ok(mut tr) = tls_conn.connect() {
-            tr.writer.write_all(b"ping-over-mtls\n").unwrap();
-            tr.writer.flush().unwrap();
-            let mut srv_out = srv.stdout.take().unwrap();
-            let mut got = [0u8; 15];
-            if srv_out.read_exact(&mut got).is_ok() {
-                assert_eq!(&got, b"ping-over-mtls\n");
+
+        // Retry briefly while s_server finishes binding its listening socket.
+        let mut connected = None;
+        for _ in 0..40 {
+            match tls_conn.connect() {
+                Ok(tr) => {
+                    connected = Some(tr);
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => panic!("unexpected mTLS connect error: {e}"),
             }
-            (tr.shutdown)();
         }
+        let mut tr = connected.expect("mTLS loopback connect timed out waiting for s_server");
+        tr.writer.write_all(b"ping-over-mtls\n").unwrap();
+        tr.writer.flush().unwrap();
+        let mut srv_out = srv.stdout.take().unwrap();
+        let mut got = [0u8; 15];
+        srv_out.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"ping-over-mtls\n");
+        (tr.shutdown)();
+
+        // Wrong hostname must fail synchronously during connect() with the real verify error.
+        let bad_host_conn = TlsConnector {
+            host: "127.0.0.1".into(),
+            port,
+            connect_timeout: Duration::from_secs(5),
+            alpn: Some("h2".into()),
+            tls: TlsConfig {
+                ca_certificate: Some(ca_crt.clone()),
+                client_certificate: Some(cli_crt.clone()),
+                client_key: Some(cli_key.clone()),
+                authority_override: Some("wrong-host.example.com".into()),
+            },
+            unix_proxy: None,
+        };
+        let bad_err = match bad_host_conn.connect() {
+            Ok(_) => panic!("expected hostname mismatch to fail synchronously during connect()"),
+            Err(e) => e,
+        };
+        let bad_msg = bad_err.to_string().to_ascii_lowercase();
+        assert!(
+            bad_msg.contains("hostname mismatch") || bad_msg.contains("verify"),
+            "expected real TLS verify error, got: {bad_err}"
+        );
+
         let _ = srv.kill();
         let _ = srv.wait();
         let _ = std::fs::remove_dir_all(&dir);
