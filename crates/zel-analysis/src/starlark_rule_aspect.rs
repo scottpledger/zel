@@ -644,6 +644,11 @@ fn apply_aspect_path(
         ectx.semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
         ectx.thread.semantics.experimental_sibling_repository_layout =
             st.inputs.sibling_repository_layout;
+        let stop_build_file_path = st
+            .cfg
+            .bool_option("incompatible_stop_exporting_build_file_path", false);
+        ectx.semantics.incompatible_stop_exporting_build_file_path = stop_build_file_path;
+        ectx.thread.semantics.incompatible_stop_exporting_build_file_path = stop_build_file_path;
         ectx.file_name = rule.extra.location.clone().unwrap_or_else(|| "BUILD".to_string());
         let st2 = st.clone();
         ectx.host = Some(Arc::new(move |c, n, p, k| dispatch(&st2, c, n, p, k)));

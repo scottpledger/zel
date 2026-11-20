@@ -102,6 +102,23 @@ pub const EXPLICIT_IN_OUTPUT_PATH: &[&str] = &[
     "//command_line_option:platform_suffix",
 ];
 
+/// Starlark semantics flags (`BuildLanguageOptions`) carried in `BuildConfigurationKey::options`
+/// with their Bazel 9.3.2 defaults. These are global semantics flags (not `FragmentOptions`), so
+/// they do not participate in `BuildOptions::checksum()` and must be preserved across exec and
+/// no-config transitions.
+pub const STARLARK_SEMANTICS_CONFIG_OPTIONS: &[(&str, &str)] = &[
+    ("incompatible_allow_tags_propagation", "true"),
+    ("incompatible_stop_exporting_build_file_path", "false"),
+    ("incompatible_disallow_ctx_resolve_tools", "true"),
+    (
+        "incompatible_disable_target_default_provider_fields",
+        "false",
+    ),
+    ("incompatible_locations_prefers_executable", "true"),
+    ("experimental_platforms_api", "false"),
+    ("incompatible_enable_proto_toolchain_resolution", "true"),
+];
+
 fn varint_len_prefixed(s: &str, out: &mut Vec<u8>) {
     let mut n = s.len();
     loop {
@@ -222,7 +239,30 @@ impl BuildConfigurationKey {
         build_options::find_option(name)
             .map(|(_, o)| o.default)
             .filter(|d| *d != "null")
+            .or_else(|| {
+                STARLARK_SEMANTICS_CONFIG_OPTIONS
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, d)| *d)
+            })
             .map(str::to_string)
+    }
+
+    /// Cache key suffix for non-default Starlark semantics flags carried in `self.options`.
+    /// Empty when all tracked semantics flags match their Bazel 9.3.2 defaults.
+    pub fn semantics_cache_key(&self) -> String {
+        let mut out = String::new();
+        for &(name, default) in STARLARK_SEMANTICS_CONFIG_OPTIONS {
+            let default_bool = default == "true";
+            let effective = self.bool_option(name, default_bool);
+            if effective != default_bool {
+                out.push(';');
+                out.push_str(name);
+                out.push('=');
+                out.push_str(if effective { "true" } else { "false" });
+            }
+        }
+        out
     }
 
     /// Resolves a `--flag_alias=<alias>=<label>` target label in this configuration, if any.
@@ -326,6 +366,11 @@ impl BuildConfigurationKey {
     pub fn to_core_only(&self) -> Self {
         let mut out = Self::target(build_options::auto_host_cpu(), "fastbuild");
         out.core_only = true;
+        for &(name, _) in STARLARK_SEMANTICS_CONFIG_OPTIONS {
+            if let Some(val) = self.options.get(name) {
+                out.options.insert(name.to_string(), val.clone());
+            }
+        }
         out
     }
 
@@ -370,7 +415,10 @@ impl BuildConfigurationKey {
                     | "experimental_override_platform_cpu_name"
                     | "incompatible_disable_select_on"
                     | "incompatible_target_cpu_from_platform"
-            ) {
+            ) || STARLARK_SEMANTICS_CONFIG_OPTIONS
+                .iter()
+                .any(|(k, _)| *k == name)
+            {
                 return true;
             }
             if keep_test_opts
@@ -2752,5 +2800,55 @@ mod tests {
             from_post_prop.build_options(),
             from_pre_prop.build_options()
         );
+    }
+
+    #[test]
+    fn incompatible_stop_exporting_build_file_path_defaults_false_and_propagates() {
+        let host_cpu = build_options::auto_host_cpu();
+        let default_cfg = BuildConfigurationKey::target(host_cpu, "fastbuild");
+        assert_eq!(
+            default_cfg
+                .option_str("incompatible_stop_exporting_build_file_path")
+                .as_deref(),
+            Some("false")
+        );
+        assert!(!default_cfg.bool_option("incompatible_stop_exporting_build_file_path", false));
+        assert!(!default_cfg.bool_option("incompatible_stop_exporting_build_file_path", true));
+        assert_eq!(default_cfg.semantics_cache_key(), "");
+
+        let mut enabled_cfg = default_cfg.clone();
+        enabled_cfg.options.insert(
+            "incompatible_stop_exporting_build_file_path".to_string(),
+            "true".to_string(),
+        );
+        assert!(enabled_cfg.bool_option("incompatible_stop_exporting_build_file_path", false));
+        assert_eq!(
+            enabled_cfg.semantics_cache_key(),
+            ";incompatible_stop_exporting_build_file_path=true"
+        );
+        // Global Starlark semantics flags do not alter FragmentOptions checksum or mnemonic.
+        assert_eq!(enabled_cfg.checksum(), default_cfg.checksum());
+        assert_eq!(enabled_cfg.mnemonic(), default_cfg.mnemonic());
+
+        // Preserved across exec and core-only (cfg = config.none()) transitions.
+        let exec_cfg = enabled_cfg.to_exec();
+        assert!(exec_cfg.bool_option("incompatible_stop_exporting_build_file_path", false));
+        assert_eq!(exec_cfg.checksum(), default_cfg.to_exec().checksum());
+        assert_eq!(exec_cfg.mnemonic(), default_cfg.to_exec().mnemonic());
+
+        let core_cfg = enabled_cfg.to_core_only();
+        assert!(core_cfg.bool_option("incompatible_stop_exporting_build_file_path", false));
+        assert_eq!(core_cfg.checksum(), default_cfg.to_core_only().checksum());
+
+        let mut disabled_cfg = default_cfg.clone();
+        disabled_cfg.options.insert(
+            "incompatible_stop_exporting_build_file_path".to_string(),
+            "false".to_string(),
+        );
+        assert!(!disabled_cfg.bool_option("incompatible_stop_exporting_build_file_path", false));
+        assert_eq!(disabled_cfg.semantics_cache_key(), "");
+        assert!(!disabled_cfg
+            .to_exec()
+            .bool_option("incompatible_stop_exporting_build_file_path", false));
     }
 }

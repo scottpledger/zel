@@ -1320,10 +1320,10 @@ fn ctx_attr(st: &Arc<CtxState>, attr: &str) -> HostResult {
         "build_file_path" => {
             if st
                 .cfg
-                .bool_option("incompatible_stop_exporting_build_file_path", true)
+                .bool_option("incompatible_stop_exporting_build_file_path", false)
             {
                 return err(
-                    "Deprecated API: ctx.build_file_path has been removed. Use ctx.label.package + '/BUILD' instead of ctx.build_file_path.\nUse --noincompatible_stop_exporting_build_file_path to temporarily continue using it.",
+                    "Use ctx.label.package + '/BUILD' instead of ctx.build_file_path.\nUse --incompatible_stop_exporting_build_file_path=false to temporarily disable this check.",
                 );
             }
             let fname = st
