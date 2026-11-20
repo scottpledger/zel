@@ -199,6 +199,7 @@ toolchain(
         main_mapping_errors: false,
         nofetch: false,
         credential_helpers: vec![],
+        incompatible_use_cc_configure_from_rules_cc: true,
     };
 
     let session = Session::open(cfg).unwrap_or_else(|e| panic!("Session::open: {}", e.message));
