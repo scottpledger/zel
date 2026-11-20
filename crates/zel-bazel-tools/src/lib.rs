@@ -401,11 +401,11 @@ mod tests {
             return;
         };
 
-        // Step 2: Prefer compiling the repo's vendored `zlib` C sources so this test has zero
-        // dependency on system `zlib-dev` headers/libs; fall back to `-lz` only when running
-        // outside the Cargo workspace tree (e.g. an isolated test sandbox).
-        let vendored_zlib = option_env!("CARGO_MANIFEST_DIR")
-            .map(|m| Path::new(m).join("../../third_party/bcr/zlib/1.3.1.bcr.5"))
+        // Step 2: Prefer compiling the repo's vendored `zlib` C sources (resolved at runtime so
+        // `@rules_rs` never sees a compile-time `CARGO_MANIFEST_DIR` path embedded in `.rodata`);
+        // fall back to `-lz` when running in an isolated test sandbox without workspace access.
+        let vendored_zlib = std::env::var_os("CARGO_MANIFEST_DIR")
+            .map(|m| std::path::PathBuf::from(m).join("../../third_party/bcr/zlib/1.3.1.bcr.5"))
             .filter(|p| p.join("zlib.h").exists());
         let mut zlib_objs = Vec::new();
         let mut use_system_libz = false;
@@ -432,7 +432,11 @@ mod tests {
                 let obj = obj_dir.join(format!("{c_file}.o"));
                 let z_out = Command::new(cc)
                     .arg("-O2")
-                    .arg("-w")
+                    .arg("-DHAVE_UNISTD_H")
+                    .arg("-DHAVE_STDARG_H")
+                    .arg("-Werror=implicit-function-declaration")
+                    .arg("-Wno-deprecated-non-prototype")
+                    .arg("-Wno-unused-variable")
                     .arg("-I")
                     .arg(zdir)
                     .arg("-c")
