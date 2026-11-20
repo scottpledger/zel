@@ -125,22 +125,31 @@ pub(crate) fn expand_option_path(
     windows_mode: bool,
 ) -> PathBuf {
     let trim_dir = |base: &str| -> PathBuf {
-        if windows_mode && base.len() > 3 {
-            PathBuf::from(base.trim_end_matches(['/', '\\']))
+        let normalized = if windows_mode {
+            base.replace('/', "\\")
         } else {
-            PathBuf::from(base)
+            base.to_string()
+        };
+        if windows_mode && normalized.len() > 3 {
+            PathBuf::from(normalized.trim_end_matches(['/', '\\']))
+        } else {
+            PathBuf::from(normalized)
         }
     };
-    if let Some(rest) = p.strip_prefix("%workspace%/").or_else(|| {
-        if windows_mode {
-            p.strip_prefix("%workspace%\\")
-        } else {
-            None
+    if p == "%workspace%" {
+        trim_dir(&workspace.display().to_string())
+    } else if let Some(rest) = p
+        .strip_prefix("%workspace%")
+        .filter(|r| r.starts_with(['/', '\\']))
+    {
+        let mut out = trim_dir(&workspace.display().to_string());
+        for seg in rest
+            .split(['/', '\\'])
+            .filter(|s| !s.is_empty() && *s != ".")
+        {
+            out.push(seg);
         }
-    }) {
-        trim_dir(&workspace.display().to_string()).join(rest)
-    } else if p == "%workspace%" {
-        workspace.to_path_buf()
+        out
     } else if p == "~" {
         if let Some(home) = user_home {
             PathBuf::from(home)
@@ -173,6 +182,18 @@ pub(crate) fn expand_option_path(
     }
 }
 
+#[cfg(test)]
+fn expand_workspace_path(p: &str, workspace: &Path, cwd: &Path) -> PathBuf {
+    if p == "%workspace%"
+        || p.strip_prefix("%workspace%")
+            .is_some_and(|r| r.starts_with(['/', '\\']))
+    {
+        expand_option_path(p, workspace, None, cfg!(windows))
+    } else {
+        expand_option_path(p, cwd, None, cfg!(windows))
+    }
+}
+
 /// Formats an expanded option path in Bazel `PathFragment.getPathString()` form (`/` separators
 /// and uppercased drive letter on Windows) for Starlark `local_repository(path = ...)` attributes.
 pub(crate) fn format_option_path_fragment(p: &Path, windows_mode: bool) -> String {
@@ -191,10 +212,25 @@ impl BzlmodConfig {
         output_base: &Path,
         client_env: BTreeMap<String, String>,
     ) -> Result<Self, String> {
+        let cwd = parsed
+            .get_str("client_cwd")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace.to_path_buf());
         let user_home = resolve_user_home(&client_env);
         let windows_mode = cfg!(windows);
         let abs = |p: &str| -> PathBuf {
-            expand_option_path(p, workspace, user_home.as_deref(), windows_mode)
+            if p == "%workspace%"
+                || p.strip_prefix("%workspace%")
+                    .is_some_and(|r| r.starts_with(['/', '\\']))
+                || p == "~"
+                || p.starts_with("~/")
+                || (windows_mode && p.starts_with("~\\"))
+            {
+                expand_option_path(p, workspace, user_home.as_deref(), windows_mode)
+            } else {
+                expand_option_path(p, &cwd, user_home.as_deref(), windows_mode)
+            }
         };
         let mode_str = |n: &str, d: &str| {
             parsed.get_str(n).map(String::from).unwrap_or_else(|| {
@@ -1989,5 +2025,35 @@ mod repo_env_tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn expand_workspace_path_normalizes_separators_for_credential_helpers() {
+        let unix_ws = Path::new("/my/ws");
+        let cwd = Path::new("/my/ws/sub");
+        for spec in [
+            "%workspace%/tools/wild",
+            r"%workspace%\tools\wild",
+            "%workspace%//tools//./wild",
+        ] {
+            let expanded = expand_workspace_path(spec, unix_ws, cwd);
+            let rendered = expanded.to_string_lossy();
+            assert!(
+                !(rendered.contains('/') && rendered.contains('\\')),
+                "mixed separators in {rendered:?} for {spec:?}"
+            );
+            let mut expected = expand_workspace_path("%workspace%", unix_ws, cwd);
+            expected.push("tools");
+            expected.push("wild");
+            assert_eq!(expanded, expected, "mismatch for {spec:?}");
+        }
+
+        let win_ws = Path::new(r"C:\my\ws");
+        for spec in ["%workspace%/tools/wild.bat", r"%workspace%\tools\wild.bat"] {
+            let expanded = expand_workspace_path(spec, win_ws, cwd);
+            assert!(expanded.ends_with(Path::new("tools").join("wild.bat")));
+            #[cfg(windows)]
+            assert_eq!(expanded.to_string_lossy(), r"C:\my\ws\tools\wild.bat");
+        }
     }
 }

@@ -828,7 +828,12 @@ impl UrlRewriter {
             for (_, re, repl) in &self.rewrites {
                 if let Some(caps) = re.full_match(&without_scheme) {
                     matched = true;
-                    let s = format!("{}://{}", parsed.scheme, expand_replacement(repl, &caps));
+                    let expanded = expand_replacement(repl, &caps);
+                    let s = if expanded.starts_with("http://") || expanded.starts_with("https://") {
+                        expanded
+                    } else {
+                        format!("{}://{}", parsed.scheme, expanded)
+                    };
                     if !candidates.contains(&s) {
                         candidates.push(s);
                     }
@@ -1253,7 +1258,12 @@ impl Downloader {
         Duration::from_secs(secs).min(self.timeout)
     }
 
-    fn headers_for(&self, url: &str, req: &DownloadRequest, parsed: &Url) -> Vec<(String, String)> {
+    fn headers_for(
+        &self,
+        url: &str,
+        req: &DownloadRequest,
+        parsed: &Url,
+    ) -> Result<Vec<(String, String)>, FetchError> {
         let mut h: Vec<(String, String)> = req
             .headers
             .iter()
@@ -1264,25 +1274,21 @@ impl Downloader {
         // - When a `--credential_helper` matches `url`, its headers override matching keys in
         //   `req.headers` (`buildKeepingLast`) and fallback credentials (`req.auth`, URL
         //   userinfo, `.netrc`) are never consulted — even if the helper returned `{}` or
-        //   only non-`Authorization` headers, or failed with an `IOException`.
+        //   only non-`Authorization` headers; helper failures propagate as `FetchError`.
         // - Only when no `--credential_helper` matches `url` (`Ok(None)`) do we fall back to
         //   `req.auth`, URL userinfo, and `.netrc`.
-        match crate::netrc::resolve_credential_helper_headers(
+        if let Some(extra) = crate::netrc::resolve_credential_helper_headers(
             url,
             &self.credential_helpers,
             &self.client_env,
-        ) {
-            Ok(Some(extra)) => {
-                for (k, _) in &extra {
-                    h.retain(|(existing, _)| !existing.eq_ignore_ascii_case(k));
-                }
-                h.extend(extra);
-                return h;
+        )
+        .map_err(|e| fe(e, false))?
+        {
+            for (k, _) in &extra {
+                h.retain(|(existing, _)| !existing.eq_ignore_ascii_case(k));
             }
-            Err(_) => {
-                return h;
-            }
-            Ok(None) => {}
+            h.extend(extra);
+            return Ok(h);
         }
         let has_auth = |hdrs: &[(String, String)]| {
             hdrs.iter()
@@ -1322,7 +1328,7 @@ impl Downloader {
                 h.push((k, v));
             }
         }
-        h
+        Ok(h)
     }
 
     fn fetch_one(
@@ -1339,11 +1345,11 @@ impl Downloader {
                     .map_err(|e| fe(format!("{} ({})", p.display(), java_io_reason(&e)), false))
             }
             "http" => {
-                let headers = self.headers_for(url, req, &parsed);
+                let headers = self.headers_for(url, req, &parsed)?;
                 self.http_get(&parsed, &headers, attempt)
             }
             "https" => {
-                let headers = self.headers_for(url, req, &parsed);
+                let headers = self.headers_for(url, req, &parsed)?;
                 self.curl_get(&parsed.to_url_string_without_userinfo(), &headers, attempt)
             }
             other => Err(fe(
@@ -2027,6 +2033,92 @@ mod tests {
         r.auth.insert(url, a);
         quick().download(&r).unwrap();
         assert!(seen.lock().unwrap()[1].contains("Authorization: Bearer tok"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_failure_propagates_and_matching_helper_never_falls_back_to_netrc() {
+        use std::os::unix::fs::PermissionsExt;
+        if !net_ok() {
+            return;
+        }
+        let d = tmpdir("cred-helper-netrc");
+        let netrc_path = d.join(".netrc");
+        fs::write(
+            &netrc_path,
+            "machine 127.0.0.1 login netrc_user password netrc_pass\n",
+        )
+        .unwrap();
+        let mut client_env = BTreeMap::new();
+        client_env.insert("NETRC".to_string(), netrc_path.display().to_string());
+
+        let write_helper = |name: &str, body: &str| -> PathBuf {
+            let p = d.join(name);
+            fs::write(&p, body).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+        let failing_helper = write_helper(
+            "fail_helper.sh",
+            "#!/bin/sh\ncat >/dev/null\necho 'helper boom' >&2\nexit 1\n",
+        );
+        let empty_helper =
+            write_helper("empty_helper.sh", "#!/bin/sh\ncat >/dev/null\necho '{}'\n");
+
+        let (port, seen) = serve(2, |_, _| ok(b"payload"));
+        let url = format!("http://127.0.0.1:{port}/artifact.bin");
+
+        // 1. Matching helper fails -> download fails immediately without contacting server or using .netrc.
+        let dl_fail = Downloader {
+            credential_helpers: vec![("127.0.0.1".to_string(), failing_helper.clone())],
+            client_env: client_env.clone(),
+            ..quick()
+        };
+        let err = dl_fail
+            .download(&req(vec![url.clone()], d.join("out_fail")))
+            .unwrap_err();
+        assert!(
+            err.contains("Credential helper") && err.contains("helper boom"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "failed helper must not send HTTP request with .netrc fallback"
+        );
+
+        // 2. Matching helper succeeds with `{}` -> no Authorization header is sent (.netrc suppressed).
+        let dl_empty = Downloader {
+            credential_helpers: vec![("127.0.0.1".to_string(), empty_helper)],
+            client_env: client_env.clone(),
+            ..quick()
+        };
+        dl_empty
+            .download(&req(vec![url.clone()], d.join("out_empty")))
+            .unwrap();
+        let req_empty = seen.lock().unwrap()[0].clone();
+        assert!(
+            !req_empty.to_ascii_lowercase().contains("authorization:"),
+            "matching helper returning empty headers must not fall back to .netrc:\n{req_empty}"
+        );
+
+        // 3. Helper scoped only to another host -> `findCredentialHelper` is None, so .netrc is used.
+        let dl_unmatched = Downloader {
+            credential_helpers: vec![("other.example.com".to_string(), failing_helper)],
+            client_env,
+            ..quick()
+        };
+        dl_unmatched
+            .download(&req(vec![url], d.join("out_netrc")))
+            .unwrap();
+        let req_netrc = seen.lock().unwrap()[1].clone();
+        let expected_basic = format!(
+            "Authorization: Basic {}",
+            base64_encode(b"netrc_user:netrc_pass")
+        );
+        assert!(
+            req_netrc.contains(&expected_basic),
+            "unmatched helper scope should fall back to .netrc:\n{req_netrc}"
+        );
     }
 
     #[test]

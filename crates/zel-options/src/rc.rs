@@ -20,6 +20,7 @@ use crate::flag_tables::COMMAND_INHERITANCE;
 use crate::priority::{OptionPriority, PriorityCategory};
 use crate::startup::StartupOptions;
 use std::collections::{BTreeMap, HashSet};
+use std::io;
 use zel_util::Os;
 use zel_vfs::{FileSystem, PathFragment};
 
@@ -43,12 +44,15 @@ pub fn take_client_log() -> Vec<(&'static str, String)> {
 }
 
 /// Formats an I/O error like the C++ client does (`(error: 2): No such file or directory`).
-fn errno_text(e: &dyn std::fmt::Display) -> String {
+fn errno_text(e: &io::Error) -> String {
     let s = e.to_string();
-    match s.rsplit_once(" (os error ") {
-        Some((msg, rest)) => format!("(error: {}): {msg}", rest.trim_end_matches(')')),
-        None => s,
+    if let Some((msg, rest)) = s.rsplit_once(" (os error ") {
+        return format!("(error: {}): {msg}", rest.trim_end_matches(')'));
     }
+    if e.kind() == io::ErrorKind::NotFound {
+        return "(error: 2): No such file or directory".to_string();
+    }
+    s
 }
 
 /// Parsed `.bazelrc` configuration containing command and config entries.
@@ -368,10 +372,14 @@ impl BazelrcConfig {
                     // A plain path is only found missing when it is read (RcFile::ParseFile).
                     client_log(
                         "src/main/cpp/rc_file.cc:94",
-                        format!("Parsing the RcFile {resolved_path}"),
+                        format!("Parsing the RcFile {import_target_str}"),
                     );
+                    let io_err = fs.read_file(&resolved_path).err().unwrap_or_else(|| {
+                        io::Error::new(io::ErrorKind::NotFound, "No such file or directory")
+                    });
                     return Err(OptionsParsingError::new(format!(
-                        "Unexpected error reading config file '{resolved_path}': (error: 2): No such file or directory"
+                        "Unexpected error reading config file '{import_target_str}': {}",
+                        errno_text(&io_err)
                     )));
                 }
 
@@ -626,43 +634,47 @@ pub fn discover_and_load_rc_files(
         config.parse_file(&rc_path, workspace_dir, fs, build_label)?;
     }
 
-    // Apply any startup options found in rc files to startup at RcFile priority
-    if let Some(startup_opts) = config.sections.get("startup") {
-        let startup_map = crate::flag_tables::get_startup_options_map();
-        let mut priority = OptionPriority::lowest_at_category(PriorityCategory::RcFile);
-        for (flag, src) in startup_opts {
-            if let Some((f, _)) = flag.split_once('=') {
-                let naked = f.strip_prefix("--").unwrap_or(f);
-                let is_nullary = |n: &str| startup_map.get(n).is_some_and(|d| !d.requires_value());
-                let nullary_negated = naked.strip_prefix("no").is_some_and(|rest| {
-                    startup_map
-                        .get(rest)
-                        .is_some_and(|d| d.uses_boolean_syntax())
-                });
-                if f.starts_with("--")
-                    && naked != "block_for_lock"
-                    && (is_nullary(naked) || nullary_negated)
-                {
+    // Apply any startup options found in rc files (`startup` followed by `startup:<os>`) at RcFile priority.
+    let startup_map = crate::flag_tables::get_startup_options_map();
+    let mut priority = OptionPriority::lowest_at_category(PriorityCategory::RcFile);
+    let host_startup_section = format!("startup:{}", crate::config_expander::get_platform_name());
+    for section_name in ["startup", host_startup_section.as_str()] {
+        if let Some(startup_opts) = config.sections.get(section_name) {
+            for (flag, src) in startup_opts {
+                if let Some((f, _)) = flag.split_once('=') {
+                    let naked = f.strip_prefix("--").unwrap_or(f);
+                    let is_nullary =
+                        |n: &str| startup_map.get(n).is_some_and(|d| !d.requires_value());
+                    let nullary_negated = naked.strip_prefix("no").is_some_and(|rest| {
+                        startup_map
+                            .get(rest)
+                            .is_some_and(|d| d.uses_boolean_syntax())
+                    });
+                    if f.starts_with("--")
+                        && naked != "block_for_lock"
+                        && (is_nullary(naked) || nullary_negated)
+                    {
+                        return Err(OptionsParsingError::new(format!(
+                            "FATAL: In argument '{flag}': option '{f}' does not take a value."
+                        )));
+                    }
+                }
+                if let Err(e) = startup.apply_flag_with_priority(flag, src, priority.clone()) {
+                    let prod = if startup.product_name.is_empty() {
+                        "bazel"
+                    } else {
+                        &startup.product_name
+                    };
+                    let msg = &e.message;
+                    if msg.starts_with("Invalid argument to") {
+                        return Err(OptionsParsingError::new(format!("FATAL: {msg}")));
+                    }
                     return Err(OptionsParsingError::new(format!(
-                        "FATAL: In argument '{flag}': option '{f}' does not take a value."
+                        "FATAL: Unknown startup option: '{flag}'.\n  For more info, run '{prod} help startup_options'."
                     )));
                 }
+                priority = priority.next();
             }
-            if let Err(e) = startup.apply_flag_with_priority(flag, src, priority.clone()) {
-                let prod = if startup.product_name.is_empty() {
-                    "bazel"
-                } else {
-                    &startup.product_name
-                };
-                let msg = &e.message;
-                if msg.starts_with("Invalid argument to") {
-                    return Err(OptionsParsingError::new(format!("FATAL: {msg}")));
-                }
-                return Err(OptionsParsingError::new(format!(
-                    "FATAL: Unknown startup option: '{flag}'.\n  For more info, run '{prod} help startup_options'."
-                )));
-            }
-            priority = priority.next();
         }
     }
 
@@ -784,7 +796,7 @@ pub fn tokenize_rc_line(line: &str) -> Vec<String> {
             // Rest of line is comment
             break;
         }
-        if c == '\\' && !in_single {
+        if c == '\\' {
             if let Some(next_c) = chars.next() {
                 current.push(next_c);
             }
@@ -832,8 +844,182 @@ pub fn get_command_ancestry(command: &str) -> Vec<&'static str> {
     res
 }
 
-/// Evaluates a Bazel version condition (e.g. `>=7.0.0`, `<8.0.0`, `==7.1.0`).
-fn eval_bazel_version_condition(condition: &str, current_version: &str) -> Result<bool, String> {
+/// Semantic version matching Bazel C++ `SemVer` (`src/main/cpp/sem_ver.h`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemVer {
+    pub major: i32,
+    pub minor: i32,
+    pub patch: i32,
+    pub prerelease: Vec<String>,
+}
+
+impl SemVer {
+    fn parse_component(part: &str) -> Option<i32> {
+        if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        if part.len() > 1 && part.starts_with('0') {
+            return None;
+        }
+        part.parse::<i32>().ok().filter(|&v| v >= 0)
+    }
+
+    fn valid_ident_chars(id: &str) -> bool {
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    }
+
+    fn parse_prerelease_and_build(rest: &str) -> Option<Vec<String>> {
+        let before_build = match rest.split_once('+') {
+            Some((pre, build)) => {
+                if build.is_empty() || !build.split('.').all(Self::valid_ident_chars) {
+                    return None;
+                }
+                pre
+            }
+            None => rest,
+        };
+        if before_build.is_empty() {
+            return Some(Vec::new());
+        }
+        let pre = before_build.strip_prefix('-')?;
+        if pre.is_empty() {
+            return None;
+        }
+        let mut idents = Vec::new();
+        for id in pre.split('.') {
+            if !Self::valid_ident_chars(id) {
+                return None;
+            }
+            if id.len() > 1 && id.starts_with('0') && id.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            idents.push(id.to_string());
+        }
+        Some(idents)
+    }
+
+    /// Parses a full `major.minor.patch[-prerelease][+build]` semantic version.
+    pub fn parse(s: &str) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+        let split_pos = s.find(['-', '+']).unwrap_or(s.len());
+        let (core, rest) = s.split_at(split_pos);
+        let parts: Vec<&str> = core.split('.').collect();
+        if parts.len() != 3 {
+            return None;
+        }
+        let major = Self::parse_component(parts[0])?;
+        let minor = Self::parse_component(parts[1])?;
+        let patch = Self::parse_component(parts[2])?;
+        let prerelease = Self::parse_prerelease_and_build(rest)?;
+        Some(Self {
+            major,
+            minor,
+            patch,
+            prerelease,
+        })
+    }
+
+    /// Parses a tilde range version (`M`, `M.N`, or `M.N.P`, with optional prerelease/build),
+    /// returning `(inclusive_lower_bound, exclusive_upper_bound)`.
+    pub fn parse_tilde(s: &str) -> Option<(Self, Self)> {
+        if s.is_empty() {
+            return None;
+        }
+        let split_pos = s.find(['-', '+']).unwrap_or(s.len());
+        let (core, rest) = s.split_at(split_pos);
+        let parts: Vec<&str> = core.split('.').collect();
+        if parts.is_empty() || parts.len() > 3 {
+            return None;
+        }
+        let major = Self::parse_component(parts[0])?;
+        let minor = if parts.len() >= 2 {
+            Self::parse_component(parts[1])?
+        } else {
+            0
+        };
+        let patch = if parts.len() == 3 {
+            Self::parse_component(parts[2])?
+        } else {
+            0
+        };
+        let prerelease = Self::parse_prerelease_and_build(rest)?;
+        let lower = Self {
+            major,
+            minor,
+            patch,
+            prerelease,
+        };
+        let upper = if parts.len() == 1 {
+            lower.next_major_version()
+        } else {
+            lower.next_minor_version()
+        };
+        Some((lower, upper))
+    }
+
+    pub fn next_major_version(&self) -> Self {
+        Self {
+            major: self.major.saturating_add(1),
+            minor: 0,
+            patch: 0,
+            prerelease: Vec::new(),
+        }
+    }
+
+    pub fn next_minor_version(&self) -> Self {
+        Self {
+            major: self.major,
+            minor: self.minor.saturating_add(1),
+            patch: 0,
+            prerelease: Vec::new(),
+        }
+    }
+}
+
+impl PartialOrd for SemVer {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for SemVer {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch)) {
+            Ordering::Equal => {}
+            non_eq => return non_eq,
+        }
+        match (self.prerelease.is_empty(), other.prerelease.is_empty()) {
+            (true, true) => Ordering::Equal,
+            (false, true) => Ordering::Less,
+            (true, false) => Ordering::Greater,
+            (false, false) => {
+                for (a, b) in self.prerelease.iter().zip(other.prerelease.iter()) {
+                    let a_num = a.bytes().all(|c| c.is_ascii_digit());
+                    let b_num = b.bytes().all(|c| c.is_ascii_digit());
+                    let ord = match (a_num, b_num) {
+                        (true, true) => a.len().cmp(&b.len()).then_with(|| a.cmp(b)),
+                        (true, false) => Ordering::Less,
+                        (false, true) => Ordering::Greater,
+                        (false, false) => a.cmp(b),
+                    };
+                    if ord != Ordering::Equal {
+                        return ord;
+                    }
+                }
+                self.prerelease.len().cmp(&other.prerelease.len())
+            }
+        }
+    }
+}
+
+/// Evaluates a Bazel version condition (e.g. `>=7.0.0`, `<8.0.0`, `==7.1.0`, `~8.2.4`).
+pub fn eval_bazel_version_condition(
+    condition: &str,
+    current_version: &str,
+) -> Result<bool, String> {
     let mut op_len = 0;
     if condition.starts_with("<=")
         || condition.starts_with(">=")
@@ -853,16 +1039,24 @@ fn eval_bazel_version_condition(condition: &str, current_version: &str) -> Resul
     }
 
     let op = &condition[..op_len];
-    let ver_str = condition[op_len..].trim();
+    let ver_str = &condition[op_len..];
 
-    let target_ver = parse_semver(ver_str).ok_or_else(|| {
-        format!("Condition '{condition}'. Invalid target semantic version '{ver_str}'.")
+    if op == "~" {
+        let (lower, upper) = SemVer::parse_tilde(ver_str)
+            .ok_or_else(|| format!("Could not parse the tilde range version '{ver_str}'"))?;
+        let Some(curr_ver) = SemVer::parse(current_version) else {
+            return Ok(false);
+        };
+        return Ok(curr_ver >= lower && curr_ver < upper);
+    }
+
+    let target_ver = SemVer::parse(ver_str).ok_or_else(|| {
+        format!("Could not parse version '{ver_str}' as a valid semantic version")
     })?;
 
-    // If current_version is development or unparseable, default true
-    let curr_ver = match parse_semver(current_version) {
-        Some(v) => v,
-        None => return Ok(true),
+    // If current_version is unparseable (e.g. development "no_version"), skip conditional import.
+    let Some(curr_ver) = SemVer::parse(current_version) else {
+        return Ok(false);
     };
 
     let ord = curr_ver.cmp(&target_ver);
@@ -873,37 +1067,8 @@ fn eval_bazel_version_condition(condition: &str, current_version: &str) -> Resul
         ">=" => Ok(ord != std::cmp::Ordering::Less),
         "==" => Ok(ord == std::cmp::Ordering::Equal),
         "!=" => Ok(ord != std::cmp::Ordering::Equal),
-        "~" => {
-            // ~7.1.0 means >= 7.1.0 and < 8.0.0
-            Ok(curr_ver.0 == target_ver.0 && curr_ver >= target_ver)
-        }
         _ => Err(format!("Unsupported operator '{op}'")),
     }
-}
-
-fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
-    let clean = s
-        .trim()
-        .trim_start_matches('v')
-        .split('-')
-        .next()
-        .unwrap_or("");
-    let parts: Vec<&str> = clean.split('.').collect();
-    if parts.is_empty() {
-        return None;
-    }
-    let major = parts[0].parse::<u32>().ok()?;
-    let minor = if parts.len() > 1 {
-        parts[1].parse::<u32>().ok()?
-    } else {
-        0
-    };
-    let patch = if parts.len() > 2 {
-        parts[2].parse::<u32>().ok()?
-    } else {
-        0
-    };
-    Some((major, minor, patch))
 }
 
 #[cfg(test)]

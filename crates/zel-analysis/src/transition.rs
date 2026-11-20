@@ -327,15 +327,27 @@ struct BuildSettingSpec {
     ty: String,
     allow_multiple: bool,
     default_attr: Option<zel_packages::attr::AttrValue>,
+    setting_ctx: Option<(
+        zel_cmdline::PackageIdentifier,
+        zel_cmdline::RepositoryMapping,
+    )>,
 }
 
 fn resolve_build_setting(
     key: &str,
+    cfg: &BuildConfigurationKey,
     resolver: Option<&dyn crate::starlark_rule::DepResolver>,
 ) -> Result<Option<BuildSettingSpec>, String> {
-    if key.starts_with(CLO) {
-        return Ok(None);
-    }
+    let effective_key: String = if let Some(alias_name) = key.strip_prefix(CLO) {
+        if let Some(target_label) = cfg.flag_alias_target(alias_name) {
+            target_label
+        } else {
+            return Ok(None);
+        }
+    } else {
+        key.to_string()
+    };
+    let key = effective_key.as_str();
     let Some(r) = resolver else {
         return Ok(None);
     };
@@ -344,6 +356,16 @@ fn resolve_build_setting(
     };
     let mut cur = zel_cmdline::Label::parse_canonical(key).map_err(|e| e.to_string())?;
     let mut seen = Vec::new();
+    let mk_setting_ctx = |lbl: &zel_cmdline::Label| {
+        let pkg = lbl.package_identifier().clone();
+        let entries = r
+            .repo_mapping_entries(pkg.repository().name())
+            .into_iter()
+            .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+            .collect();
+        let mapping = zel_cmdline::RepositoryMapping::new(entries, pkg.repository().clone());
+        Some((pkg, mapping))
+    };
     for _ in 0..32 {
         if seen.contains(&cur) {
             return Err(format!("cycle in alias chain for build setting '{key}'"));
@@ -377,6 +399,16 @@ fn resolve_build_setting(
                 ty: "label".to_string(),
                 allow_multiple: false,
                 default_attr: rule.attr_or_default("build_setting_default"),
+                setting_ctx: mk_setting_ctx(&cur),
+            }));
+        }
+        if rule.rule_class == "config_feature_flag" {
+            return Ok(Some(BuildSettingSpec {
+                resolved_key: cur.canonical_form(),
+                ty: "string".to_string(),
+                allow_multiple: false,
+                default_attr: rule.attr_or_default("default_value"),
+                setting_ctx: mk_setting_ctx(&cur),
             }));
         }
         let Some(rc) = rule.extra.rule_class.as_ref() else {
@@ -409,6 +441,7 @@ fn resolve_build_setting(
             ty,
             allow_multiple,
             default_attr,
+            setting_ctx: mk_setting_ctx(&cur),
         }));
     }
     Err(format!("alias depth exceeded for build setting '{key}'"))
@@ -564,6 +597,7 @@ fn set_setting_with_spec(
         return Ok(());
     }
     let resolved = &spec.resolved_key;
+    let eff_ctx = spec.setting_ctx.as_ref().or(tctx);
     let raw_new = if spec.allow_multiple {
         if !matches!(value, Value::List(_) | Value::Tuple(_)) {
             return Err(format!(
@@ -574,7 +608,7 @@ fn set_setting_with_spec(
         let seq = zel_starlark::eval::builtins::value_to_sequence(value).map_err(|e| e.0)?;
         let mut parts = Vec::with_capacity(seq.len());
         for item in &seq {
-            parts.push(validate_scalar_for_spec(key, &spec.ty, item, tctx)?);
+            parts.push(validate_scalar_for_spec(key, &spec.ty, item, eff_ctx)?);
         }
         parts.join(",")
     } else if spec.ty == "string_list" {
@@ -588,7 +622,7 @@ fn set_setting_with_spec(
         let seq = zel_starlark::eval::builtins::value_to_sequence(value).map_err(|e| e.0)?;
         let mut parts = Vec::with_capacity(seq.len());
         for item in &seq {
-            parts.push(validate_scalar_for_spec(key, "string", item, tctx)?);
+            parts.push(validate_scalar_for_spec(key, "string", item, eff_ctx)?);
         }
         parts.join(",")
     } else if spec.ty == "string_set" {
@@ -614,7 +648,7 @@ fn set_setting_with_spec(
         }
         parts.join(",")
     } else {
-        validate_scalar_for_spec(key, &spec.ty, value, tctx)?
+        validate_scalar_for_spec(key, &spec.ty, value, eff_ctx)?
     };
 
     let def_val = default_value_for_spec(spec);
@@ -743,7 +777,7 @@ pub fn apply_transition_split_with_resolver(
                 return Err("analysis_test_transition settings keys must be strings".to_string());
             };
             let ck = canonicalize_setting(&k, tctx.as_ref())?;
-            let spec = resolve_build_setting(&ck, resolver)?;
+            let spec = resolve_build_setting(&ck, &out, resolver)?;
             set_setting_with_spec(&mut out, &ck, &v, spec.as_ref(), tctx.as_ref())?;
         }
         // Like Bazel's `PATCH_TRANSITION_KEY`: a split with a single anonymous entry, so that
@@ -768,10 +802,10 @@ pub fn apply_transition_split_with_resolver(
     let mut input_specs: BTreeMap<String, Option<BuildSettingSpec>> = BTreeMap::new();
     let mut output_specs: BTreeMap<String, Option<BuildSettingSpec>> = BTreeMap::new();
     for ci in &canonical_inputs {
-        input_specs.insert(ci.clone(), resolve_build_setting(ci, resolver)?);
+        input_specs.insert(ci.clone(), resolve_build_setting(ci, cfg, resolver)?);
     }
     for co in &canonical_outputs {
-        output_specs.insert(co.clone(), resolve_build_setting(co, resolver)?);
+        output_specs.insert(co.clone(), resolve_build_setting(co, cfg, resolver)?);
     }
     let mut settings: Vec<(Value, Value)> = Vec::new();
     for (i, ci) in inputs.iter().zip(canonical_inputs.iter()) {

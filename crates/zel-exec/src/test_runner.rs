@@ -1175,6 +1175,8 @@ fn run_attempt(
                     inputs: logged_test_inputs(spec, dir),
                     outputs: outputs_logged,
                     is_spawn: true,
+                    execution_info: e.execution_info.clone(),
+                    tool_inputs: Default::default(),
                 };
                 let res_info = zel_events::ActionResultInfo {
                     cache_hit: false,
@@ -1221,6 +1223,7 @@ fn run_attempt(
                         ],
                         outputs: vec![cwd_rel(&log_dir.join("test.xml"))],
                         is_spawn: true,
+                        ..Default::default()
                     };
                     e.reporter.action_started(&gen);
                     e.reporter.action_finished(&gen, &gen_res_info);

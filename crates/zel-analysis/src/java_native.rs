@@ -1109,10 +1109,35 @@ fn java_resource_path(st: &Arc<CtxState>, r: &Artifact) -> Result<String, Starla
             p = rest.to_string();
         }
     }
-    match st.rule.extra.attr_values.get("resource_strip_prefix") {
-        Some(AttrValue::Str(prefix)) if !prefix.is_empty() => {
-            let pre = format!("{}/", prefix.trim_end_matches('/'));
-            match p.strip_prefix(&pre) {
+    let explicit_strip = match st.rule.extra.attr_values.get("resource_strip_prefix") {
+        Some(v @ AttrValue::Select(_)) => crate::select::resolve_select(
+            v,
+            "resource_strip_prefix",
+            &st.rule,
+            &st.cfg,
+            st.inputs.resolver.as_ref(),
+        )
+        .ok(),
+        other => other.cloned(),
+    };
+    match explicit_strip {
+        Some(AttrValue::Str(prefix)) => {
+            let norm_prefix = PathFragment::create(&prefix)
+                .path_string()
+                .trim_matches('/')
+                .to_string();
+            if norm_prefix.is_empty() {
+                return Ok(p);
+            }
+            let norm_p = PathFragment::create(&p)
+                .path_string()
+                .trim_start_matches('/')
+                .to_string();
+            if norm_p == norm_prefix {
+                return Ok(String::new());
+            }
+            let pre = format!("{norm_prefix}/");
+            match norm_p.strip_prefix(&pre) {
                 Some(rest) => Ok(rest.to_string()),
                 None => err(format!("attribute resource_strip_prefix: Resource file '{p}' is not under the specified prefix to strip")),
             }

@@ -125,7 +125,7 @@ pub fn serialize_repo_definition_as_proto(
                             attr_pb.set_str("string_list_value", item.as_str().unwrap_or(""));
                         }
                     }
-                    crate::model::AttrVal::Dict(d) => {
+                    crate::model::AttrVal::Dict(d) | crate::model::AttrVal::LabelDict(d) => {
                         attr_pb.set_enum("type", "STRING_DICT");
                         for (dk, dv) in d {
                             let mut entry =

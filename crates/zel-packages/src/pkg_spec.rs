@@ -136,7 +136,7 @@ impl PackageSpec {
         })
     }
 
-    pub(crate) fn matches_positive(&self, pkg: &PackageIdentifier) -> bool {
+    pub fn matches_positive(&self, pkg: &PackageIdentifier) -> bool {
         match self {
             Self::AllPackages => true,
             Self::NoPackages => false,

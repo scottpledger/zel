@@ -163,23 +163,30 @@ impl BlazeRuntime {
         cfg.allow_empty_glob = !parsed
             .get_bool("incompatible_disallow_empty_glob")
             .unwrap_or(true);
+        cfg.sibling_repository_layout = parsed
+            .get_bool("experimental_sibling_repository_layout")
+            .unwrap_or(false);
         cfg.experimental_bzl_visibility = parsed
             .get_bool("experimental_bzl_visibility")
             .unwrap_or(true);
         cfg.check_bzl_visibility = parsed.get_bool("check_bzl_visibility").unwrap_or(true);
-        cfg.sibling_repository_layout = parsed
-            .get_bool("experimental_sibling_repository_layout")
+        cfg.experimental_enable_scl_dialect = parsed
+            .get_bool("experimental_enable_scl_dialect")
+            .unwrap_or(true);
+        cfg.incompatible_use_cc_configure_from_rules_cc = parsed
+            .get_bool("incompatible_use_cc_configure_from_rules_cc")
             .unwrap_or(false);
         let mut sig_parts: Vec<String> = vec![
             format!("allow_empty_glob={}", cfg.allow_empty_glob),
+            format!("sibling_repo={}", cfg.sibling_repository_layout),
             format!(
-                "experimental_bzl_visibility={}",
-                cfg.experimental_bzl_visibility
+                "bzl_vis={}/{}",
+                cfg.experimental_bzl_visibility, cfg.check_bzl_visibility
             ),
-            format!("check_bzl_visibility={}", cfg.check_bzl_visibility),
+            format!("scl={}", cfg.experimental_enable_scl_dialect),
             format!(
-                "sibling_repository_layout={}",
-                cfg.sibling_repository_layout
+                "cc_conf={}",
+                cfg.incompatible_use_cc_configure_from_rules_cc
             ),
             format!("deleted={:?}", cfg.lookup.deleted_packages),
         ];

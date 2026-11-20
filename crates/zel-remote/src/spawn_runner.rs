@@ -111,7 +111,7 @@ fn has(spawn: &Spawn, key: &str) -> bool {
 
 /// `Spawns.mayBeCached`.
 pub fn may_be_cached(spawn: &Spawn) -> bool {
-    !has(spawn, "no-cache")
+    !has(spawn, "no-cache") && !has(spawn, "local")
 }
 /// `Spawns.mayBeCachedRemotely`.
 pub fn may_be_cached_remotely(spawn: &Spawn) -> bool {
@@ -262,8 +262,12 @@ impl RemoteSpawnRunner {
         let mut warnings = Vec::new();
         if let Some(c) = &client {
             let need_exec = c.executor.is_some();
-            c.check_compatibility(need_exec)
-                .map_err(|e| e.to_string())?;
+            if let Some(warn) = c
+                .check_compatibility_with_warning(need_exec)
+                .map_err(|e| e.to_string())?
+            {
+                warnings.push(warn);
+            }
         }
         if opts.cache_compression {
             warnings.push(
@@ -388,14 +392,25 @@ impl RemoteSpawnRunner {
             .build(&inputs)
             .map_err(|e| vec![e.to_string()])?;
         let trees = tree_outputs(spawn);
+        let out_dir_set: std::collections::BTreeSet<String> = spawn
+            .output_dirs
+            .iter()
+            .map(|d| d.path_string().to_string())
+            .chain(trees)
+            .collect();
         let mut files: Vec<String> = Vec::new();
         let mut dirs: Vec<String> = Vec::new();
         for o in &spawn.outputs {
             let p = o.path_string().to_string();
-            if trees.contains(&p) {
+            if out_dir_set.contains(&p) {
                 dirs.push(p)
             } else {
                 files.push(p)
+            }
+        }
+        for d in out_dir_set {
+            if !dirs.contains(&d) {
+                dirs.push(d);
             }
         }
         files.sort();
@@ -513,7 +528,9 @@ impl RemoteSpawnRunner {
                 .as_ref()
                 .and_then(|d| d.get_action_result(&ra.action_digest))
             {
-                return Some(CacheHit::Disk(r));
+                if r.exit_code == 0 {
+                    return Some(CacheHit::Disk(r));
+                }
             }
         }
         if remote {
@@ -523,8 +540,8 @@ impl RemoteSpawnRunner {
                 .unwrap()
                 .get_action_result(&ra.action_digest, &ra.meta)
             {
-                Ok(Some(r)) => return Some(CacheHit::Remote(r)),
-                Ok(None) => {}
+                Ok(Some(r)) if r.exit_code == 0 => return Some(CacheHit::Remote(r)),
+                Ok(Some(_)) | Ok(None) => {}
                 Err(e) => self.warn(format!("Remote Cache: {e}")),
             }
         }
@@ -847,11 +864,15 @@ impl RemoteSpawnRunner {
 
     // ------------------------------------------------------------------- remote execution
 
-    fn execute_remotely(&self, ra: &RemoteAction) -> Result<ExecuteResponse, RemoteError> {
+    fn execute_remotely(
+        &self,
+        ra: &RemoteAction,
+        spawn: &Spawn,
+    ) -> Result<ExecuteResponse, RemoteError> {
         let c = self.client.as_ref().unwrap();
         let all = ra.all_blobs();
         c.ensure_blobs_present(&all, &ra.meta)?;
-        let skip = !self.opts.accept_cached;
+        let skip = !self.opts.accept_cached || !may_be_cached_remotely(spawn);
         match c.execute(&ra.action_digest, skip, &ra.meta, &mut |_| {}) {
             Err(RemoteError::Exec(st)) if is_missing_blobs_failure(&st) => {
                 // The CAS lost some blobs after our check: force re-upload of everything.
@@ -1004,14 +1025,14 @@ impl RemoteSpawnRunner {
         };
         let download = self.should_download(spawn);
         if let Some(hit) = self.lookup_cache(&ra, spawn) {
-            let (r, runner) = match hit {
+            let (r, runner, from_remote) = match hit {
                 CacheHit::Disk(r) => {
                     self.stats.disk_cache_hits.fetch_add(1, Ordering::SeqCst);
-                    (r, "disk cache hit")
+                    (r, "disk cache hit", false)
                 }
                 CacheHit::Remote(r) => {
                     self.stats.remote_cache_hits.fetch_add(1, Ordering::SeqCst);
-                    (r, "remote cache hit")
+                    (r, "remote cache hit", true)
                 }
             };
             if mode.hooks.is_cancelled() || !mode.hooks.lock(r.exit_code) {
@@ -1020,6 +1041,11 @@ impl RemoteSpawnRunner {
             let res =
                 self.result_from_action_result(&r, runner, spawn, &root, &ra.meta, download, start);
             if res.status != SpawnStatus::ExecutionFailed {
+                if from_remote && res.status == SpawnStatus::Success && download {
+                    if let (Some(dc), true) = (&self.disk, may_be_cached(spawn)) {
+                        let _ = dc.put_action_result(&ra.action_digest, &r);
+                    }
+                }
                 return Ok(res);
             }
             // The cached entry was unusable (e.g. evicted blobs): treat as a miss.
@@ -1031,7 +1057,7 @@ impl RemoteSpawnRunner {
         }
         if mode.allow_remote_exec && self.exec_remotely_enabled() && may_be_executed_remotely(spawn)
         {
-            return match self.execute_remotely(&ra) {
+            return match self.execute_remotely(&ra, spawn) {
                 Ok(resp) => {
                     let Some(r) = resp.result else {
                         let e = RemoteError::Other(

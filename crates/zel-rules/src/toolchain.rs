@@ -75,6 +75,7 @@ pub fn host_platform(platforms_repo: &str) -> Arc<ConfiguredTarget> {
                     ]),
                 ),
                 ("exec_properties", mk_dict(vec![])),
+                ("flags", zel_analysis::starlark_rule::mk_list(vec![])),
             ],
         ),
     );
@@ -404,7 +405,16 @@ pub(crate) fn resolve_toolchains_lazy(
 
     let ecw: Vec<Arc<ConfiguredTarget>> = exec_compatible_with
         .iter()
-        .map(|l| resolver.configured_target(l, cfg))
+        .map(|l| {
+            let ct = resolver.configured_target(l, cfg)?;
+            if !ct.providers.contains_key("ConstraintValueInfo") {
+                return Err(format!(
+                    "Target {} was referenced as a constraint_value, but does not provide ConstraintValueInfo",
+                    l.canonical_form()
+                ));
+            }
+            Ok(ct)
+        })
         .collect::<Result<_, _>>()?;
 
     if types.is_empty() {
@@ -440,6 +450,8 @@ pub(crate) fn resolve_toolchains_lazy(
         })
         .collect();
 
+    let has_optional = types.iter().any(|t| !t.mandatory);
+    let mut best: Option<(usize, ResolvedToolchains)> = None;
     let mut missing_for_all: Vec<Label> = Vec::new();
     for ep in &exec_platforms {
         if !satisfies(ep, &ecw) {
@@ -500,14 +512,23 @@ pub(crate) fn resolve_toolchains_lazy(
             chosen.insert(t.toolchain_type.canonical_form(), found);
         }
         if missing.is_empty() {
-            return Ok(ResolvedToolchains {
+            let resolved_count = chosen.values().filter(|v| v.is_some()).count();
+            let cand = ResolvedToolchains {
                 execution_platform: ep.clone(),
                 toolchains: chosen,
-            });
-        }
-        if missing_for_all.is_empty() {
+            };
+            if !has_optional || resolved_count == types.len() {
+                return Ok(cand);
+            }
+            if best.as_ref().is_none_or(|(c, _)| resolved_count > *c) {
+                best = Some((resolved_count, cand));
+            }
+        } else if missing_for_all.is_empty() {
             missing_for_all = missing;
         }
+    }
+    if let Some((_, win)) = best {
+        return Ok(win);
     }
     if missing_for_all.is_empty() {
         return Err(format!(
@@ -569,9 +590,20 @@ pub fn resolve_toolchains(
         .collect();
     let ecw: Vec<Arc<ConfiguredTarget>> = exec_compatible_with
         .iter()
-        .map(|l| resolver.configured_target(l, cfg))
+        .map(|l| {
+            let ct = resolver.configured_target(l, cfg)?;
+            if !ct.providers.contains_key("ConstraintValueInfo") {
+                return Err(format!(
+                    "Target {} was referenced as a constraint_value, but does not provide ConstraintValueInfo",
+                    l.canonical_form()
+                ));
+            }
+            Ok(ct)
+        })
         .collect::<Result<_, _>>()?;
 
+    let has_optional = types.iter().any(|t| !t.mandatory);
+    let mut best: Option<(usize, ResolvedToolchains)> = None;
     let mut missing_for_all: Vec<Label> = Vec::new();
     'platform: for ep in &exec_platforms {
         if !satisfies(ep, &ecw) {
@@ -602,15 +634,24 @@ pub fn resolve_toolchains(
             chosen.insert(t.toolchain_type.canonical_form(), found);
         }
         if missing.is_empty() {
-            return Ok(ResolvedToolchains {
+            let resolved_count = chosen.values().filter(|v| v.is_some()).count();
+            let cand = ResolvedToolchains {
                 execution_platform: ep.clone(),
                 toolchains: chosen,
-            });
-        }
-        if missing_for_all.is_empty() {
+            };
+            if !has_optional || resolved_count == types.len() {
+                return Ok(cand);
+            }
+            if best.as_ref().is_none_or(|(c, _)| resolved_count > *c) {
+                best = Some((resolved_count, cand));
+            }
+        } else if missing_for_all.is_empty() {
             missing_for_all = missing;
         }
         continue 'platform;
+    }
+    if let Some((_, win)) = best {
+        return Ok(win);
     }
     if missing_for_all.is_empty() {
         return Err(format!(

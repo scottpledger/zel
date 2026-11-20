@@ -469,7 +469,9 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         .clone()
         .unwrap_or_else(|| PathFragment::create(""));
 
-    let home = std::env::var("HOME").ok();
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
     let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
 
     // Discover and load rc files in exact Bazel precedence order

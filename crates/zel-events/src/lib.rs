@@ -286,6 +286,8 @@ pub struct ActionInfo {
     pub inputs: Vec<(String, bool)>,
     pub outputs: Vec<String>,
     pub is_spawn: bool,
+    pub execution_info: std::collections::BTreeMap<String, String>,
+    pub tool_inputs: std::collections::BTreeSet<String>,
 }
 
 /// Outcome of an executed action.

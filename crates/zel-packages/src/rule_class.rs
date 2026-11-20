@@ -527,6 +527,7 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
         "action_listener",
         "starlark_doc_extract",
         "cc_toolchain_alias",
+        "config_feature_flag",
     ] {
         let mut b = Builder::new(native);
         if native == "starlark_doc_extract" {

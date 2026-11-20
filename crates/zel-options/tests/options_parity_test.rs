@@ -1069,6 +1069,154 @@ fn test_common_config_reports_ignored_unsupported_options() {
 }
 
 #[test]
+fn test_semver_precedence_tilde_ranges_and_invalid_versions() {
+    let ordered = [
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+        "1.2.3-zzz",
+        "1.2.3",
+    ];
+    let parsed: Vec<SemVer> = ordered.iter().map(|s| SemVer::parse(s).unwrap()).collect();
+    for i in 0..parsed.len() {
+        for j in (i + 1)..parsed.len() {
+            assert!(
+                parsed[i] < parsed[j],
+                "expected {} < {}",
+                ordered[i],
+                ordered[j]
+            );
+        }
+    }
+    // Build metadata is accepted and ignored in comparisons.
+    assert_eq!(
+        SemVer::parse("1.2.3+20130313144700").unwrap(),
+        SemVer::parse("1.2.3+exp.sha.5114f85").unwrap()
+    );
+    // NextMinorVersion and tilde semantics (~X.Y.Z, ~X.Y -> < X.(Y+1).0; ~X -> < (X+1).0.0).
+    assert!(eval_bazel_version_condition("~1.2.3", "1.2.9").unwrap());
+    assert!(!eval_bazel_version_condition("~1.2.3", "1.3.0").unwrap());
+    assert!(eval_bazel_version_condition("~1.2", "1.2.5").unwrap());
+    assert!(!eval_bazel_version_condition("~1.2", "1.3.0").unwrap());
+    assert!(eval_bazel_version_condition("~8", "8.3.0").unwrap());
+    assert!(!eval_bazel_version_condition("~8", "9.0.0").unwrap());
+    assert!(!eval_bazel_version_condition("~8.2.4-beta", "8.2.4-alpha").unwrap());
+    assert!(eval_bazel_version_condition("~8.2.4-beta", "8.2.4-rc.1").unwrap());
+    assert!(eval_bazel_version_condition("~8.2.4-beta", "8.2.4").unwrap());
+    assert!(!eval_bazel_version_condition("~8.2.4-beta", "8.3.0").unwrap());
+    // Unparseable current build label skips conditional imports.
+    assert!(!eval_bazel_version_condition(">=7.0.0", "no_version").unwrap());
+    // Leading 'v' is rejected with Bazel's error wording.
+    assert!(eval_bazel_version_condition(">=v8.4.2", "8.4.2")
+        .unwrap_err()
+        .contains("Could not parse version 'v8.4.2' as a valid semantic version"));
+    assert!(eval_bazel_version_condition("~v1.2.3", "1.2.3")
+        .unwrap_err()
+        .contains("Could not parse the tilde range version 'v1.2.3'"));
+}
+
+#[test]
+fn test_rc_startup_os_section_single_quote_backslash_and_missing_import() {
+    assert_eq!(tokenize_rc_line(r"'a\ b' 'end\"), vec!["a b", "end"]);
+
+    let fs = InMemoryFileSystem::default();
+    let ws = PathFragment::create("/workspace");
+    fs.create_directory_and_parents(&ws).unwrap();
+    let plat = get_platform_name();
+    fs.write_file(
+        &ws.get_relative_str(".bazelrc"),
+        format!("startup --max_idle_secs=1\nstartup:{plat} --max_idle_secs=42\n").as_bytes(),
+    )
+    .unwrap();
+
+    let mut startup = StartupOptions::default();
+    discover_and_load_rc_files(&mut startup, Some(&ws), None, &ws, &fs, "9.3.2").unwrap();
+    assert_eq!(startup.max_idle_secs, 42);
+    assert_eq!(startup.raw_tagged_options.len(), 2);
+
+    fs.write_file(&ws.get_relative_str("bad.rc"), b"import somefile\n")
+        .unwrap();
+    let mut cfg = BazelrcConfig::default();
+    let err = cfg
+        .parse_file(&ws.get_relative_str("bad.rc"), Some(&ws), &fs, "9.3.2")
+        .unwrap_err();
+    assert!(
+        err.message
+            .contains("Unexpected error reading config file 'somefile'"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn test_startup_tilde_expansion_and_policy_use_default_and_append() {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            let mut s = StartupOptions::default();
+            s.apply_flag("--output_user_root=~/zel_sub", "command line")
+                .unwrap();
+            assert_eq!(
+                s.output_user_root.as_ref().unwrap().path_string(),
+                PathFragment::create(&format!("{}/zel_sub", home.trim_end_matches(['/', '\\'])))
+                    .path_string()
+            );
+            s.apply_flag("--output_user_root=~", "command line")
+                .unwrap();
+            assert_eq!(
+                s.output_user_root.as_ref().unwrap().path_string(),
+                PathFragment::create(&home).path_string()
+            );
+        }
+    }
+
+    // UseDefault resets legacy fields and removes canonical flags.
+    let policy = InvocationPolicy::parse(
+        r#"
+flag_policies {
+  flag_name: "compilation_mode"
+  use_default {}
+}
+flag_policies {
+  flag_name: "copt"
+  set_value {
+    flag_value: "-DFROM_POLICY"
+    behavior: APPEND
+  }
+}
+"#,
+    )
+    .unwrap();
+    let mut parsed = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "-c".to_string(),
+            "opt".to_string(),
+            "--copt=-DFROM_USER".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(parsed.compilation_mode, "opt");
+    parsed.apply_invocation_policy(&policy, "build").unwrap();
+    assert_eq!(parsed.compilation_mode, "fastbuild");
+    assert!(!parsed
+        .canonical_flags
+        .iter()
+        .any(|f| f.starts_with("--compilation_mode=")));
+    assert_eq!(
+        parsed.parsed_options["copt"].value,
+        OptionValue::List(vec![
+            OptionValue::String("-DFROM_USER".to_string()),
+            OptionValue::String("-DFROM_POLICY".to_string()),
+        ])
+    );
+}
+
+#[test]
 fn test_empty_to_null_path_fragment_converter_returns_void() {
     let parsed = ParsedCommandOptions::parse_for_command(
         "build",
@@ -1109,4 +1257,49 @@ fn test_empty_to_null_path_fragment_converter_returns_void() {
     )
     .unwrap();
     assert_eq!(non_empty.get_str("remote_grpc_log"), Some("dir/grpc.log"));
+}
+
+#[test]
+fn test_comma_separated_list_converter_and_execution_info_modifier() {
+    let parsed = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "--extra_execution_platforms=plat_a,plat_b".to_string(),
+            "--extra_toolchains=t1,t2".to_string(),
+            "--extra_toolchains=t3".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.parsed_options["extra_execution_platforms"].value,
+        OptionValue::List(vec![
+            OptionValue::String("plat_a".to_string()),
+            OptionValue::String("plat_b".to_string()),
+        ])
+    );
+    assert_eq!(
+        parsed.parsed_options["extra_toolchains"].value,
+        OptionValue::List(vec![
+            OptionValue::String("t1".to_string()),
+            OptionValue::String("t2".to_string()),
+            OptionValue::String("t3".to_string()),
+        ])
+    );
+
+    let add_mod = ExecutionInfoModifier::from_flag_values(
+        ["Genrule=+x,.*=+y,CppCompile=+z", "Genrule=-x"],
+        true,
+    )
+    .unwrap();
+    let mut info = std::collections::BTreeMap::new();
+    add_mod.apply("Genrule", &mut info);
+    assert_eq!(info.keys().cloned().collect::<Vec<_>>(), vec!["y"]);
+    let mut cc_info = std::collections::BTreeMap::new();
+    add_mod.apply("CppCompile", &mut cc_info);
+    assert_eq!(cc_info.keys().cloned().collect::<Vec<_>>(), vec!["y", "z"]);
+
+    let non_add =
+        ExecutionInfoModifier::from_flag_values(["OtherAction=+o", "Genrule=+g"], false).unwrap();
+    assert!(!non_add.matches("OtherAction"));
+    assert!(non_add.matches("Genrule"));
 }

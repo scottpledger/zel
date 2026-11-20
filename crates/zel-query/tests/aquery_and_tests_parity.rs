@@ -129,3 +129,183 @@ fn query_package_group_respects_repo_mapping() {
     assert_eq!(out.exit_code, 0, "{:?}", out.stderr);
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "//:vis_target");
 }
+
+#[test]
+fn javatests_one_way_visibility_and_genquery_strict_scope() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    fs.create_directory_and_parents(&root).unwrap();
+    write(
+        &fs,
+        &root,
+        "java/com/foo/BUILD",
+        "filegroup(name = 'lib', visibility = ['//visibility:private'])\n",
+    );
+    write(
+        &fs,
+        &root,
+        "javatests/com/foo/BUILD",
+        "filegroup(name = 'tst', srcs = ['//java/com/foo:lib'], visibility = ['//visibility:private'])\n",
+    );
+    write(&fs, &root, "other/BUILD", "filegroup(name = 'outside')\n");
+
+    let loader = PackageLoader::new(LoaderConfig::new(
+        fs,
+        Arc::new(SimpleRepoResolver::new(root)),
+    ));
+    let resolver = PatternResolver::new(Arc::clone(&loader), PathFragment::empty());
+
+    let ok_vis = run_query(
+        &resolver,
+        "visible(//javatests/com/foo:tst, //java/com/foo:lib)",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+    );
+    assert_eq!(ok_vis.exit_code, 0, "{:?}", ok_vis.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&ok_vis.stdout).trim(),
+        "//java/com/foo:lib"
+    );
+
+    let rev_vis = run_query(
+        &resolver,
+        "visible(//java/com/foo:lib, //javatests/com/foo:tst)",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+    );
+    assert_eq!(rev_vis.exit_code, 0, "{:?}", rev_vis.stderr);
+    assert!(
+        String::from_utf8_lossy(&rev_vis.stdout).trim().is_empty(),
+        "javatests visibility must be one-way"
+    );
+
+    let oos = zel_query::run_genquery(
+        &loader,
+        "deps(//other:outside)",
+        &["//javatests/com/foo:tst".to_string()],
+        true,
+        &[],
+    );
+    let err = oos.unwrap_err();
+    assert!(
+        err.contains("is not within the scope of the query"),
+        "{err}"
+    );
+
+    let transitive_ok = zel_query::run_genquery(
+        &loader,
+        "deps(//javatests/com/foo:tst)",
+        &["//javatests/com/foo:tst".to_string()],
+        true,
+        &[],
+    )
+    .unwrap();
+    let txt = String::from_utf8_lossy(&transitive_ok);
+    assert!(txt.contains("//java/com/foo:lib"), "{txt}");
+}
+
+#[test]
+fn cquery_noimplicit_keeps_select_conditions_and_files_unions_default_group() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    fs.create_directory_and_parents(&root).unwrap();
+    write(&fs, &root, "BUILD", "");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r#"
+def _r(ctx):
+    f1 = ctx.actions.declare_file(ctx.label.name + ".f1")
+    f2 = ctx.actions.declare_file(ctx.label.name + ".f2")
+    ctx.actions.write(f1, "1")
+    ctx.actions.write(f2, "2")
+    return [
+        DefaultInfo(files = depset([f1])),
+        OutputGroupInfo(default = depset([f2])),
+    ]
+dual_rule = rule(implementation = _r, attrs = {"srcs": attr.label_list(allow_files = True)})
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "pkg/BUILD",
+        r#"
+load("//:defs.bzl", "dual_rule")
+config_setting(name = "cs_opt", values = {"compilation_mode": "opt"})
+dual_rule(
+    name = "d",
+    srcs = select({":cs_opt": ["a.txt"], "//conditions:default": ["b.txt"]}),
+)
+"#,
+    );
+    write(&fs, &root, "pkg/a.txt", "a");
+    write(&fs, &root, "pkg/b.txt", "b");
+
+    let loader = PackageLoader::new(LoaderConfig::new(
+        fs,
+        Arc::new(SimpleRepoResolver::new(root)),
+    ));
+    let resolver = PatternResolver::new(Arc::clone(&loader), PathFragment::empty());
+    let tr = TargetResolver::new(loader, AnalysisConfig::default());
+
+    let cq_deps = run_post_analysis(
+        &resolver,
+        Arc::clone(&tr),
+        BuildConfigurationKey::default(),
+        "deps(//pkg:d)",
+        &QueryOpts {
+            implicit_deps: false,
+            ..Default::default()
+        },
+        &FormatOpts::default(),
+        &PostOpts {
+            output: "label".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cq_deps.exit_code, 0, "{:?}", cq_deps.stderr);
+    let deps_txt = String::from_utf8_lossy(&cq_deps.stdout);
+    assert!(
+        deps_txt.contains("//pkg:cs_opt"),
+        "select condition should stay visible under --noimplicit_deps: {deps_txt}"
+    );
+
+    let cq_files = run_post_analysis(
+        &resolver,
+        Arc::clone(&tr),
+        BuildConfigurationKey::default(),
+        "//pkg:d",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+        &PostOpts {
+            output: "files".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cq_files.exit_code, 0, "{:?}", cq_files.stderr);
+    let files_txt = String::from_utf8_lossy(&cq_files.stdout);
+    assert!(files_txt.contains("d.f1"), "{files_txt}");
+    assert!(files_txt.contains("d.f2"), "{files_txt}");
+
+    let cq_proto = run_post_analysis(
+        &resolver,
+        tr,
+        BuildConfigurationKey::default(),
+        "//pkg:d",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+        &PostOpts {
+            output: "textproto".into(),
+            transitions: "lite".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(cq_proto.exit_code, 0, "{:?}", cq_proto.stderr);
+    let proto_txt = String::from_utf8_lossy(&cq_proto.stdout);
+    assert!(
+        proto_txt.contains("configured_rule_input"),
+        "cquery proto --transitions=lite should populate configured_rule_input: {proto_txt}"
+    );
+}

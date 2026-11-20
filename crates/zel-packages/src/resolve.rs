@@ -440,7 +440,7 @@ impl PatternResolver {
                 directory,
                 include_files,
             } => self
-                .expand_below_directory(directory, *include_files, &[], false, events)
+                .expand_below_directory(directory, *include_files, &[], None, false, events)
                 .map(|(ts, _)| ts),
         }
     }
@@ -450,12 +450,19 @@ impl PatternResolver {
         directory: &PackageIdentifier,
         include_files: bool,
         excluded_subdirs: &[PathFragment],
+        raw_positive_pattern: Option<&str>,
         keep_going: bool,
         events: &mut Vec<PackageEvent>,
     ) -> Result<(Vec<Target>, Vec<String>), String> {
         let mut out = Vec::new();
         let mut pkgs = Vec::new();
-        self.find_packages_below_excluding(directory, excluded_subdirs, &mut pkgs, events)?;
+        self.find_packages_below_excluding_with_pattern(
+            directory,
+            excluded_subdirs,
+            raw_positive_pattern,
+            &mut pkgs,
+            events,
+        )?;
         let mut pkg_failures: Vec<String> = Vec::new();
         let mut pkg_err_events = Vec::new();
         for id in pkgs {
@@ -545,6 +552,23 @@ impl PatternResolver {
         out: &mut Vec<PackageIdentifier>,
         events: &mut Vec<PackageEvent>,
     ) -> Result<(), String> {
+        self.find_packages_below_excluding_with_pattern(dir, excluded_subdirs, None, out, events)
+    }
+
+    fn find_packages_below_excluding_with_pattern(
+        &self,
+        dir: &PackageIdentifier,
+        excluded_subdirs: &[PathFragment],
+        raw_positive_pattern: Option<&str>,
+        out: &mut Vec<PackageIdentifier>,
+        events: &mut Vec<PackageEvent>,
+    ) -> Result<(), String> {
+        if excluded_subdirs
+            .iter()
+            .any(|ex| dir.package_fragment().starts_with(ex))
+        {
+            return Ok(());
+        }
         let lookup = &self.loader.config().lookup;
         let Some(root) = lookup.resolver.repo_root(dir.repository()) else {
             let repo = dir.repository();
@@ -573,28 +597,15 @@ impl PatternResolver {
             .ignored_subdirectories(&root)
             .matching_entry(dir.package_fragment())
         {
-            let pat_display = if dir.repository().is_main() {
-                if dir.package_fragment().is_empty() {
-                    "//...".to_string()
-                } else {
-                    format!("//{}/...", dir.package_fragment())
-                }
-            } else if dir.package_fragment().is_empty() {
-                format!("{}/...", dir.repository().canonical_form())
-            } else {
-                format!(
-                    "{}//{}/...",
-                    dir.repository().canonical_form(),
-                    dir.package_fragment()
-                )
-            };
-            events.push(PackageEvent {
-                kind: EventKind::Warning,
-                location: None,
-                message: format!(
-                    "Pattern '{pat_display}' was filtered out by ignored directory '{entry}'"
-                ),
-            });
+            if let Some(pat) = raw_positive_pattern {
+                events.push(PackageEvent {
+                    kind: EventKind::Warning,
+                    location: None,
+                    message: format!(
+                        "Pattern '{pat}' was filtered out by ignored directory '{entry}'"
+                    ),
+                });
+            }
             return Ok(());
         }
         let start = root.get_relative(dir.package_fragment());
@@ -706,6 +717,10 @@ impl PatternResolver {
         ancestors.push(real_dir);
         let mut names: Vec<_> = entries.into_iter().collect();
         names.sort_by(|a, b| a.name.cmp(&b.name));
+        let dont_follow_symlinks = names.iter().any(|e| {
+            e.name
+                == "DONT_FOLLOW_SYMLINKS_WHEN_TRAVERSING_THIS_DIRECTORY_VIA_A_RECURSIVE_TARGET_PATTERN"
+        });
         for e in names {
             if skip_convenience
                 && e.name.starts_with("bazel-")
@@ -713,8 +728,25 @@ impl PatternResolver {
             {
                 continue;
             }
+            if skip_convenience
+                && e.name == "external"
+                && !self.loader.config().sibling_repository_layout
+            {
+                continue;
+            }
+            if dont_follow_symlinks && e.dirent_type == DirentType::Symlink {
+                continue;
+            }
             let child_abs = abs.get_relative_str(&e.name);
             let child_rel = id.package_fragment().get_relative_str(&e.name);
+            if e.dirent_type == DirentType::Symlink {
+                if let Ok(raw_target) = lookup.fs.read_symbolic_link(&child_abs) {
+                    let ts = raw_target.path_string();
+                    if ts.contains("/execroot/") || ts.ends_with("/execroot") {
+                        continue;
+                    }
+                }
+            }
             let cst = match lookup.fs.stat(&child_abs, true) {
                 Ok(s) => s,
                 Err(_) => {
@@ -890,13 +922,20 @@ impl PatternResolver {
                     },
                 )) = &parsed_list[j]
                 {
-                    if pos_dir.repository() == neg_dir.repository()
-                        && neg_dir
+                    if pos_dir.repository() == neg_dir.repository() {
+                        if neg_dir
                             .package_fragment()
                             .starts_with(pos_dir.package_fragment())
-                    {
-                        excluded_for[j].push(neg_dir.package_fragment().clone());
-                        covered_earlier = true;
+                        {
+                            excluded_for[j].push(neg_dir.package_fragment().clone());
+                            covered_earlier = true;
+                        } else if pos_dir
+                            .package_fragment()
+                            .starts_with(neg_dir.package_fragment())
+                        {
+                            excluded_for[j].push(pos_dir.package_fragment().clone());
+                            covered_earlier = true;
+                        }
                     }
                 }
             }
@@ -952,10 +991,12 @@ impl PatternResolver {
                     directory,
                     include_files,
                 } => {
+                    let raw_pos = (signed.sign == PatternSign::Positive).then_some(raw.as_str());
                     match self.expand_below_directory(
                         directory,
                         *include_files,
                         &excluded_for[idx],
+                        raw_pos,
                         keep_going,
                         &mut events,
                     ) {

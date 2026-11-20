@@ -196,6 +196,32 @@ impl BuildConfigurationKey {
             .map(str::to_string)
     }
 
+    /// Resolves a `--flag_alias=<alias>=<label>` target label in this configuration, if any.
+    pub fn flag_alias_target(&self, alias: &str) -> Option<String> {
+        let mut found: Option<String> = None;
+        if let Some(n) = self.native.get("flag_alias") {
+            if let build_options::ConfigValue::List(entries) = &n.value {
+                for entry in entries {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        if k == alias && !v.is_empty() {
+                            found = Some(v.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(raw) = self.options.get("flag_alias") {
+            for entry in raw.split(',').filter(|s| !s.is_empty()) {
+                if let Some((k, v)) = entry.split_once('=') {
+                    if k == alias && !v.is_empty() {
+                        found = Some(v.to_string());
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// Reads a boolean option (`options` / `native` / default).
     pub fn bool_option(&self, name: &str, default: bool) -> bool {
         let val = self.option_str(name);
@@ -292,8 +318,10 @@ impl BuildConfigurationKey {
             .or_else(|| self.options.get("host_cpu").cloned())
             .unwrap_or_else(|| build_options::auto_host_cpu().to_string());
         // JavaOptions.getExec: --plugin is not propagated to the exec configuration (avoids cycles),
-        // while `java_launcher` in the exec configuration comes from `host_java_launcher`.
+        // `java_launcher` comes from `host_java_launcher`, and
+        // `--tool_java_{language,runtime}_version` become `--java_{language,runtime}_version`.
         out.options.remove("plugin");
+        out.native.remove("plugin");
         let host_launcher = self
             .options
             .get("host_java_launcher")
@@ -301,9 +329,38 @@ impl BuildConfigurationKey {
             .or_else(|| native("host_java_launcher"))
             .filter(|s| !s.is_empty() && s != "null" && s != NULL_VALUE);
         if let Some(hl) = host_launcher {
-            out.options.insert("java_launcher".to_string(), hl);
+            out.options.insert("java_launcher".to_string(), hl.clone());
+            out.native.insert(
+                "java_launcher".to_string(),
+                NativeSetting {
+                    raw: hl.clone(),
+                    value: build_options::ConfigValue::Scalar(hl),
+                },
+            );
         } else {
             out.options.remove("java_launcher");
+            out.native.remove("java_launcher");
+        }
+        for (tool_k, target_k) in [
+            ("tool_java_language_version", "java_language_version"),
+            ("tool_java_runtime_version", "java_runtime_version"),
+        ] {
+            let v = self
+                .options
+                .get(tool_k)
+                .cloned()
+                .or_else(|| native(tool_k))
+                .filter(|s| !s.is_empty());
+            if let Some(val) = v {
+                out.options.insert(target_k.to_string(), val.clone());
+                out.native.insert(
+                    target_k.to_string(),
+                    NativeSetting {
+                        raw: val.clone(),
+                        value: build_options::ConfigValue::Scalar(val),
+                    },
+                );
+            }
         }
         const KEY: &str = "//command_line_option:platforms";
         // `SkyframeExecutor.setBaselineConfiguration`: BASELINE_EXEC_CONFIGURATION is the exec
@@ -1228,6 +1285,66 @@ pub fn format_utc_build_date(epoch_secs: i64) -> String {
     )
 }
 
+/// Deferred parameter-file formatting specification for [`ActionAnalysisMetadata::FileWriteAction`],
+/// allowing tree-artifact placeholders (`Args.add_all`) to expand at execution time before
+/// parameter-file quoting/escaping (`ParameterFileWriteAction` / `ParameterFile.writeParameterFile`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamFileWriteSpec {
+    pub args: Vec<String>,
+    pub format: ParamFileFormat,
+    pub flag_groups: Vec<(usize, usize)>,
+    pub flags_only: bool,
+}
+
+impl ParamFileWriteSpec {
+    /// Returns true if any argument contains a deferred tree-artifact placeholder.
+    pub fn has_tree_artifacts(&self) -> bool {
+        self.args.iter().any(|s| s.contains("\u{1}ZEL_TREE"))
+    }
+
+    /// Expands tree-artifact placeholders via `list_dir` and renders the parameter file bytes.
+    pub fn render_expanded(
+        &self,
+        list_dir: &dyn Fn(&str) -> Result<Vec<String>, String>,
+    ) -> Result<Vec<u8>, String> {
+        let mut lines = if self.format == ParamFileFormat::FlagPerLine
+            && !self.flag_groups.is_empty()
+        {
+            let mut collapsed = Vec::with_capacity(self.flag_groups.len());
+            let mut cursor = 0usize;
+            for &(start, end) in &self.flag_groups {
+                if end == 0 || start >= self.args.len() || start >= end {
+                    continue;
+                }
+                let s = start;
+                let e = end.min(self.args.len());
+                while cursor < s {
+                    let expanded =
+                        crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
+                    collapsed.extend(expanded);
+                    cursor += 1;
+                }
+                let expanded = crate::expand_tree_artifact_args(&self.args[s..e], list_dir)?;
+                crate::args::collapse_flag_per_line_group(expanded, &mut collapsed);
+                cursor = e;
+            }
+            while cursor < self.args.len() {
+                let expanded =
+                    crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
+                collapsed.extend(expanded);
+                cursor += 1;
+            }
+            collapsed
+        } else {
+            crate::expand_tree_artifact_args(&self.args, list_dir)?
+        };
+        if self.flags_only {
+            lines.retain(|s| s.starts_with("--"));
+        }
+        Ok(crate::action::render_param_file(&lines, self.format).into_bytes())
+    }
+}
+
 /// Action specification generated during the Analysis phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAnalysisMetadata {
@@ -1256,6 +1373,8 @@ pub enum ActionAnalysisMetadata {
         output: Artifact,
         content: Vec<u8>,
         is_executable: bool,
+        inputs: Vec<Artifact>,
+        param_file_spec: Option<ParamFileWriteSpec>,
     },
     SymlinkAction {
         owner: Label,
@@ -1303,14 +1422,16 @@ impl ActionAnalysisMetadata {
 
     pub fn inputs(&self) -> Vec<Artifact> {
         match self {
-            Self::SpawnAction { inputs, .. } => inputs.clone(),
+            Self::SpawnAction { inputs, .. } | Self::FileWriteAction { inputs, .. } => {
+                inputs.clone()
+            }
             Self::TemplateExpansionAction { template, .. } => vec![template.clone()],
             Self::BuildInfoTranslateAction {
                 status_file,
                 template,
                 ..
             } => vec![status_file.clone(), template.clone()],
-            Self::FileWriteAction { .. } | Self::SymlinkAction { .. } => Vec::new(),
+            Self::SymlinkAction { .. } => Vec::new(),
         }
     }
 
@@ -1365,11 +1486,25 @@ impl ActionAnalysisMetadata {
                 output,
                 content,
                 is_executable,
+                inputs,
+                param_file_spec,
                 ..
             } => {
                 fp.add_str(output.exec_path.path_string())
                     .add_bytes(content)
                     .add_bool(*is_executable);
+                for inp in inputs {
+                    fp.add_str(inp.exec_path.path_string());
+                }
+                if let Some(spec) = param_file_spec {
+                    fp.add_i32(spec.format as i32)
+                        .add_bool(spec.flags_only)
+                        .add_strings(spec.args.iter())
+                        .add_i32(spec.flag_groups.len() as i32);
+                    for &(s, e) in &spec.flag_groups {
+                        fp.add_i32(s as i32).add_i32(e as i32);
+                    }
+                }
             }
             Self::SymlinkAction {
                 input_path,
@@ -1717,6 +1852,8 @@ mod tests {
             output: out_art.clone(),
             content: b"#!/bin/sh\necho hi\n".to_vec(),
             is_executable: true,
+            inputs: Vec::new(),
+            param_file_spec: None,
         };
         let act2 = act1.clone();
         assert_eq!(act1.action_key(), act2.action_key());

@@ -567,16 +567,60 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Int(BigInt::from_i64(h as i64))))
         }
         "int" => {
-            if pos_args.is_empty() {
-                return Ok(Some(Value::Int(BigInt::zero())));
+            for k in kw_args.keys() {
+                if k != "x" && k != "base" {
+                    return Err(StarlarkError(format!(
+                        "int() got unexpected keyword argument: {k}"
+                    )));
+                }
             }
-            let base = pos_args
-                .get(1)
-                .or_else(|| kw_args.get("base"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(10) as u32;
+            if !pos_args.is_empty() && kw_args.contains_key("x") {
+                return Err(StarlarkError(
+                    "int() got multiple values for parameter 'x'".to_string(),
+                ));
+            }
+            if pos_args.len() > 1 && kw_args.contains_key("base") {
+                return Err(StarlarkError(
+                    "int() got multiple values for parameter 'base'".to_string(),
+                ));
+            }
+            if pos_args.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "int() accepts no more than 2 positional arguments (got {})",
+                    pos_args.len()
+                )));
+            }
+            let Some(x_arg) = pos_args.first().or_else(|| kw_args.get("x")) else {
+                return Err(StarlarkError(
+                    "int() missing 1 required positional argument: x".to_string(),
+                ));
+            };
+            let base_arg = pos_args.get(1).or_else(|| kw_args.get("base"));
+            if base_arg.is_some() && !matches!(x_arg, Value::String(_)) {
+                return Err(StarlarkError(
+                    "int() can't convert non-string with explicit base".to_string(),
+                ));
+            }
+            let base = match base_arg {
+                None => 10u32,
+                Some(Value::Int(bi)) => {
+                    let b = bi.to_i64().unwrap_or(-1);
+                    if b != 0 && !(2..=36).contains(&b) {
+                        return Err(StarlarkError(format!(
+                            "int() base must be >= 2 and <= 36, or 0: got {b}"
+                        )));
+                    }
+                    b as u32
+                }
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                        "in call to int(), parameter 'base' got value of type '{}', want 'int'",
+                        other.type_name()
+                    )));
+                }
+            };
 
-            let val = match &pos_args[0] {
+            let val = match x_arg {
                 Value::Int(i) => i.clone(),
                 Value::Float(f) => {
                     crate::bigint::finite_double_to_int_exact(*f).map_err(StarlarkError)?

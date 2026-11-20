@@ -34,6 +34,34 @@ impl SelectorList {
         }
     }
 
+    /// Returns the representative element type name (e.g. `"list"`, `"dict"`, `"int"`) across
+    /// non-`None` branches, or `None` if all branches are `None`/empty.
+    pub fn elem_type_name(&self) -> Option<&'static str> {
+        for elem in &self.elements {
+            match elem {
+                SelectorElement::Native(v) if !matches!(v, Value::None) => {
+                    return Some(v.type_name());
+                }
+                SelectorElement::Select(branches) => {
+                    for (_, v) in branches {
+                        if !matches!(v, Value::None) {
+                            return Some(v.type_name());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    pub fn display_type_name(&self) -> String {
+        match self.elem_type_name() {
+            Some(t) => format!("select of {t}"),
+            None => "select".to_string(),
+        }
+    }
+
     /// Resolves the `SelectorList` against a set of active `config_setting` conditions
     /// (falling back to `//conditions:default`).
     pub fn resolve(&self, active_conditions: &[String]) -> Result<Value, StarlarkError> {

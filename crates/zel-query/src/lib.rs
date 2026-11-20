@@ -259,7 +259,6 @@ pub fn run_genquery(
     qopts.nodep_deps = false;
     fmt.nodep_deps = false;
     fmt.relative_locations = true;
-    fmt.order = format::OrderOutput::Full;
     for o in opts {
         let o = o.as_str();
         match o {
@@ -392,6 +391,11 @@ pub fn run_genquery(
             formatter_names()
         ));
     }
+    fmt.order = if format::is_streamed(&fmt.output) {
+        format::OrderOutput::Auto
+    } else {
+        format::OrderOutput::Full
+    };
     fmt.implicit_deps = qopts.implicit_deps;
     fmt.tool_deps = qopts.tool_deps;
     fmt.nodep_deps = qopts.nodep_deps;

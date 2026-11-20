@@ -47,6 +47,9 @@ fn dispatch(
         })?;
         let target_label = match target_val {
             Value::Label(l) => l.clone(),
+            v @ Value::Host(k, _) if k == "target" => target_of(v)
+                .map(|ct| ct.label.clone())
+                .ok_or_else(|| StarlarkError("contains(): invalid Target".into()))?,
             Value::String(s) => {
                 let rm = st.repo_mapping();
                 crate::location::parse_label_with_mapping(
@@ -58,7 +61,7 @@ fn dispatch(
             }
             other => {
                 return err(format!(
-                    "in call to contains(), parameter 'target' got value of type '{}', want 'Label or string'",
+                    "in call to contains(), parameter 'target' got value of type '{}', want 'Target, Label, or string'",
                     other.type_name()
                 ))
             }
@@ -770,9 +773,19 @@ fn ctx_attr(st: &Arc<CtxState>, attr: &str) -> HostResult {
             root_relative_path: PathFragment::create("volatile-status.txt"),
             owner_label: st.label.clone(),
         }),
-        "build_file_path" => Value::String(
-            st.label.package_identifier().package_fragment().get_relative_str("BUILD").path_string().to_string(),
-        ),
+        "build_file_path" => {
+            if st.cfg.bool_option("incompatible_stop_exporting_build_file_path", true) {
+                return err(
+                    "Deprecated API: ctx.build_file_path has been removed. Use ctx.label.package + '/BUILD' instead of ctx.build_file_path.\nUse --noincompatible_stop_exporting_build_file_path to temporarily continue using it.",
+                );
+            }
+            let pkg = st.label.package_identifier().package_fragment().path_string();
+            Value::String(if pkg.is_empty() {
+                "BUILD".to_string()
+            } else {
+                format!("{pkg}/BUILD")
+            })
+        }
         "var" => mk_dict(
             st.make_vars
                 .iter()

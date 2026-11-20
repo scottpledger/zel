@@ -21,6 +21,7 @@ pub enum CtxKind {
 pub struct CtxData {
     pub kind: CtxKind,
     pub name: String,
+    pub original_name: String,
     /// Canonical repo name this context runs for (the generated repo, or the extension's repo).
     pub canonical: String,
     /// Directory in which relative paths resolve and writes are allowed.
@@ -589,7 +590,7 @@ pub fn check_repo_rule_labels(
             ("label_list", AttrVal::List(l)) => {
                 raws.extend(l.iter().filter_map(|e| e.as_str().map(String::from)))
             }
-            ("label_keyed_string_dict", AttrVal::Dict(m)) => {
+            ("label_keyed_string_dict", AttrVal::Dict(m) | AttrVal::LabelDict(m)) => {
                 raws.extend(m.iter().map(|(k, _)| k.clone()))
             }
             ("string_keyed_label_dict", AttrVal::Dict(m)) => {
@@ -676,7 +677,7 @@ fn repo_attr_type_error(
             }
         }
         Some("dict") => match &a {
-            AttrVal::Dict(entries) => {
+            AttrVal::Dict(entries) | AttrVal::LabelDict(entries) => {
                 for (_, val) in entries {
                     let vok = match kind {
                         "string_list_dict" | "label_list_dict" => {
@@ -765,7 +766,7 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
             _ => return bad(&d.kind),
         },
         "string_dict" | "string_list_dict" | "label_keyed_string_dict" => {
-            if !matches!(a, AttrVal::Dict(_)) {
+            if !matches!(a, AttrVal::Dict(_) | AttrVal::LabelDict(_)) {
                 return bad(&d.kind);
             }
         }
@@ -842,10 +843,25 @@ pub fn build_attr_struct(
                 }
                 dict_value(items)
             }
-            ("label_keyed_string_dict", AttrVal::Dict(d)) => {
+            ("label_keyed_string_dict", AttrVal::Dict(d) | AttrVal::LabelDict(d)) => {
                 let mut items = vec![];
                 for (k, val) in d {
                     items.push((lbl(k)?, val.to_value()));
+                }
+                dict_value(items)
+            }
+            ("label_list_dict", AttrVal::Dict(d)) => {
+                let mut items = vec![];
+                for (k, val) in d {
+                    let list = match val {
+                        AttrVal::List(l) => list_value(
+                            l.iter()
+                                .map(|x| lbl(x.as_str().unwrap_or("")))
+                                .collect::<Result<_, _>>()?,
+                        ),
+                        other => other.to_value(),
+                    };
+                    items.push((str_value(k), list));
                 }
                 dict_value(items)
             }
@@ -1429,7 +1445,7 @@ fn dispatch_object_inner(
             "attr" if kind != "module_ctx" => Ok(data.attr.clone()),
             "os" => Ok(os_value(rt)),
             "workspace_root" if kind != "module_ctx" => Ok(path_value(&rt.opts.workspace_root)),
-            "original_name" if kind != "module_ctx" => Ok(str_value(&data.name)),
+            "original_name" if kind != "module_ctx" => Ok(str_value(&data.original_name)),
             "modules" if kind == "module_ctx" => Ok(data.modules.clone()),
             "root_module_has_non_dev_dependency" if kind == "module_ctx" => {
                 Ok(Value::Bool(data.root_has_non_dev))
@@ -2761,6 +2777,7 @@ mod tests {
         let data = CtxData {
             kind: CtxKind::Repository,
             name: "test_repo".into(),
+            original_name: "test_repo".into(),
             canonical: "test_repo+".into(),
             dir,
             attr: Value::None,
@@ -2814,6 +2831,7 @@ mod tests {
         let data = CtxData {
             kind: CtxKind::Repository,
             name: "test_copy".into(),
+            original_name: "test_copy".into(),
             canonical: "test_copy+".into(),
             dir: dir.clone(),
             attr: Value::None,
@@ -2863,6 +2881,7 @@ mod tests {
         let data = CtxData {
             kind: CtxKind::Module,
             name: "ext".into(),
+            original_name: "ext".into(),
             canonical: "ext+".into(),
             dir,
             attr: Value::None,

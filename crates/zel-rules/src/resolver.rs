@@ -236,6 +236,7 @@ impl AnalysisConfig {
 
     pub fn new() -> Self {
         Self {
+            allow_unresolved_symlinks: true,
             check_visibility: true,
             platforms_repo: "platforms".to_string(),
             ..Default::default()
@@ -273,7 +274,7 @@ pub struct TargetResolver {
 fn key(label: &Label, cfg: &BuildConfigurationKey) -> (String, String) {
     (
         label.canonical_form(),
-        format!("{}#{}", cfg.mnemonic(), cfg.short_hash()),
+        format!("{}#{}", cfg.mnemonic(), cfg.checksum()),
     )
 }
 
@@ -332,8 +333,42 @@ impl LoaderExpander {
         }
         let mut out = Vec::new();
         for t in outcome.targets {
-            match &t {
-                Target::Rule(r) if r.rule_class == rule_class => {
+            let mut resolved_rule: Option<RuleInstance> = match &t {
+                Target::Rule(r) => Some(r.clone()),
+                _ => None,
+            };
+            if let Some(ref r0) = resolved_rule {
+                if r0.rule_class == "alias" {
+                    let mut cur_r = r0.clone();
+                    let mut visited = std::collections::HashSet::new();
+                    resolved_rule = None;
+                    for _ in 0..16 {
+                        if !visited.insert(cur_r.label.clone()) {
+                            break;
+                        }
+                        if cur_r.rule_class == rule_class {
+                            resolved_rule = Some(cur_r);
+                            break;
+                        }
+                        if cur_r.rule_class != "alias" {
+                            break;
+                        }
+                        let Some(AttrValue::Label(Some(next))) = cur_r.attr_or_default("actual")
+                        else {
+                            break;
+                        };
+                        let Ok(npkg) = self.loader.load_package(next.package_identifier()) else {
+                            break;
+                        };
+                        let Some(Target::Rule(nr)) = npkg.targets.get(next.name()) else {
+                            break;
+                        };
+                        cur_r = nr.clone();
+                    }
+                }
+            }
+            match resolved_rule {
+                Some(r) if r.rule_class == rule_class => {
                     if !out.iter().any(|(l, _)| *l == r.label) {
                         let raw_ty = if rule_class == "toolchain" {
                             match r.attr_or_default("toolchain_type") {
@@ -346,7 +381,7 @@ impl LoaderExpander {
                         out.push((r.label.clone(), raw_ty));
                     }
                 }
-                other if explicit => {
+                _ if explicit => {
                     return Err(format!(
                         "invalid registered {} '{}': target '{}' is not a {}",
                         if rule_class == "toolchain" {
@@ -355,7 +390,7 @@ impl LoaderExpander {
                             "execution platform"
                         },
                         p,
-                        other.label().canonical_form(),
+                        t.label().canonical_form(),
                         rule_class
                     ));
                 }
@@ -462,33 +497,62 @@ impl TargetResolver {
         label: &Label,
         cfg: &BuildConfigurationKey,
     ) -> Result<Arc<ConfiguredTarget>, String> {
-        let mut adj_cfg;
-        let cfg =
-            if !cfg.is_exec && !cfg.core_only {
-                let keep =
-                    self.package(label.package_identifier())
-                        .ok()
-                        .and_then(|p| p.targets.get(label.name()).cloned())
-                        .map(|t| match t {
-                            Target::Rule(r) => r.is_test_rule()
-                                || (r.testonly
-                                    && cfg.bool_option(
-                                        "experimental_retain_test_configuration_across_testonly",
-                                        false,
-                                    )),
-                            _ => false,
-                        })
-                        .unwrap_or(false);
-                if keep != cfg.keep_test {
-                    adj_cfg = cfg.clone();
-                    adj_cfg.keep_test = keep;
-                    &adj_cfg
-                } else {
-                    cfg
+        let loaded_target = self
+            .package(label.package_identifier())
+            .ok()
+            .and_then(|p| p.targets.get(label.name()).cloned());
+        let is_noconfig = loaded_target.as_ref().is_some_and(|t| match t {
+            Target::Rule(r) => {
+                if matches!(
+                    r.rule_class.as_str(),
+                    "platform" | "constraint_value" | "constraint_setting"
+                ) {
+                    return true;
                 }
+                r.extra
+                    .rule_class
+                    .as_ref()
+                    .and_then(|rc| rc.starlark.as_ref())
+                    .and_then(|sp| sp.kwargs.get("cfg"))
+                    .is_some_and(|v| match v {
+                        zel_starlark::Value::Struct(ts) => {
+                            ts.fields.get("_build_setting").and_then(|x| x.as_str()) == Some("none")
+                                && !ts.fields.contains_key("implementation")
+                        }
+                        _ => false,
+                    })
+            }
+            Target::PackageGroup { .. } => true,
+            _ => false,
+        });
+        let mut adj_cfg;
+        let cfg = if is_noconfig {
+            adj_cfg = BuildConfigurationKey::target("noconfig", "fastbuild").to_core_only();
+            &adj_cfg
+        } else if !cfg.is_exec && !cfg.core_only {
+            let keep = loaded_target
+                .map(|t| match t {
+                    Target::Rule(r) => {
+                        r.is_test_rule()
+                            || (r.testonly
+                                && cfg.bool_option(
+                                    "experimental_retain_test_configuration_across_testonly",
+                                    false,
+                                ))
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false);
+            if keep != cfg.keep_test {
+                adj_cfg = cfg.clone();
+                adj_cfg.keep_test = keep;
+                &adj_cfg
             } else {
                 cfg
-            };
+            }
+        } else {
+            cfg
+        };
         let k = key(label, cfg);
         if let Some(c) = self.cache.lock().unwrap().get(&k) {
             return Ok(c.clone());
@@ -1030,6 +1094,7 @@ impl TargetResolver {
                         .collect()
                 }
             }
+            Target::OutputFile { .. } => ct.visibility.clone(),
             _ => Vec::new(),
         };
         if std::env::var_os("ZEL_PHASE_TRACE").is_some() {
@@ -1466,6 +1531,20 @@ impl DepResolver for TargetResolver {
                         prefix(),
                         dep.label.canonical_form()
                     ));
+                } else if def.is_some_and(|a| !a.files_unspecified) {
+                    let expected = match def.map(|a| &a.allowed_files) {
+                        Some(zel_packages::attr::FileTypes::Extensions(exts))
+                            if !exts.is_empty() =>
+                        {
+                            format!(" (expected {})", exts.join(", "))
+                        }
+                        _ => " (expected no files)".to_string(),
+                    };
+                    return Err(format!(
+                        "{}source file '{}' is misplaced here{expected}",
+                        prefix(),
+                        dep.label.canonical_form()
+                    ));
                 }
             }
         }
@@ -1528,25 +1607,36 @@ impl DepResolver for TargetResolver {
             } else {
                 None
             };
-            let from = match &def_label {
-                Some(l) => l.package_identifier(),
-                None => consumer.label.package_identifier(),
-            };
+            let consumer_pkg = consumer.label.package_identifier();
             let dep_pkg = dep.label.package_identifier();
-            // `package_group` targets are always visible (their visibility is implicitly public).
-            if dep_pkg != from && dep.rule_class != "package_group" {
-                let mut visible = false;
+            let check_from = |from: &PackageIdentifier| -> Result<bool, String> {
+                if dep_pkg == from {
+                    return Ok(true);
+                }
                 for spec in &dep.visibility {
                     if self.is_visible(spec, from)? {
-                        visible = true;
-                        break;
+                        return Ok(true);
                     }
                 }
+                Ok(false)
+            };
+            // `package_group` targets are always visible (their visibility is implicitly public).
+            if dep.rule_class != "package_group" {
+                let mut visible = match &def_label {
+                    Some(l) => check_from(l.package_identifier())?,
+                    None => false,
+                };
                 if !visible {
+                    visible = check_from(consumer_pkg)?;
+                }
+                if !visible {
+                    let reported_from = def_label
+                        .as_ref()
+                        .map(|l| l.canonical_form())
+                        .unwrap_or_else(|| consumer.label.canonical_form());
                     let mut msg = format!(
-                        "Visibility error:\n{} is not visible from\ntarget '{}'\nRecommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility",
+                        "Visibility error:\n{} is not visible from\ntarget '{reported_from}'\nRecommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility",
                         dep.describe_with_aliases(false),
-                        consumer.label.canonical_form()
                     );
                     if dep.actual_rule_class_name() == "source file" {
                         msg.push_str(". To set the visibility of that source file target, use the exports_files() function");
@@ -1570,9 +1660,23 @@ impl DepResolver for TargetResolver {
         // consumer of the alias checks both the alias and the underlying target's testonly).
         let dep_is_testonly = dep.testonly || dep.actual_testonly.unwrap_or(false);
         if dep_is_testonly && !consumer.testonly && consumer.rule_class != "alias" {
+            let head = if attr.starts_with('$') {
+                let loc = consumer
+                    .extra
+                    .location
+                    .clone()
+                    .map(|l| format!("{l}: "))
+                    .unwrap_or_default();
+                format!(
+                    "{loc}in {} rule {}: ",
+                    consumer.rule_class,
+                    consumer.label.canonical_form()
+                )
+            } else {
+                prefix()
+            };
             return Err(format!(
-                "{}non-test target '{}' depends on testonly {} and doesn't have testonly attribute set",
-                prefix(),
+                "{head}non-test target '{}' depends on testonly {} and doesn't have testonly attribute set",
                 consumer.label.canonical_form(),
                 dep.describe_with_aliases(false)
             ));

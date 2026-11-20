@@ -2189,7 +2189,7 @@ rec_m = macro(implementation = _rec)
     assert!(joined.contains(
         "existing_rules() can only be used while evaluating a BUILD file or a rule finalizer"
     ));
-    assert!(joined.contains("is recursive"));
+    assert!(joined.contains("recursive call of"), "{joined}");
 
     // 4. `test_suite` implicit tests match `timeout` (`short` from `size = 'small'`) and `flaky`.
     let ws_suite = Ws::new(&[

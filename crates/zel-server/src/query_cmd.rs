@@ -47,8 +47,10 @@ pub(crate) fn read_query(
     if !query_file.is_empty() {
         let path = cwd.join(query_file);
         return match std::fs::read(&path) {
-            // The file is read as ISO-8859-1 by Bazel.
-            Ok(bytes) => Ok(bytes.iter().map(|&b| b as char).collect()),
+            Ok(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(s) => Ok(s.to_string()),
+                Err(_) => Ok(bytes.iter().map(|&b| b as char).collect()),
+            },
             Err(_) => Err(format!("I/O error reading from {}", path.display())),
         };
     }
@@ -225,9 +227,9 @@ impl BlazeRuntime {
         let cwd = self.command_cwd(&parsed);
         let allow_empty = cmd_kind == "aquery"
             && (parsed.get_bool("skyframe_state").unwrap_or(false)
-                || parsed
-                    .get_str("universe_scope")
-                    .is_some_and(|s| !s.trim().is_empty()));
+                || opt_list(&parsed, "universe_scope")
+                    .iter()
+                    .any(|s| !s.trim().is_empty()));
         let expr_str = match read_query(&parsed, &cwd, cmd_kind, allow_empty) {
             Ok(q) => q,
             Err(_) => {

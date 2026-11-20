@@ -80,11 +80,13 @@ pub enum CompClause {
     If(Expr),
 }
 
-/// A (possibly nested) unpacking pattern, e.g. the `a` / `(b, c)` of `for a, (b, c) in xs`.
+/// A (possibly nested) unpacking pattern, e.g. the `a` / `(b, c)` of `for a, (b, c) in xs`
+/// or `d['b'], d['c'] = 2, 3`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Name(String),
     Tuple(Vec<Pattern>),
+    Index { target: Box<Expr>, index: Box<Expr> },
 }
 
 impl Pattern {
@@ -93,6 +95,7 @@ impl Pattern {
         match self {
             Pattern::Name(n) => vec![n.clone()],
             Pattern::Tuple(ps) => ps.iter().flat_map(|p| p.names()).collect(),
+            Pattern::Index { .. } => Vec::new(),
         }
     }
 }

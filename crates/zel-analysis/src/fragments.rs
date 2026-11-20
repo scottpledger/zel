@@ -49,27 +49,48 @@ fn f(name: &str, v: Value) -> (String, Value) {
 struct Opts<'a>(&'a BuildConfigurationKey);
 
 impl Opts<'_> {
-    fn raw(&self, k: &str) -> Option<&String> {
-        self.0.options.get(k)
+    fn has_explicit(&self, k: &str) -> bool {
+        self.0.options.contains_key(k) || self.0.native.contains_key(k)
+    }
+    fn scalar(&self, k: &str) -> Option<String> {
+        if let Some(v) = self.0.options.get(k) {
+            return Some(v.clone());
+        }
+        if let Some(n) = self.0.native.get(k) {
+            return match &n.value {
+                crate::build_options::ConfigValue::Null => None,
+                other => Some(other.display()),
+            };
+        }
+        None
     }
     fn s(&self, k: &str, d: &str) -> String {
-        self.raw(k).cloned().unwrap_or_else(|| d.to_string())
+        self.scalar(k).unwrap_or_else(|| d.to_string())
     }
     fn opt_s(&self, k: &str) -> Value {
-        match self.raw(k).filter(|v| !v.is_empty()) {
-            Some(v) => Value::String(v.clone()),
+        match self.scalar(k).filter(|v| !v.is_empty()) {
+            Some(v) => Value::String(v),
             None => Value::None,
         }
     }
     fn b(&self, k: &str, d: bool) -> bool {
-        match self.raw(k).map(|v| v.as_str()) {
+        match self.scalar(k).map(|v| v.to_ascii_lowercase()).as_deref() {
             Some("1") | Some("true") | Some("yes") => true,
             Some("0") | Some("false") | Some("no") => false,
             _ => d,
         }
     }
     fn list(&self, k: &str) -> Vec<String> {
-        self.raw(k)
+        if let Some(n) = self.0.native.get(k) {
+            if self.0.options.get(k).is_none_or(|raw| raw == &n.raw) {
+                if let crate::build_options::ConfigValue::List(l) = &n.value {
+                    return l.clone();
+                }
+            }
+        }
+        self.0
+            .options
+            .get(k)
             .map(|v| {
                 v.split(',')
                     .filter(|s| !s.is_empty())
@@ -83,9 +104,9 @@ impl Opts<'_> {
     }
     fn label(&self, k: &str) -> Value {
         match self
-            .raw(k)
+            .scalar(k)
             .filter(|v| !v.is_empty())
-            .and_then(|v| Label::parse_canonical(v).ok())
+            .and_then(|v| Label::parse_canonical(&v).ok())
         {
             Some(l) => Value::Label(l),
             None => Value::None,
@@ -326,6 +347,7 @@ pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Option<Value> {
                 ),
                 f("default_jvm_opts", o.list_v("jvmopt")),
                 f("plugins", o.list_v("plugin")),
+                f("launcher", o.label("java_launcher")),
                 // Methods.
                 m("use_ijars", Value::Bool(o.b("use_ijars", true))),
                 m(
@@ -390,7 +412,7 @@ pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Option<Value> {
                     o.list("cc_proto_library_header_suffixes")
                         .into_iter()
                         .map(Value::String)
-                        .chain(if o.raw("cc_proto_library_header_suffixes").is_none() {
+                        .chain(if !o.has_explicit("cc_proto_library_header_suffixes") {
                             Some(sv(".pb.h"))
                         } else {
                             None
@@ -404,7 +426,7 @@ pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Option<Value> {
                     o.list("cc_proto_library_source_suffixes")
                         .into_iter()
                         .map(Value::String)
-                        .chain(if o.raw("cc_proto_library_source_suffixes").is_none() {
+                        .chain(if !o.has_explicit("cc_proto_library_source_suffixes") {
                             Some(sv(".pb.cc"))
                         } else {
                             None
@@ -443,13 +465,64 @@ pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Option<Value> {
         ]),
         "apple" => {
             let ptype = o.s("apple_platform_type", "macos");
-            let device = !matches!(ptype.as_str(), "ios" | "tvos" | "watchos" | "visionos")
-                || !cfg.cpu.starts_with("ios_sim");
+            let single_cpu = {
+                let split = o.s("apple_split_cpu", "");
+                if !split.is_empty() {
+                    split
+                } else {
+                    match ptype.as_str() {
+                        "macos" => o.list("macos_cpus").into_iter().next().unwrap_or_else(|| {
+                            if let Some(rest) = cfg.cpu.strip_prefix("darwin_") {
+                                rest.to_string()
+                            } else {
+                                cfg.cpu.clone()
+                            }
+                        }),
+                        "ios" => o
+                            .list("ios_multi_cpus")
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| {
+                                cfg.cpu.strip_prefix("ios_").unwrap_or("x86_64").to_string()
+                            }),
+                        "tvos" => o
+                            .list("tvos_cpus")
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| "x86_64".to_string()),
+                        "watchos" => o
+                            .list("watchos_cpus")
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| "i386".to_string()),
+                        "visionos" => o
+                            .list("visionos_cpus")
+                            .into_iter()
+                            .next()
+                            .unwrap_or_else(|| "sim_arm64".to_string()),
+                        _ => cfg.cpu.trim_start_matches("darwin_").to_string(),
+                    }
+                }
+            };
+            let device = match ptype.as_str() {
+                "ios" => matches!(single_cpu.as_str(), "arm64" | "arm64e" | "armv7" | "armv7k"),
+                "tvos" => single_cpu == "arm64",
+                "watchos" => matches!(
+                    single_cpu.as_str(),
+                    "armv7k" | "arm64_32" | "device_arm64" | "device_arm64e"
+                ),
+                "visionos" => single_cpu == "arm64" || single_cpu == "device_arm64",
+                _ => true,
+            };
             let min = |k: &str| o.opt_s(k);
             mk_struct(vec![
                 ("single_arch_platform", apple_platform(&ptype, device)),
-                ("single_arch_cpu", sv(cfg.cpu.trim_start_matches("darwin_"))),
+                ("single_arch_cpu", sv(&single_cpu)),
                 ("xcode_version_flag", o.opt_s("xcode_version")),
+                ("ios_sdk_version_flag", o.opt_s("ios_sdk_version")),
+                ("macos_sdk_version_flag", o.opt_s("macos_sdk_version")),
+                ("tvos_sdk_version_flag", o.opt_s("tvos_sdk_version")),
+                ("watchos_sdk_version_flag", o.opt_s("watchos_sdk_version")),
                 ("ios_minimum_os_flag", min("ios_minimum_os")),
                 ("watchos_minimum_os_flag", min("watchos_minimum_os")),
                 ("tvos_minimum_os_flag", min("tvos_minimum_os")),
@@ -484,12 +557,12 @@ fn cfg_is_windows() -> bool {
 /// The label a `configuration_field(fragment, name)` default resolves to in `cfg`
 /// (`@StarlarkConfigurationField` of the native fragments), `None` if the field is unset.
 pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey) -> Option<Label> {
+    let o = Opts(cfg);
     let tools = |p: &str| Label::parse_canonical(&format!("@@bazel_tools//{p}")).ok();
     let opt = |k: &str| {
-        cfg.options
-            .get(k)
-            .filter(|v| !v.is_empty() && *v != "null")
-            .and_then(|v| Label::parse_canonical(v).ok())
+        o.scalar(k)
+            .filter(|v| !v.is_empty() && v != "null")
+            .and_then(|v| Label::parse_canonical(&v).ok())
     };
     match (fragment, name) {
         ("java", "launcher") => opt("java_launcher").or_else(|| {

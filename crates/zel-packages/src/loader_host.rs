@@ -127,6 +127,15 @@ impl PackageLoader {
                 zel_starlark::StarlarkList::new(Vec::new()),
             ))));
         }
+        if name == "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" {
+            if self.cfg.incompatible_use_cc_configure_from_rules_cc {
+                return Err(herr(
+                    ctx,
+                    "Incompatible flag --incompatible_use_cc_configure_from_rules_cc has been flipped. Please use cc_configure and related logic from https://github.com/bazelbuild/rules_cc. See https://github.com/bazelbuild/bazel/issues/10134 for details and migration instructions.",
+                ));
+            }
+            return Ok(Value::None);
+        }
         if name == "visibility" {
             return self.set_bzl_visibility(ctx, state, bzl_init, owner, pos, kw);
         }
@@ -347,6 +356,13 @@ impl PackageLoader {
                     return Err(herr(ctx, type_mismatch("name", n, "string", "existing_rule")));
                 };
                 let s = st.lock().unwrap();
+                if s.in_finalizer_phase {
+                    let found = s
+                        .finalizer_rule_snapshot
+                        .as_ref()
+                        .and_then(|snap| snap.iter().find(|(rn, _)| rn == n).map(|(_, v)| v.clone()));
+                    return Ok(found.unwrap_or(Value::None));
+                }
                 Ok(self.existing_rule_view(&s, n).unwrap_or(Value::None))
             }
             "existing_rules" => {
@@ -356,6 +372,20 @@ impl PackageLoader {
                         ctx,
                         "existing_rules() can only be used while evaluating a BUILD file or a rule finalizer",
                     ));
+                }
+                if s.in_finalizer_phase {
+                    let items: Vec<(Value, Value)> = s
+                        .finalizer_rule_snapshot
+                        .as_ref()
+                        .map(|snap| {
+                            snap.iter()
+                                .map(|(rn, v)| (Value::String(rn.clone()), v.clone()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let d = mk_dict(items);
+                    d.freeze();
+                    return Ok(d);
                 }
                 let mut items = Vec::new();
                 for n in &s.rule_order {
@@ -655,6 +685,12 @@ impl PackageLoader {
             }
             let spec = PackageSpec::parse(&mapping, owner.repository(), raw)
                 .map_err(|e| herr(ctx, e))?;
+            if matches!(spec, PackageSpec::Negative(_)) {
+                return Err(herr(
+                    ctx,
+                    format!("Cannot use negative package patterns here: '{raw}'"),
+                ));
+            }
             if matches!(spec, PackageSpec::AllPackages) {
                 is_public = true;
             }
@@ -1649,10 +1685,13 @@ impl PackageLoader {
                 return Err(herr(ctx, e));
             }
             if on == name {
-                return Err(herr(
-                    ctx,
-                    format!("generated file '{on}' in rule '{name}' conflicts with existing {kind}, defined at {loc}"),
-                ));
+                s.events.push(PackageEvent {
+                    kind: EventKind::Warning,
+                    location: Some(loc.clone()),
+                    message: format!(
+                        "target '{name}' is both a rule and a file; please choose another name for the rule"
+                    ),
+                });
             }
             if let Some(other) = s.output_prefixes.get(&on) {
                 return Err(herr(
@@ -2081,6 +2120,15 @@ impl PackageLoader {
             Some(Value::Bool(false)) => a.allowed_files = crate::attr::FileTypes::NoFiles,
             Some(Value::List(_)) | Some(Value::Tuple(_)) => {
                 if let Ok(l) = sl_values(s.fields.get("allow_files").unwrap()) {
+                    a.allowed_files = crate::attr::FileTypes::Extensions(l);
+                }
+            }
+            _ => {}
+        }
+        match s.fields.get("allow_single_file") {
+            Some(Value::Bool(false)) => a.allowed_files = crate::attr::FileTypes::NoFiles,
+            Some(Value::List(_)) | Some(Value::Tuple(_)) => {
+                if let Ok(l) = sl_values(s.fields.get("allow_single_file").unwrap()) {
                     a.allowed_files = crate::attr::FileTypes::Extensions(l);
                 }
             }
@@ -2862,6 +2910,7 @@ impl PackageLoader {
             attrs,
             implementation: imp,
             finalizer,
+            bzl_label: None,
             def_pkg: owner.clone(),
             def_location: {
                 // `macro_name = macro(...)`: Bazel reports the start of the defining statement.
@@ -2907,7 +2956,7 @@ impl PackageLoader {
             return Err(herr(ctx, format!("{mname}() accepts no positional arguments")));
         }
         let loc = fmt_loc(&ctx.last_call_loc);
-        let call = {
+        let (call_obj, is_top_level_call) = {
             let mut s = st.lock().unwrap();
             if is_finalizer && s.macro_stack.last().is_some_and(|(_, _, parent_fin)| !*parent_fin) {
                 return Err(herr(
@@ -2971,13 +3020,28 @@ impl PackageLoader {
                 unreachable!()
             };
             Label::create(id_pkg.clone(), &inst_name).map_err(|e| herr(ctx, e.to_string()))?;
-            // Direct or indirect same-macro-class recursion check (`MacroInstance.java`).
-            if s.macro_call_ids.contains(&idx) {
-                s.error(
-                    None,
-                    format!("macro '{inst_name}' is recursive (calls macro '{mname}' recursively)"),
+            if let Some((_, anc_name, _, _)) = s
+                .active_macro_ids
+                .iter()
+                .rev()
+                .find(|(active_id, _, _, _)| *active_id == idx)
+            {
+                let is_direct = s.active_macro_ids.last().map(|x| x.0) == Some(idx);
+                let kind_phrase = if is_direct {
+                    "a direct"
+                } else {
+                    "an indirect"
+                };
+                let mut tb = format!(
+                    "macro '{inst_name}' is {kind_phrase} recursive call of '{anc_name}'. Macro instantiation traceback (most recent call last):"
                 );
-                return Ok(Value::None);
+                for (_, f_inst, f_pkg, f_type) in &s.active_macro_ids {
+                    tb.push_str(&format!(
+                        "\n\tPackage {}, macro '{f_inst}' of type {f_type}",
+                        Self::fmt_pkg_display(f_pkg)
+                    ));
+                }
+                return Err(herr(ctx, tb));
             }
             if let Some(prev) = s.macro_names.get(&inst_name).cloned() {
                 // One main submacro whose name equals its parent macro's name is allowed when no
@@ -3099,43 +3163,58 @@ impl PackageLoader {
                 location: loc,
             };
             s.any_target_declared = true;
-            if is_finalizer {
-                s.macro_queue.push_back(call);
+            let defer = is_finalizer && !s.in_finalizer_phase;
+            let top = s.macro_stack.is_empty();
+            if defer {
+                s.finalizer_queue.push_back(call);
                 return Ok(Value::None);
             }
-            call
+            (call, top)
         };
-        // Non-finalizer symbolic macros run synchronously inside the instantiating call
-        // (`MacroClass.executeMacroImplementation`).
-        let _ = self.execute_macro_call(ctx, st, call);
+        if let Err(e) = self.invoke_macro_call(ctx, st, call_obj) {
+            if is_top_level_call {
+                let (eloc, msg) = split_location(&dedup_location(&e.0));
+                st.lock().unwrap().error(eloc, msg);
+                return Ok(Value::None);
+            }
+            return Err(e);
+        }
         Ok(Value::None)
     }
 
-    fn execute_macro_call(
+    fn invoke_macro_call(
         self: &Arc<Self>,
         ctx: &mut EvalContext,
         st: &Arc<Mutex<PackageState>>,
         call: MacroCall,
-    ) -> bool {
-        let (imp, def_name, def_pkg, dloc, is_finalizer, attr_names) = {
+    ) -> Result<(), StarlarkError> {
+        let (imp, def_name, dloc, def_pkg, is_finalizer, macro_type_str, attr_names) = {
             let reg = self.registry.lock().unwrap();
             let m = &reg.macros[call.macro_id];
+            let sym = m.name.clone().unwrap_or_default();
+            let mtype = match &m.bzl_label {
+                Some(bl) => format!("{}%{sym}", Self::fmt_bzl_label(bl)),
+                None => sym.clone(),
+            };
             (
                 m.implementation.clone(),
-                m.name.clone().unwrap_or_default(),
-                m.def_pkg.clone(),
+                sym,
                 m.def_location.clone(),
+                m.def_pkg.clone(),
                 m.finalizer,
+                mtype,
                 m.attrs.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
             )
         };
         {
             let mut s = st.lock().unwrap();
+            let pkg_id = s.id.clone();
             s.macro_stack
                 .push((call.name.clone(), def_pkg, is_finalizer));
-            s.macro_call_ids.push(call.macro_id);
             s.macro_frames
                 .push((call.location.clone(), def_name.clone(), dloc, false));
+            s.active_macro_ids
+                .push((call.macro_id, call.name.clone(), pkg_id, macro_type_str));
         }
         let mut kwargs: BTreeMap<String, Value> = BTreeMap::new();
         for k in &attr_names {
@@ -3145,34 +3224,42 @@ impl PackageLoader {
         for (k, v) in &call.values {
             kwargs.insert(k.clone(), to_macro_value(v));
         }
-        let _ = (&call.parent, &call.location);
+        let _ = (&call.parent, &def_name);
         let res = ctx.call_value(imp, Vec::new(), kwargs);
-        let mut s = st.lock().unwrap();
-        s.macro_stack.pop();
-        s.macro_call_ids.pop();
-        s.macro_frames.pop();
+        {
+            let mut s = st.lock().unwrap();
+            s.macro_stack.pop();
+            s.macro_frames.pop();
+            s.active_macro_ids.pop();
+        }
         match res {
-            Ok(Value::None) => true,
-            Ok(other) => {
-                s.error(
-                    Some(call.location),
-                    format!(
-                        "macro '{}' may not return a non-None value (got {})",
-                        call.name,
-                        other.repr()
-                    ),
-                );
-                false
-            }
-            Err(e) => {
-                let (loc, msg) = split_location(&dedup_location(&e.0));
-                s.error(loc, msg);
-                false
-            }
+            Ok(Value::None) => Ok(()),
+            Ok(other) => Err(StarlarkError(format!(
+                "{}: macro '{}' may not return a non-None value (got {})",
+                call.location,
+                call.name,
+                other.repr()
+            ))),
+            Err(e) => Err(e),
         }
     }
 
-    /// Expands queued rule finalizer macros (FIFO, including finalizers declared by finalizers).
+    /// Snapshots non-finalizer rules and transitions the package into finalizer expansion.
+    fn prepare_finalizer_phase(&self, st: &Arc<Mutex<PackageState>>) {
+        let mut s = st.lock().unwrap();
+        let mut snapshot = Vec::with_capacity(s.rule_order.len());
+        for n in &s.rule_order {
+            if let Some(v) = self.existing_rule_view(&s, n) {
+                snapshot.push((n.clone(), v));
+            }
+        }
+        s.finalizer_rule_snapshot = Some(snapshot);
+        s.in_finalizer_phase = true;
+        let finalizers = std::mem::take(&mut s.finalizer_queue);
+        s.macro_queue.extend(finalizers);
+    }
+
+    /// Expands queued symbolic macros (FIFO, including deferred finalizers).
     fn run_macro_queue(
         self: &Arc<Self>,
         ctx: &mut EvalContext,
@@ -3187,7 +3274,9 @@ impl PackageLoader {
                     None => return all_ok,
                 }
             };
-            if !self.execute_macro_call(ctx, st, call) {
+            if let Err(e) = self.invoke_macro_call(ctx, st, call) {
+                let (loc, msg) = split_location(&dedup_location(&e.0));
+                st.lock().unwrap().error(loc, msg);
                 all_ok = false;
             }
         }

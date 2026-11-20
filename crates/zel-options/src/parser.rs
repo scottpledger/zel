@@ -1157,28 +1157,62 @@ impl ParsedCommandOptions {
                     };
 
                     if should_apply {
+                        if sv.behavior != SetValueBehavior::Append {
+                            self.reset_policy_value_to_default(def, &cmd_map);
+                        }
+                        let priority =
+                            OptionPriority::lowest_at_category(PriorityCategory::InvocationPolicy);
                         for val_str in &sv.flag_values {
                             let converted =
                                 convert_option_with_home(val_str, def, self.user_home.as_deref())?;
                             self.update_legacy_field(def.name, &converted, val_str);
-                            let priority = OptionPriority::lowest_at_category(
-                                PriorityCategory::InvocationPolicy,
-                            );
-                            self.parsed_options.insert(
-                                def.name.to_string(),
-                                OptionValueDescription::new(
-                                    def,
-                                    vec![val_str.clone()],
-                                    converted,
-                                    priority,
-                                    "invocation policy".to_string(),
-                                ),
-                            );
+                            let canonical = if def.option_type == OptionType::Boolean {
+                                if converted.as_bool().unwrap_or(true) {
+                                    "1".to_string()
+                                } else {
+                                    "0".to_string()
+                                }
+                            } else {
+                                val_str.clone()
+                            };
+                            if def.option_type != OptionType::Void {
+                                self.canonical_flags
+                                    .push(format!("--{}={canonical}", def.name));
+                            }
+                            if let Some(existing) = self.parsed_options.get_mut(def.name) {
+                                if def.allow_multiple {
+                                    existing.raw_values.push(val_str.clone());
+                                    append_instance(&mut existing.value, converted);
+                                } else {
+                                    existing.raw_values = vec![val_str.clone()];
+                                    existing.value = converted;
+                                    existing.priority = priority.clone();
+                                    existing.source = "invocation policy".to_string();
+                                }
+                            } else {
+                                let stored = if def.allow_multiple {
+                                    let mut list = OptionValue::List(Vec::new());
+                                    append_instance(&mut list, converted);
+                                    list
+                                } else {
+                                    converted
+                                };
+                                self.parsed_options.insert(
+                                    def.name.to_string(),
+                                    OptionValueDescription::new(
+                                        def,
+                                        vec![val_str.clone()],
+                                        stored,
+                                        priority.clone(),
+                                        "invocation policy".to_string(),
+                                    ),
+                                );
+                            }
                         }
                     }
                 }
                 PolicyOperation::UseDefault(_) => {
-                    self.parsed_options.remove(def.name);
+                    self.reset_policy_value_to_default(def, &cmd_map);
                 }
                 PolicyOperation::DisallowValues(ref dv) => {
                     self.apply_filter_policy(
@@ -1293,6 +1327,61 @@ impl ParsedCommandOptions {
         self.parsed_options.remove(def.name);
         let prefix = format!("--{}=", def.name);
         self.canonical_flags.retain(|f| !f.starts_with(&prefix));
+        if let Some(default_raw) = def.default_value {
+            if default_raw == "null" {
+                self.clear_legacy_field(def.name);
+            } else if let Ok(default_val) =
+                convert_option_with_home(default_raw, def, self.user_home.as_deref())
+            {
+                self.update_legacy_field(def.name, &default_val, default_raw);
+            }
+        } else {
+            self.clear_legacy_field(def.name);
+        }
+        if def.name == "define" {
+            self.user_defines.clear();
+        }
+    }
+
+    fn reset_policy_value_to_default(
+        &mut self,
+        def: &'static OptionDefinition,
+        cmd_map: &std::collections::HashMap<&'static str, &'static OptionDefinition>,
+    ) {
+        let implied_children: Vec<&'static str> = self
+            .parsed_options
+            .values()
+            .filter(|desc| desc.implicit_dependent == Some(def.name))
+            .map(|desc| desc.definition.name)
+            .collect();
+        self.clear_policy_value(def);
+        for child_name in implied_children {
+            if let Some(&child_def) = cmd_map.get(child_name) {
+                self.reset_policy_value_to_default(child_def, cmd_map);
+            }
+        }
+    }
+
+    fn clear_legacy_field(&mut self, name: &str) {
+        let defaults = Self::default();
+        match name {
+            "compilation_mode" => self.compilation_mode = defaults.compilation_mode,
+            "jobs" => self.jobs = defaults.jobs,
+            "keep_going" => self.keep_going = defaults.keep_going,
+            "subcommands" => self.subcommands = defaults.subcommands,
+            "verbose_failures" => self.verbose_failures = defaults.verbose_failures,
+            "expunge" => self.expunge = defaults.expunge,
+            "expunge_async" => self.expunge_async = defaults.expunge_async,
+            "output" => self.query_output_format = defaults.query_output_format,
+            "show_make_env" => self.show_make_env = defaults.show_make_env,
+            "disk_cache" => self.disk_cache = None,
+            "profile" => self.profile = None,
+            "build_event_json_file" => self.build_event_json_file = None,
+            "test_output" => self.test_output = defaults.test_output,
+            "test_filter" => self.test_filter = None,
+            "spawn_strategy" => self.spawn_strategy = defaults.spawn_strategy,
+            _ => {}
+        }
     }
 
     /// `parser.clearValue` + `setOptionValueAtSpecificPriorityWithoutExpansion` for an invocation policy.

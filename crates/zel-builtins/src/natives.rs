@@ -181,3 +181,38 @@ pub fn dotted_version_member(
 
 #[allow(dead_code)]
 fn _unused(_: Arc<()>) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    fn hash_val(v: &Value) -> u64 {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
+    }
+
+    #[test]
+    fn dotted_version_equality_and_hash_match_compare_to() {
+        for (a, b) in [
+            ("0", "0.0.0"),
+            ("0.1", "0.01"),
+            ("0.2", "0.2.0"),
+            ("1.2", "1.2.0"),
+            ("10", "10.0"),
+        ] {
+            let va = dotted_version(&[Value::String(a.into())]).unwrap();
+            let vb = dotted_version(&[Value::String(b.into())]).unwrap();
+            assert_eq!(compare(a, b), 0, "{a} vs {b}");
+            assert_eq!(va, vb, "{a} == {b}");
+            assert_eq!(hash_val(&va), hash_val(&vb), "hash({a}) == hash({b})");
+            assert_eq!(va.to_string(), a);
+            assert_eq!(vb.to_string(), b);
+        }
+        let v1 = dotted_version(&[Value::String("1.0alpha".into())]).unwrap();
+        let v2 = dotted_version(&[Value::String("1.0".into())]).unwrap();
+        assert_ne!(v1, v2);
+    }
+}

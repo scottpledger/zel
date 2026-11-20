@@ -193,17 +193,20 @@ pub fn lifecycle_request(cfg: &BesConfig, kind: &str, success: bool) -> Msg {
         }
     }
     let with_inv = kind.starts_with("invocation");
-    let o = ordered(cfg, "CONTROLLER", with_inv, 1, ev);
+    let seq = if kind.ends_with("_finished") { 2 } else { 1 };
+    let o = ordered(cfg, "CONTROLLER", with_inv, seq, ev);
     let mut r = Msg::new("google.devtools.build.v1.PublishLifecycleEventRequest");
     r.set_enum("service_level", "INTERACTIVE");
     r.set_msg("build_event", o);
-    for k in cfg.all_keywords() {
-        r.set_str("notification_keywords", k);
+    if kind != "invocation_attempt_finished" {
+        for k in cfg.all_keywords() {
+            r.set_str("notification_keywords", k);
+        }
     }
     if let Some(p) = &cfg.project_id {
         r.set_str("project_id", p.clone());
     }
-    r.set_bool("check_preceding_lifecycle_events_present", true);
+    r.set_bool("check_preceding_lifecycle_events_present", false);
     r
 }
 
@@ -223,14 +226,17 @@ pub fn stream_request(cfg: &BesConfig, seq: i64, bep: Option<&Msg>) -> Msg {
     let o = ordered(cfg, "TOOL", true, seq, ev);
     let mut r = Msg::new("google.devtools.build.v1.PublishBuildToolEventStreamRequest");
     r.set_msg("ordered_build_event", o);
+    if let Some(p) = &cfg.project_id {
+        r.set_str("project_id", p.clone());
+    }
     if seq == 1 {
         for k in cfg.all_keywords() {
             r.set_str("notification_keywords", k);
         }
-        if let Some(p) = &cfg.project_id {
-            r.set_str("project_id", p.clone());
-        }
-        r.set_bool("check_preceding_lifecycle_events_present", true);
+        r.set_bool(
+            "check_preceding_lifecycle_events_present",
+            cfg.lifecycle_events,
+        );
     }
     r
 }
@@ -257,6 +263,7 @@ pub struct BesTransport {
     channel: Arc<Channel>,
     started: Mutex<bool>,
     success: Mutex<bool>,
+    start_lifecycle_err: Mutex<Option<String>>,
 }
 
 impl BesTransport {
@@ -275,10 +282,15 @@ impl BesTransport {
             channel: channel.clone(),
             started: Mutex::new(false),
             success: Mutex::new(true),
+            start_lifecycle_err: Mutex::new(None),
         });
         if cfg.lifecycle_events {
             for kind in ["build_enqueued", "invocation_attempt_started"] {
-                let _ = t.publish_lifecycle(kind, true);
+                if let Err(e) = t.publish_lifecycle(kind, true) {
+                    *t.start_lifecycle_err.lock().unwrap() = Some(format!("{e}"));
+                    *t.done_rx.lock().unwrap() = None;
+                    return t;
+                }
             }
         }
         let worker_cfg = cfg;
@@ -360,14 +372,20 @@ fn run_stream(cfg: &BesConfig, channel: &Channel, shared: &Shared) -> Result<(),
         });
         let q = shared.q.lock().unwrap();
         let all_acked = q.closed && q.acked as usize >= q.requests.len();
+        let made_progress = q.acked > start_idx as i64;
         drop(q);
+        if made_progress {
+            attempt = 0;
+            delay = Duration::from_millis(100);
+        }
         match res {
             Ok(()) if all_acked => return Ok(()),
             Ok(()) => {
                 // Stream ended OK but acknowledgements are missing: resend.
             }
             Err(e) => {
-                let retriable = RetryPolicy::is_retriable(&e);
+                // BES tool stream retries CANCELLED (1) in addition to standard retriable codes.
+                let retriable = RetryPolicy::is_retriable(&e) || e.code == 1;
                 if !retriable || attempt >= BES_MAX_RETRIES {
                     return Err(format!("{e}"));
                 }
@@ -407,6 +425,9 @@ impl BuildEventTransport for BesTransport {
     }
 
     fn close(&self) -> Result<(), String> {
+        if let Some(err) = self.start_lifecycle_err.lock().unwrap().clone() {
+            return Err(err);
+        }
         {
             let mut q = self.shared.q.lock().unwrap();
             if !q.closed {
@@ -713,5 +734,104 @@ mod tests {
         c.backend = "grpcs://bes.example".into();
         let e = c.channel().err().unwrap();
         assert!(e.contains("TLS"), "{e}");
+    }
+
+    #[test]
+    fn lifecycle_sequence_project_id_and_bep_special_files() {
+        let srv = FakeBes::default();
+        let mut c = cfg();
+        c.project_id = Some("proj-42".into());
+        let channel = Arc::new(Channel::new(Arc::new(Conn2(srv.clone())), 1, vec![]));
+        let t = BesTransport::start(c, channel);
+        let streamer = BuildEventStreamer::new(vec![t], false);
+        streamer.post(BepBuilder::build_started(
+            "inv-1",
+            0,
+            "v",
+            "",
+            "build",
+            "/w",
+            "/w",
+            1,
+            "h",
+            "u",
+            vec![ids::progress(0), ids::build_finished()],
+        ));
+        streamer.post(BepBuilder::build_finished("SUCCESS", 0, 1, None));
+        streamer.post(BepBuilder::build_metrics(Msg::new(
+            "build_event_stream.BuildMetrics",
+        )));
+        streamer.post(BepBuilder::build_tool_logs(&[]));
+        streamer.post(BepBuilder::convenience_symlinks(&[]));
+        assert!(streamer.close_errors().is_empty());
+
+        let lc: Vec<Msg> = srv
+            .lifecycle
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                Msg::decode("google.devtools.build.v1.PublishLifecycleEventRequest", b).unwrap()
+            })
+            .collect();
+        assert_eq!(lc.len(), 4);
+        assert_eq!(
+            lc[0]
+                .get_msg("build_event")
+                .unwrap()
+                .get_i64("sequence_number"),
+            1
+        );
+        assert_eq!(
+            lc[2]
+                .get_msg("build_event")
+                .unwrap()
+                .get_i64("sequence_number"),
+            2
+        );
+        assert!(lc[2].get_str("notification_keywords").is_empty());
+        assert_eq!(
+            lc[3]
+                .get_msg("build_event")
+                .unwrap()
+                .get_i64("sequence_number"),
+            2
+        );
+
+        let tool_reqs: Vec<Msg> = srv
+            .stream_reqs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                Msg::decode(
+                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                    b,
+                )
+                .unwrap()
+            })
+            .collect();
+        assert!(tool_reqs
+            .iter()
+            .all(|m| m.get_str("project_id") == "proj-42"));
+
+        let sym = BepBuilder::symlink_file("out.lnk", &["bin".into()], "../target");
+        assert!(!sym.has("uri"));
+        assert_eq!(sym.get_str("symlink_target_path"), "../target");
+
+        let dir = BepBuilder::directory_file("tree_dir", &["bin".into()]);
+        assert!(!dir.has("uri"));
+
+        let mut exec_info = std::collections::BTreeMap::new();
+        exec_info.insert("no-remote-exec".to_string(), String::new());
+        assert_eq!(
+            crate::exec_log::execution_flags(&exec_info),
+            (false, true, true)
+        );
+        exec_info.insert("local".to_string(), String::new());
+        assert_eq!(
+            crate::exec_log::execution_flags(&exec_info),
+            (false, true, false)
+        );
     }
 }

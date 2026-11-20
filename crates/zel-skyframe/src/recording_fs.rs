@@ -172,6 +172,13 @@ impl FileSystem for RecordingFileSystem {
         record_file(link_path);
         self.inner.read_symbolic_link(link_path)
     }
+    fn create_hard_link(
+        &self,
+        link_path: &PathFragment,
+        original_path: &PathFragment,
+    ) -> io::Result<()> {
+        self.inner.create_hard_link(link_path, original_path)
+    }
 }
 
 #[cfg(test)]

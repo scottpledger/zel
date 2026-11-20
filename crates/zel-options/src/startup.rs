@@ -78,6 +78,31 @@ impl Default for StartupOptions {
 }
 
 impl StartupOptions {
+    fn expand_startup_path(raw: &str) -> PathFragment {
+        let home = std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()
+            .filter(|h| !h.is_empty());
+        let expanded = if raw == "~" {
+            home.unwrap_or_else(|| raw.to_string())
+        } else if let Some(rest) = raw.strip_prefix("~/") {
+            match home {
+                Some(h) => format!("{}/{rest}", h.trim_end_matches(['/', '\\'])),
+                None => raw.to_string(),
+            }
+        } else {
+            raw.to_string()
+        };
+        let pf = PathFragment::create(&expanded);
+        if pf.is_absolute() || expanded.is_empty() {
+            pf
+        } else if let Ok(cwd) = std::env::current_dir() {
+            PathFragment::create(&cwd.to_string_lossy()).get_relative(&pf)
+        } else {
+            pf
+        }
+    }
+
     /// Resolves output user root checking environment variables (TEST_TMPDIR, XDG_CACHE_HOME).
     pub fn resolve_output_user_root(&self, user: &str, home: Option<&str>) -> PathFragment {
         let xdg = std::env::var("XDG_CACHE_HOME").ok();
@@ -249,17 +274,17 @@ impl StartupOptions {
             "home_rc" => self.home_rc = converted.as_bool().unwrap_or(true),
             "output_base" => {
                 if let Some(s) = converted.as_str() {
-                    self.output_base = Some(PathFragment::create(s));
+                    self.output_base = Some(Self::expand_startup_path(s));
                 }
             }
             "output_user_root" => {
                 if let Some(s) = converted.as_str() {
-                    self.output_user_root = Some(PathFragment::create(s));
+                    self.output_user_root = Some(Self::expand_startup_path(s));
                 }
             }
             "install_base" => {
                 if let Some(s) = converted.as_str() {
-                    self.install_base = Some(PathFragment::create(s));
+                    self.install_base = Some(Self::expand_startup_path(s));
                 }
             }
             "max_idle_secs" => {

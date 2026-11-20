@@ -224,6 +224,7 @@ fn host_globals() -> Vec<&'static str> {
         "exec_result",
         "watch_marker",
         "rule",
+        "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc",
     ]
 }
 
@@ -258,6 +259,7 @@ const BZL_BUILTIN_NAMES: &[&str] = &[
     "exec_group",
     "subrule",
     "visibility",
+    "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc",
     "DefaultInfo",
     "OutputGroupInfo",
     "RunEnvironmentInfo",
@@ -974,6 +976,7 @@ impl Rt {
             return crate::ctx::dispatch_object(self, ctx, name, pos, kw);
         }
         match name {
+            "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" => Ok(Value::None),
             "native.package_name" => Err(StarlarkError(
                 "package_name() can only be used while evaluating a BUILD file or a legacy or symbolic macro".into(),
             )),

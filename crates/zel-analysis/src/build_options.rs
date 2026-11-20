@@ -218,6 +218,72 @@ fn split_unescaped_commas(s: &str) -> Vec<String> {
     out
 }
 
+/// Evaluates `PerLabelOptions` entries (`--per_file_copt` / `--host_per_file_copt`) against
+/// `label` and `exec_path`, returning matching compiler options in command-line order.
+pub fn match_per_label_options(
+    entries: &[String],
+    label: Option<&zel_cmdline::Label>,
+    exec_path: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let label_forms: Vec<String> = match label {
+        Some(l) => {
+            let mut v = vec![l.canonical_form()];
+            if l.package_identifier().repository().is_main() {
+                let pkg = l.package_identifier().package_fragment().path_string();
+                v.push(format!("//{pkg}:{}", l.name()));
+            }
+            v
+        }
+        None => Vec::new(),
+    };
+    for entry in entries {
+        let Some((filter_part, opts_rest)) = entry.rsplit_once(" Options: [") else {
+            continue;
+        };
+        let Some(opts_body) = opts_rest.strip_suffix(']') else {
+            continue;
+        };
+        if filter_part.is_empty() {
+            continue;
+        }
+        let mut inc: Vec<zel_util::java_regex::Regex> = Vec::new();
+        let mut exc: Vec<zel_util::java_regex::Regex> = Vec::new();
+        for piece in split_unescaped_commas(filter_part) {
+            let p = piece.replace("\\,", ",");
+            if let Some(rest) = p.strip_prefix('-') {
+                if !rest.is_empty() {
+                    if let Ok(r) = zel_util::java_regex::Regex::new(rest) {
+                        exc.push(r);
+                    }
+                }
+            } else {
+                let pat = p.strip_prefix('+').unwrap_or(&p);
+                if !pat.is_empty() {
+                    if let Ok(r) = zel_util::java_regex::Regex::new(pat) {
+                        inc.push(r);
+                    }
+                }
+            }
+        }
+        let matches_one = |cand: &str| -> bool {
+            if exc.iter().any(|r| r.find(cand).is_some()) {
+                return false;
+            }
+            if inc.is_empty() {
+                !exc.is_empty()
+            } else {
+                inc.iter().any(|r| r.find(cand).is_some())
+            }
+        };
+        let matched = label_forms.iter().any(|lf| matches_one(lf)) || matches_one(exec_path);
+        if matched && !opts_body.is_empty() {
+            out.extend(opts_body.split(", ").map(str::to_string));
+        }
+    }
+    out
+}
+
 fn enum_string(java_type: &str, raw: &str) -> String {
     match java_type {
         // Enums with a lower-case `toString()`.
@@ -270,6 +336,12 @@ pub fn convert_raws(
                     .split_once('=')
                     .ok_or_else(|| format!("Expected 'label=value': '{raw}'"))?;
                 Ok(format!("{}={v}", canon(k)?))
+            }
+            "Map.Entry<String,Label>" => {
+                let (k, v) = raw
+                    .split_once('=')
+                    .ok_or_else(|| format!("Expected 'alias=label': '{raw}'"))?;
+                Ok(format!("{k}={}", canon(v)?))
             }
             "CompilationMode" => Ok(enum_string("CompilationMode", raw)),
             "PerLabelOptions" => {

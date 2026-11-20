@@ -23,7 +23,7 @@
 //! `starlark_rule_actions.rs` (ctx/actions/runfiles/template_dict methods),
 //! `starlark_rule_driver.rs` (attribute conversion, implementation call, provider handling).
 
-use crate::args::{args_method, ArgsBuilder};
+use crate::args::{args_host_method, args_method, ArgsBuilder};
 use crate::location::{
     expand_locations_with_mapping, expand_make_variables, expand_with_locations, shell_tokenize,
     LocationMode,
@@ -148,7 +148,7 @@ impl AnalysisInputs {
             toolchains: BTreeMap::new(),
             extra_make_variables: BTreeMap::new(),
             workspace_name: "_main".to_string(),
-            allow_unresolved_symlinks: false,
+            allow_unresolved_symlinks: true,
             compact_repo_mapping: true,
             exec_platform: None,
             exec_group_toolchains: BTreeMap::new(),
@@ -411,6 +411,9 @@ impl CtxState {
                 .and_then(|g| self.inputs.exec_group_platforms.get(g))
                 .or(self.inputs.exec_platform.as_ref())
                 .cloned();
+        }
+        if self.inputs.allow_tags_propagation && matches!(a.kind, ActionKind::Spawn { .. }) {
+            crate::action::propagate_rule_tags(&self.rule, &mut a.execution_requirements);
         }
         a.apply_configuration_env(&self.cfg);
         a.inputs = dedup(std::mem::take(&mut a.inputs));

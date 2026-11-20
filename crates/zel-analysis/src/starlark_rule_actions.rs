@@ -14,12 +14,7 @@ fn host_method(
     match kind {
         "actions" => actions_method(st, ctx, method, pos, kw),
         "ctx" => ctx_method(st, ctx, method, pos, kw),
-        "args" => {
-            let a = args_of(recv).ok_or_else(|| StarlarkError("invalid Args".into()))?;
-            let mut b = a.lock().unwrap();
-            args_method(&mut b, ctx, method, pos, kw)?;
-            Ok(recv.clone())
-        }
+        "args" => args_host_method(recv, ctx, method, pos, kw),
         "runfiles" => {
             let r = runfiles_of(recv).ok_or_else(|| StarlarkError("invalid runfiles".into()))?;
             match method {
@@ -51,6 +46,12 @@ fn host_method(
             }
         }
         "template_dict" => {
+            let Value::Host(k, id) = recv else {
+                return err("invalid TemplateDict");
+            };
+            if k != "template_dict" || id.is_empty() {
+                return err("invalid TemplateDict");
+            }
             let d = template_dict_of(recv).ok_or_else(|| StarlarkError("invalid TemplateDict".into()))?;
             let key = want_str(
                 arg(pos, kw, 0, "key").ok_or_else(|| StarlarkError(format!("{method}() missing 1 required positional argument: key")))?,
@@ -62,7 +63,7 @@ fn host_method(
                     check_kwargs("add", pos, kw, &["key", "value"])?;
                     let v = want_str(arg(pos, kw, 1, "value").ok_or_else(|| StarlarkError("add() missing 1 required positional argument: value".into()))?, "add", "value")?;
                     d.lock().unwrap().push((key, v));
-                    Ok(recv.clone())
+                    Ok(Value::Host("template_dict".into(), id.to_owned()))
                 }
                 "add_joined" => {
                     if pos.len() > 2 {
@@ -104,7 +105,7 @@ fn host_method(
                     akw.insert("omit_if_empty".into(), Value::Bool(false));
                     args_method(&mut b, ctx, "add_joined", &[values], &akw)?;
                     d.lock().unwrap().push((key, b.args.pop().unwrap_or_default()));
-                    Ok(recv.clone())
+                    Ok(Value::Host("template_dict".into(), id.to_owned()))
                 }
                 other => err(format!("'TemplateDict' value has no field or method '{other}'")),
             }
@@ -197,13 +198,31 @@ fn depset_nested(
     d: &Arc<zel_starlark::Depset>,
     memo: &mut std::collections::HashMap<u64, crate::nested_set::NSet<(String, String)>>,
 ) -> crate::nested_set::NSet<(String, String)> {
-    use crate::nested_set::{NSet, COMPILE_ORDER, STABLE_ORDER};
+    use crate::nested_set::{
+        NSet, COMPILE_ORDER, LINK_ORDER, NAIVE_LINK_ORDER, STABLE_ORDER,
+    };
     if let Some(s) = memo.get(&d.id) {
         return s.clone();
     }
-    let order = if d.order == zel_starlark::DepsetOrder::Default { STABLE_ORDER } else { COMPILE_ORDER };
-    let direct: Vec<(String, String)> = d.direct.iter().filter_map(artifact_of).map(|a| Runfiles::elem(&a)).collect();
-    let trans: Vec<_> = d.transitive.iter().map(|t| depset_nested(t, memo)).collect();
+    let order = match d.order {
+        zel_starlark::DepsetOrder::Default => STABLE_ORDER,
+        zel_starlark::DepsetOrder::Postorder => COMPILE_ORDER,
+        zel_starlark::DepsetOrder::Topological => LINK_ORDER,
+        zel_starlark::DepsetOrder::Preorder => NAIVE_LINK_ORDER,
+    };
+    let mut direct: Vec<(String, String)> = d
+        .direct
+        .iter()
+        .filter_map(artifact_of)
+        .map(|a| Runfiles::elem(&a))
+        .collect();
+    let mut trans: Vec<_> = d.transitive.iter().map(|t| depset_nested(t, memo)).collect();
+    // `Depset` reverses `direct` and `transitive` at construction when `Topological`; undo so
+    // `NSet::build(LINK_ORDER, ...)` reverses once.
+    if d.order == zel_starlark::DepsetOrder::Topological {
+        direct.reverse();
+        trans.reverse();
+    }
     let s = NSet::build(order, direct, trans);
     memo.insert(d.id, s.clone());
     s
@@ -584,7 +603,52 @@ fn ctx_method(
                 mk_list(vec![]),
             ]))
         }
-        "coverage_instrumented" => Ok(Value::Bool(coverage_enabled(&st.cfg))),
+        "coverage_instrumented" => {
+            check_kwargs("coverage_instrumented", pos, kw, &["target"])?;
+            if !coverage_enabled(&st.cfg) || st.cfg.is_exec {
+                return Ok(Value::Bool(false));
+            }
+            let (lbl, is_test) = match arg(pos, kw, 0, "target") {
+                None | Some(Value::None) => (st.label.clone(), st.rule.is_test_rule()),
+                Some(v) => {
+                    let ct = target_of(v).ok_or_else(|| {
+                        StarlarkError("coverage_instrumented: expected Target or None".into())
+                    })?;
+                    (ct.label.clone(), ct.is_test)
+                }
+            };
+            if is_test && !st.cfg.bool_option("instrument_test_targets", false) {
+                return Ok(Value::Bool(false));
+            }
+            let spec = st
+                .cfg
+                .option_str("instrumentation_filter")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "-/javatests[/:],-/test/java[/:]".to_string());
+            let mut inc: Vec<zel_util::java_regex::Regex> = Vec::new();
+            let mut exc: Vec<zel_util::java_regex::Regex> = Vec::new();
+            for piece in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(rest) = piece.strip_prefix('-') {
+                    if let Ok(r) = zel_util::java_regex::Regex::new(rest) {
+                        exc.push(r);
+                    }
+                } else {
+                    let pat = piece.strip_prefix('+').unwrap_or(piece);
+                    if let Ok(r) = zel_util::java_regex::Regex::new(pat) {
+                        inc.push(r);
+                    }
+                }
+            }
+            let cand = lbl.to_string();
+            let matched = if exc.iter().any(|r| r.find(&cand).is_some()) {
+                false
+            } else if inc.is_empty() {
+                true
+            } else {
+                inc.iter().any(|r| r.find(&cand).is_some())
+            };
+            Ok(Value::Bool(matched))
+        }
         "resolve_tools" => {
             st.check_mutable("resolve_tools")?;
             check_kwargs("resolve_tools", pos, kw, &["tools"])?;
@@ -861,6 +925,7 @@ fn actions_method(
                 Some(m) => want_str(m, "write", "mnemonic")?,
                 None => "FileWrite".to_string(),
             };
+            let mut write_inputs: Vec<Artifact> = Vec::new();
             let content = match content {
                 Value::String(s) => FileContent::Literal(s.clone()),
                 v @ Value::Host(k, _) if k == "args" => {
@@ -869,9 +934,11 @@ fn actions_method(
                     let a = b.finish();
                     // `set_param_file_format` alone selects the file format (Args.getParameterFileType).
                     let format = b.format.or_else(|| a.param_file.as_ref().map(|p| p.format)).unwrap_or(ParamFileFormat::Shell);
+                    write_inputs.extend(b.directory_artifacts.iter().cloned());
                     FileContent::Args {
-                        args: b.param_file_args(format),
+                        args: b.args.clone(),
                         format,
+                        flag_groups: b.groups.clone(),
                     }
                 }
                 other => {
@@ -886,6 +953,7 @@ fn actions_method(
             if let Some(er) = none_or(arg(pos, kw, 4, "execution_requirements")) {
                 a.execution_requirements = str_dict(er, "execution_requirements")?;
             }
+            a.inputs.extend(write_inputs);
             a.outputs.push(out);
             st.register(a)?;
             Ok(Value::None)

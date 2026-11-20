@@ -18,6 +18,7 @@ use zel_client::{execute_cli_with_exec, perform_exec_request};
 use zel_vfs::{LocalFileSystem, PathFragment};
 
 fn main() {
+    zel_server::sys::unlimit_resources();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cwd_str = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())

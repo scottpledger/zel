@@ -727,6 +727,19 @@ impl<'a> PostEnv<'a> {
             {
                 let resolved = self.resolve_value(r, n, &a.name, &a.value);
                 explicit_labels.extend(resolved.labels());
+                if let AttrValue::Select(sel) = &a.value {
+                    for part in sel {
+                        if let zel_packages::attr::SelectPart::Select { entries, .. } = part {
+                            for (cond_key, _) in entries {
+                                if !(cond_key.package_name() == "conditions"
+                                    && cond_key.name() == "default")
+                                {
+                                    explicit_labels.insert(cond_key.clone());
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         explicit_labels
@@ -2938,9 +2951,40 @@ fn format_cquery(
                             for a in files {
                                 results.push(a.exec_path.path_string().to_string());
                             }
-                            if env.tenv.opts.include_aspects {
+                            if env.tenv.opts.include_aspects && !env.top_aspects.is_empty() {
+                                let top_names: BTreeSet<String> = env
+                                    .top_aspects
+                                    .iter()
+                                    .filter_map(|v| match v {
+                                        zel_starlark::Value::Struct(s) => {
+                                            match (
+                                                s.fields.get("_bzl_label"),
+                                                s.fields.get("_aspect_name"),
+                                            ) {
+                                                (
+                                                    Some(zel_starlark::Value::String(b)),
+                                                    Some(zel_starlark::Value::String(nm)),
+                                                ) => Some(format!("{b}%{nm}")),
+                                                (_, Some(zel_starlark::Value::String(nm))) => {
+                                                    Some(nm.clone())
+                                                }
+                                                _ => None,
+                                            }
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect();
                                 for asp in env.tr.aspects_for(&n.label) {
                                     if asp.configuration != ct.configuration {
+                                        continue;
+                                    }
+                                    let asp_name =
+                                        asp.aspect_name.as_deref().unwrap_or(&asp.rule_class);
+                                    if !top_names.is_empty()
+                                        && !top_names.iter().any(|tn| {
+                                            tn == asp_name || tn.ends_with(&format!("%{asp_name}"))
+                                        })
+                                    {
                                         continue;
                                     }
                                     for g in &groups {
@@ -2984,6 +3028,25 @@ fn format_cquery(
                 };
                 if let Some(ri) = rule_info {
                     if let Target::Rule(r) = &ri.target {
+                        for (attr_name, val) in &r.extra.attr_values {
+                            if val.is_select() {
+                                let key = env
+                                    .node_config_key(n)
+                                    .cloned()
+                                    .unwrap_or_else(|| env.top.clone());
+                                if let Err(e) = zel_analysis::select::resolve_select(
+                                    val,
+                                    attr_name,
+                                    r,
+                                    &key,
+                                    &*env.tr as &dyn zel_analysis::starlark_rule::DepResolver,
+                                ) {
+                                    return Err(format!(
+                                        "lookup failed on attribute {attr_name}: {e}"
+                                    ));
+                                }
+                            }
+                        }
                         if printed.insert(r.label.clone()) {
                             out.push_str(&format::build_rule_text(&ri, r, "\n"));
                         }
@@ -3377,9 +3440,13 @@ fn cquery_proto(
             let saved_tool = env.tenv.opts.tool_deps;
             env.tenv.opts.implicit_deps = fopts.implicit_deps;
             env.tenv.opts.tool_deps = fopts.tool_deps;
-            let res = env.analysis_deps(n).unwrap_or_default();
+            let mut res = env.analysis_deps(n).unwrap_or_default();
             env.tenv.opts.implicit_deps = saved_imp;
             env.tenv.opts.tool_deps = saved_tool;
+            res.sort_by(|a, b| {
+                label_cmp(&a.label, &b.label)
+                    .then_with(|| a.cfg_full.as_deref().cmp(&b.cfg_full.as_deref()))
+            });
             res
         } else {
             Vec::new()
@@ -3394,7 +3461,7 @@ fn cquery_proto(
                 .map(|f| &mut f.val),
         ) {
             if fopts.proto_rule_inputs_and_outputs {
-                r.fields.retain(|f| f.num != 5 && f.num != 6);
+                r.fields.retain(|f| f.num != 5 && f.num != 6 && f.num != 15);
                 let mut inputs: Vec<Label> = crate::target_env::rule_deps_ext(
                     orig_rule,
                     fopts.implicit_deps,
@@ -3418,23 +3485,25 @@ fn cquery_proto(
                 for o in crate::target_env::rule_outputs(&orig_info.pkg, &orig_rule.label) {
                     r.rstr(6, "rule_output", lp(&o));
                 }
-            }
-            if include_transitions {
-                for dep_node in &configured_deps {
-                    let mut cri = Msg::new();
-                    cri.str(1, "label", lp(&dep_node.label));
-                    let dep_full = env
-                        .node_config_key(dep_node)
-                        .map(|k| k.checksum())
-                        .or_else(|| dep_node.cfg_full.clone());
-                    if let Some(cs) = dep_full {
-                        let cid = intern_cfg(&mut numbering, Some(cs.as_str()));
-                        cri.str(2, "configuration_checksum", cs);
-                        if cid != 0 {
-                            cri.add(3, "configuration_id", PbVal::Uint32(cid));
+                if include_transitions {
+                    for dep_node in &configured_deps {
+                        let mut cri = Msg::new();
+                        cri.str(1, "label", lp(&dep_node.label));
+                        let dep_full = env
+                            .node_config_key(dep_node)
+                            .map(|k| k.checksum())
+                            .or_else(|| dep_node.cfg_full.clone());
+                        if let Some(cs) = dep_full {
+                            cri.str(2, "configuration_checksum", cs.clone());
+                            if popts.proto_include_configurations {
+                                let cid = intern_cfg(&mut numbering, Some(cs.as_str()));
+                                if cid != 0 {
+                                    cri.add(3, "configuration_id", PbVal::Uint32(cid));
+                                }
+                            }
                         }
+                        r.rmsg(15, "configured_rule_input", cri);
                     }
-                    r.rmsg(15, "configured_rule_input", cri);
                 }
             }
         }

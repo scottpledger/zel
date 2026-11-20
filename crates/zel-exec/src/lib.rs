@@ -894,6 +894,8 @@ pub struct ExecOptions {
     pub async_execution_max_concurrent_actions: usize,
     pub hide_aspect_results: Vec<String>,
     pub experimental_use_validation_aspect: bool,
+    /// `--experimental_writable_outputs` (default `false`): output files/trees use `0755` when true, `0555` when false.
+    pub writable_outputs: bool,
     /// Pre-configured tool runfiles trees, keyed by tool executable exec path.
     pub tool_runfiles: BTreeMap<String, ToolRunfilesSpec>,
     /// Salt mixed into action cache keys (`ExecutorBuilder.setActionExecutionSalt`).
@@ -1250,11 +1252,29 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
         ActionAnalysisMetadata::FileWriteAction {
             content,
             is_executable,
+            param_file_spec,
             ..
         } => {
             p.kind = "file_write".into();
             p.payload = content.clone();
             p.payload.push(*is_executable as u8);
+            if let Some(spec) = param_file_spec {
+                p.payload.push(spec.format as u8);
+                p.payload.push(spec.flags_only as u8);
+                p.payload
+                    .extend_from_slice(&(spec.args.len() as u32).to_le_bytes());
+                for item in &spec.args {
+                    p.payload
+                        .extend_from_slice(&(item.len() as u32).to_le_bytes());
+                    p.payload.extend_from_slice(item.as_bytes());
+                }
+                p.payload
+                    .extend_from_slice(&(spec.flag_groups.len() as u32).to_le_bytes());
+                for &(s, e) in &spec.flag_groups {
+                    p.payload.extend_from_slice(&(s as u32).to_le_bytes());
+                    p.payload.extend_from_slice(&(e as u32).to_le_bytes());
+                }
+            }
         }
         ActionAnalysisMetadata::SymlinkAction { input_path, .. } => {
             p.kind = "symlink".into();
@@ -1315,6 +1335,47 @@ pub fn execute_action(
 /// inputs and missing declared outputs yield an outcome with `failure` set (Bazel's
 /// `ActionExecutionException` semantics); declared outputs of failed actions are removed and
 /// their action-cache entries dropped.
+/// Recursively lists all non-directory entries beneath `<execroot>/<dir>` through the action VFS,
+/// returning sorted execroot-relative paths normalized with `/` separators on all platforms.
+fn expand_tree_dir_via_fs(
+    fs: &dyn FileSystem,
+    execroot: &PathFragment,
+    dir: &str,
+) -> Result<Vec<String>, String> {
+    let dir_norm = dir.replace('\\', "/").trim_end_matches('/').to_string();
+    let root = execroot.get_relative(&PathFragment::create(&dir_norm));
+    let mut files = Vec::new();
+    let mut stack: Vec<(PathFragment, String)> = vec![(root, dir_norm.clone())];
+    while let Some((abs_dir, rel_prefix)) = stack.pop() {
+        let entries = fs
+            .readdir(&abs_dir)
+            .map_err(|e| format!("cannot expand directory '{dir_norm}': {e}"))?;
+        for entry in entries {
+            let child_abs = abs_dir.get_relative_str(&entry.name);
+            let child_rel = if rel_prefix.is_empty() {
+                entry.name.clone()
+            } else {
+                format!("{rel_prefix}/{}", entry.name)
+            };
+            let is_dir = match entry.dirent_type {
+                zel_vfs::DirentType::Directory => true,
+                zel_vfs::DirentType::Symlink | zel_vfs::DirentType::Unknown => fs
+                    .stat(&child_abs, true)
+                    .map(|st| st.is_directory)
+                    .unwrap_or(false),
+                zel_vfs::DirentType::File => false,
+            };
+            if is_dir {
+                stack.push((child_abs, child_rel));
+            } else {
+                files.push(child_rel);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 pub fn execute_action_with(
     action: &ActionAnalysisMetadata,
     execroot: &PathFragment,
@@ -1366,37 +1427,41 @@ pub fn execute_action_with(
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
         .map(|a| (a.exec_path.path_string(), a))
         .collect();
-    let md_digest_of = |discovered: &[String]| -> String {
-        let mut all: Vec<(String, Option<String>)> = Vec::new();
-        for p in declared_inputs.iter().chain(discovered.iter()) {
-            let d = if constant_metadata_paths.contains(p.as_str()) {
-                let target = execroot.get_relative_str(p);
-                fs.exists(&target, true)
-                    .then(|| "CONSTANT_METADATA".to_string())
-            } else if let Some(fc) = &opts.file_cache {
-                if let Some(src_art) = source_by_exec.get(p.as_str()) {
-                    match fc.get_artifact_metadata(src_art) {
-                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                        Err(file_cache::FileCacheError::Directory(_)) => {
-                            path_digest(digest, fs, &execroot.get_relative_str(p))
-                        }
-                        Err(_) => None,
+    let input_digest_of = |p: &str| -> Option<String> {
+        if constant_metadata_paths.contains(p) || p == "bazel-out/volatile-status.txt" {
+            let target = execroot.get_relative_str(p);
+            return fs
+                .exists(&target, true)
+                .then(|| "CONSTANT_METADATA".to_string());
+        }
+        if let Some(fc) = &opts.file_cache {
+            if let Some(src_art) = source_by_exec.get(p) {
+                match fc.get_artifact_metadata(src_art) {
+                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                    Err(file_cache::FileCacheError::Directory(_)) => {
+                        path_digest(digest, fs, &execroot.get_relative_str(p))
                     }
-                } else if !p.starts_with("bazel-out/") {
-                    match fc.get_input_metadata(&PathFragment::create(p)) {
-                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                        Err(file_cache::FileCacheError::Directory(_)) => {
-                            path_digest(digest, fs, &execroot.get_relative_str(p))
-                        }
-                        Err(_) => None,
+                    Err(_) => None,
+                }
+            } else if !p.starts_with("bazel-out/") {
+                match fc.get_input_metadata(&PathFragment::create(p)) {
+                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                    Err(file_cache::FileCacheError::Directory(_)) => {
+                        path_digest(digest, fs, &execroot.get_relative_str(p))
                     }
-                } else {
-                    path_digest(digest, fs, &execroot.get_relative_str(p))
+                    Err(_) => None,
                 }
             } else {
                 path_digest(digest, fs, &execroot.get_relative_str(p))
-            };
-            all.push((p.clone(), d));
+            }
+        } else {
+            path_digest(digest, fs, &execroot.get_relative_str(p))
+        }
+    };
+    let md_digest_of = |discovered: &[String]| -> String {
+        let mut all: Vec<(String, Option<String>)> = Vec::new();
+        for p in declared_inputs.iter().chain(discovered.iter()) {
+            all.push((p.clone(), input_digest_of(p)));
         }
         all.extend(tool_rf_entries.iter().cloned());
         all.sort();
@@ -1574,11 +1639,22 @@ pub fn execute_action_with(
         fail_ext(messages, code, stdout, stderr, runner, false)
     };
 
+    let pre_exec_inputs: BTreeMap<String, Option<String>> = declared_inputs
+        .iter()
+        .filter(|p| p.as_str() != "bazel-out/volatile-status.txt")
+        .map(|p| {
+            let abs_in = execroot.get_relative_str(p);
+            invalidate_computed_digest(abs_in.path_string());
+            (p.clone(), input_digest_of(p))
+        })
+        .collect();
+
     match action {
         ActionAnalysisMetadata::FileWriteAction {
             output,
             content,
             is_executable,
+            param_file_spec,
             ..
         } => {
             let out_path = execroot.get_relative(&output.exec_path);
@@ -1597,10 +1673,65 @@ pub fn execute_action_with(
                     ));
                 }
             }
-            let host_execroot = std::path::Path::new(execroot.path_string());
-            if host_execroot.is_dir() {
+            let final_bytes: Vec<u8> =
+                if let Some(spec) = param_file_spec.as_ref().filter(|s| s.has_tree_artifacts()) {
+                    match spec.render_expanded(&|dir| expand_tree_dir_via_fs(fs, execroot, dir)) {
+                        Ok(bytes) => bytes,
+                        Err(msg) => {
+                            return Ok(fail(
+                                vec![format!(
+                                    "ERROR: {loc}: Writing file {} failed: {msg}",
+                                    output.root_relative_path
+                                )],
+                                1,
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                            ));
+                        }
+                    }
+                } else if content
+                    .windows(zel_analysis::TREE_MARKER.len())
+                    .any(|w| w == zel_analysis::TREE_MARKER.as_bytes())
+                {
+                    if let Ok(text) = std::str::from_utf8(content) {
+                        let had_trailing_nl = text.ends_with('\n');
+                        let raw_lines: Vec<String> = text.lines().map(str::to_string).collect();
+                        match zel_analysis::expand_tree_artifact_args(&raw_lines, &|dir| {
+                            expand_tree_dir_via_fs(fs, execroot, dir)
+                        }) {
+                            Ok(expanded) => {
+                                let mut joined = expanded.join("\n");
+                                if had_trailing_nl && !expanded.is_empty() {
+                                    joined.push('\n');
+                                }
+                                joined.into_bytes()
+                            }
+                            Err(msg) => {
+                                return Ok(fail(
+                                    vec![format!(
+                                        "ERROR: {loc}: Writing file {} failed: {msg}",
+                                        output.root_relative_path
+                                    )],
+                                    1,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    None,
+                                ));
+                            }
+                        }
+                    } else {
+                        content.clone()
+                    }
+                } else {
+                    content.clone()
+                };
+            let host_parent_exists = out_path
+                .parent_directory()
+                .is_some_and(|pd| std::path::Path::new(pd.path_string()).is_dir());
+            if host_parent_exists {
                 let p = std::path::Path::new(out_path.path_string());
-                if let Err(e) = file_write_strategy_write(p, content, *is_executable) {
+                if let Err(e) = file_write_strategy_write(p, &final_bytes, *is_executable) {
                     return Ok(fail_ext(
                         vec![format!(
                             "ERROR: {loc}: Writing file {} failed: {e}",
@@ -1613,18 +1744,23 @@ pub fn execute_action_with(
                         true,
                     ));
                 }
-            } else if let Err(e) = fs.write_file(&out_path, content) {
-                return Ok(fail_ext(
-                    vec![format!(
-                        "ERROR: {loc}: Writing file {} failed: {e}",
-                        output.root_relative_path
-                    )],
-                    36,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                    true,
-                ));
+            } else {
+                if let Err(e) = fs.write_file(&out_path, &final_bytes) {
+                    return Ok(fail_ext(
+                        vec![format!(
+                            "ERROR: {loc}: Writing file {} failed: {e}",
+                            output.root_relative_path
+                        )],
+                        36,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                    ));
+                }
+                if *is_executable {
+                    let _ = fs.chmod(&out_path, 0o755);
+                }
             }
         }
         ActionAnalysisMetadata::SymlinkAction {
@@ -1644,15 +1780,44 @@ pub fn execute_action_with(
                 execroot.get_relative(input_path)
             };
             if *is_executable && !output.is_unresolved_symlink {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = std::fs::metadata(target.path_string()) {
-                        if meta.permissions().mode() & 0o111 == 0 {
+                let host_meta = std::fs::metadata(target.path_string());
+                match host_meta {
+                    Ok(meta) => {
+                        if !meta.is_file() {
                             return Ok(fail(
                                 vec![format!(
-                                    "ERROR: {loc}: Creating symlink {} failed: failed to create symbolic link '{}': file '{}' is not executable",
-                                    output.root_relative_path, output.exec_path, input_path
+                                    "ERROR: {loc}: Creating symlink {} failed: '{}' is not a file",
+                                    output.root_relative_path, input_path
+                                )],
+                                1,
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                            ));
+                        }
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if meta.permissions().mode() & 0o111 == 0 {
+                                return Ok(fail(
+                                    vec![format!(
+                                        "ERROR: {loc}: Creating symlink {} failed: failed to create symbolic link '{}': file '{}' is not executable",
+                                        output.root_relative_path, output.exec_path, input_path
+                                    )],
+                                    1,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    None,
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound && fs.exists(&target, true) => {
+                        if fs.stat(&target, true).is_ok_and(|s| s.is_directory) {
+                            return Ok(fail(
+                                vec![format!(
+                                    "ERROR: {loc}: Creating symlink {} failed: '{}' is not a file",
+                                    output.root_relative_path, input_path
                                 )],
                                 1,
                                 Vec::new(),
@@ -1661,11 +1826,35 @@ pub fn execute_action_with(
                             ));
                         }
                     }
+                    Err(_) => {
+                        return Ok(fail(
+                            vec![format!(
+                                "ERROR: {loc}: Creating symlink {} failed: '{}' is not a file",
+                                output.root_relative_path, input_path
+                            )],
+                            1,
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                        ));
+                    }
                 }
             }
             if output.is_unresolved_symlink {
                 fs.create_symbolic_link(&out_path, &target)?;
-            } else if fs.create_symbolic_link(&out_path, &target).is_err() {
+            } else if let Err(sym_err) = fs.create_symbolic_link(&out_path, &target) {
+                if *is_executable && sym_err.kind() != std::io::ErrorKind::Unsupported {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: Creating symlink {} failed: {sym_err}",
+                            output.root_relative_path
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
                 let src = target.clone();
                 match fs.read_file(&src) {
                     Ok(bytes) => fs.write_file(&out_path, &bytes)?,
@@ -1833,6 +2022,13 @@ pub fn execute_action_with(
             tools,
             java_compile,
         } => {
+            for so in spawn_outputs {
+                let rel = execroot.get_relative(&so.exec_path);
+                let p = std::path::Path::new(rel.path_string());
+                if p.exists() {
+                    let _ = zel_sandbox::delete_tree(p);
+                }
+            }
             let resolved_env = resolve_spawn_env(env, inherited_env, unset_env, &opts.client_env);
             let env = &resolved_env;
             let strategy_desc = (!progress_message.is_empty()).then_some(progress_message.as_str());
@@ -1848,23 +2044,7 @@ pub fn execute_action_with(
             // `add_all(tree_artifact)` placeholders expand to the files of the (now produced)
             // directory (`expand_directories`).
             let argv_expanded = match zel_analysis::expand_tree_artifact_args(argv, &|dir| {
-                let root = std::path::PathBuf::from(execroot.path_string()).join(dir);
-                let mut files = Vec::new();
-                let mut stack = vec![root.clone()];
-                while let Some(d) = stack.pop() {
-                    let rd = std::fs::read_dir(&d)
-                        .map_err(|e| format!("cannot expand directory '{dir}': {e}"))?;
-                    for e in rd.flatten() {
-                        let p = e.path();
-                        if p.is_dir() {
-                            stack.push(p);
-                        } else if let Ok(rel) = p.strip_prefix(&root) {
-                            files.push(format!("{dir}/{}", rel.to_string_lossy()));
-                        }
-                    }
-                }
-                files.sort();
-                Ok(files)
+                expand_tree_dir_via_fs(fs, execroot, dir)
             }) {
                 Ok(a) => a,
                 Err(msg) => {
@@ -2123,7 +2303,7 @@ pub fn execute_action_with(
                 {
                     let (cmd_argv, cmd_env, cmd_cwd) = match &res.executed_command {
                         Some(c) => (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd)),
-                        None => (argv.clone(), env.clone(), execroot.clone()),
+                        None => (argv_expanded.clone(), env.clone(), execroot.clone()),
                     };
                     let cmd_argv = if opts.expand_param_files {
                         expand_param_file_args(&cmd_argv, execroot, fs)
@@ -2180,7 +2360,7 @@ pub fn execute_action_with(
                             true,
                         ),
                         _ => (
-                            argv.clone(),
+                            argv_expanded.clone(),
                             env.clone(),
                             execroot.clone(),
                             opts.verbose_failures,
@@ -2485,6 +2665,49 @@ pub fn execute_action_with(
                 outcome.runner.clone(),
             ));
         }
+        if !pending && out_art.is_tree_artifact {
+            let root_host = std::path::Path::new(out_path.path_string());
+            if root_host.exists() {
+                if let Err(tree_err) =
+                    validate_and_chmod_tree_artifact(root_host, opts.writable_outputs)
+                {
+                    return Ok(fail(
+                        vec![
+                            format!(
+                                "ERROR: {loc}: error while validating output tree artifact {}: {tree_err}",
+                                out_art.exec_path
+                            ),
+                            format!(
+                                "ERROR: {loc}: {} failed: not all outputs were created or valid",
+                                action.mnemonic()
+                            ),
+                        ],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        outcome.runner.clone(),
+                    ));
+                }
+            }
+        } else if !pending
+            && !out_art.is_unresolved_symlink
+            && matches!(action, ActionAnalysisMetadata::SpawnAction { .. })
+        {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let p = std::path::Path::new(out_path.path_string());
+                if let Ok(sm) = std::fs::symlink_metadata(p) {
+                    if !sm.file_type().is_symlink() {
+                        let target_mode = if opts.writable_outputs { 0o755 } else { 0o555 };
+                        let _ = std::fs::set_permissions(
+                            p,
+                            std::fs::Permissions::from_mode(target_mode),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Record the action in the cache (`ActionCacheChecker.updateActionCache`): output digests and
@@ -2521,12 +2744,25 @@ pub fn execute_action_with(
                 )
             })
             .collect();
+        let recorded_md = {
+            let mut all: Vec<(String, Option<String>)> = pre_exec_inputs
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            for p in &discovered {
+                all.push((p.clone(), input_digest_of(p)));
+            }
+            all.extend(tool_rf_entries.iter().cloned());
+            all.sort();
+            all.dedup();
+            action_cache.compute_md_digest(&all)
+        };
         action_cache.put_entry(
             primary.exec_path.path_string(),
             ActionCacheEntry {
                 action_key,
                 used_client_env_digest: env_digest,
-                md_digest: md_digest_of(&discovered),
+                md_digest: recorded_md,
                 files,
                 discovered_inputs: discovered,
             },
@@ -2568,6 +2804,78 @@ pub fn file_write_strategy_write(
     if is_executable {
         zel_sandbox::set_executable_mode(out_path)?;
     }
+    Ok(())
+}
+
+fn validate_and_chmod_tree_artifact(
+    root: &std::path::Path,
+    writable_outputs: bool,
+) -> Result<(), String> {
+    fn walk(
+        root: &std::path::Path,
+        dir: &std::path::Path,
+        writable: bool,
+        depth: usize,
+    ) -> Result<(), String> {
+        if depth > 64 {
+            return Err("Too many levels of symbolic links".to_string());
+        }
+        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+        let mut children: Vec<std::path::PathBuf> =
+            entries.filter_map(|e| e.ok().map(|x| x.path())).collect();
+        children.sort();
+        for child in children {
+            let sm = std::fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
+            let ft = sm.file_type();
+            if ft.is_symlink() {
+                match std::fs::metadata(&child) {
+                    Ok(_) => {}
+                    Err(e)
+                        if e.raw_os_error() == Some(40)
+                            || e.raw_os_error() == Some(62)
+                            || e.to_string()
+                                .to_ascii_lowercase()
+                                .contains("too many levels") =>
+                    {
+                        return Err("Too many levels of symbolic links".to_string());
+                    }
+                    Err(_) => {
+                        let rel = child
+                            .strip_prefix(root)
+                            .unwrap_or(&child)
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        return Err(format!("child {rel} is a dangling symbolic link"));
+                    }
+                }
+            } else if ft.is_dir() {
+                walk(root, &child, writable, depth + 1)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = if writable { 0o755 } else { 0o555 };
+                    let _ = std::fs::set_permissions(&child, std::fs::Permissions::from_mode(mode));
+                }
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = if writable { 0o755 } else { 0o555 };
+                    let _ = std::fs::set_permissions(&child, std::fs::Permissions::from_mode(mode));
+                }
+            }
+        }
+        Ok(())
+    }
+    walk(root, root, writable_outputs, 0)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if writable_outputs { 0o755 } else { 0o555 };
+        let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = writable_outputs;
     Ok(())
 }
 
@@ -2771,6 +3079,8 @@ mod tests {
             output: out_art,
             content: b"cached content".to_vec(),
             is_executable: false,
+            inputs: Vec::new(),
+            param_file_spec: None,
         };
 
         let cache = CompactPersistentActionCache::new();
@@ -2810,6 +3120,8 @@ mod tests {
             output: out_art.clone(),
             content: raw.clone(),
             is_executable: false,
+            inputs: Vec::new(),
+            param_file_spec: None,
         };
         let res = execute_action(&act, &execroot, &fs, &cache, &reporter, false).unwrap();
         assert!(res.succeeded());
@@ -2829,6 +3141,8 @@ mod tests {
             output: exe_art.clone(),
             content: b"#!/bin/sh\n".to_vec(),
             is_executable: true,
+            inputs: Vec::new(),
+            param_file_spec: None,
         };
         let res = execute_action(&act_exe, &execroot, &fs, &cache, &reporter, false).unwrap();
         assert!(res.succeeded());
@@ -2907,5 +3221,93 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"META-INF/MANIFEST.MF"));
         assert!(names.contains(&"META-INF/my.kotlin_module"));
+    }
+
+    #[test]
+    fn file_write_tree_artifact_expands_via_in_memory_fs_and_tracks_cache_inputs() {
+        let fs = InMemoryFileSystem::default();
+        let execroot = PathFragment::create("/mem/execroot/_main");
+        let lbl = Label::parse_canonical("//pkg:writer").unwrap();
+        let mut tree_art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/tree_out"),
+            lbl.clone(),
+        );
+        tree_art.is_tree_artifact = true;
+        let out_art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/manifest.params"),
+            lbl.clone(),
+        );
+
+        let tree_exec = tree_art.exec_path.path_string().to_string();
+        let tree_abs = execroot.get_relative(&tree_art.exec_path);
+        fs.create_directory_and_parents(&tree_abs.get_relative_str("nested"))
+            .unwrap();
+        fs.write_file(&tree_abs.get_relative_str("b.txt"), b"b")
+            .unwrap();
+        fs.write_file(&tree_abs.get_relative_str("nested/with space.txt"), b"s")
+            .unwrap();
+
+        let placeholder = format!("{}\u{1}\u{1}{tree_exec}", zel_analysis::TREE_MARKER);
+        let mut typed = zel_analysis::Action::new(
+            lbl.clone(),
+            "FileWrite",
+            zel_analysis::ActionKind::FileWrite {
+                content: zel_analysis::FileContent::Args {
+                    args: vec!["--header".into(), placeholder],
+                    format: zel_analysis::ParamFileFormat::Shell,
+                    flag_groups: Vec::new(),
+                },
+                is_executable: false,
+            },
+        );
+        typed.inputs.push(tree_art.clone());
+        typed.outputs.push(out_art.clone());
+        let lowered = typed.lower();
+        assert_eq!(lowered.len(), 1);
+        assert_eq!(lowered[0].inputs(), vec![tree_art]);
+
+        let cache = CompactPersistentActionCache::new();
+        let reporter = Reporter::new();
+        let opts = ExecOptions::default();
+
+        let res1 =
+            execute_action_with(&lowered[0], &execroot, &fs, &cache, &reporter, &opts).unwrap();
+        assert!(res1.succeeded(), "{:?}", res1.failure);
+        assert!(!res1.cache_hit);
+
+        let written = String::from_utf8(
+            fs.read_file(&execroot.get_relative(&out_art.exec_path))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            format!("--header\n{tree_exec}/b.txt\n'{tree_exec}/nested/with space.txt'\n")
+        );
+
+        // Repeat execution with unchanged in-memory tree is a cache hit.
+        let res2 =
+            execute_action_with(&lowered[0], &execroot, &fs, &cache, &reporter, &opts).unwrap();
+        assert!(res2.cache_hit);
+
+        // Adding a new file to the in-memory tree invalidates the FileWriteAction cache entry.
+        fs.write_file(&tree_abs.get_relative_str("a.txt"), b"a")
+            .unwrap();
+        let res3 =
+            execute_action_with(&lowered[0], &execroot, &fs, &cache, &reporter, &opts).unwrap();
+        assert!(!res3.cache_hit);
+        let updated = String::from_utf8(
+            fs.read_file(&execroot.get_relative(&out_art.exec_path))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            updated,
+            format!(
+                "--header\n{tree_exec}/a.txt\n{tree_exec}/b.txt\n'{tree_exec}/nested/with space.txt'\n"
+            )
+        );
     }
 }

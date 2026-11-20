@@ -591,3 +591,604 @@ consumer(name = "check")
         "t=True,True,TGT_L,TGT_L_LI,[\"tgt_launcher.bin\"],[\"tgt_launcher.bin\", \"data_t.txt\"]\nh=True,True,EXEC_L,EXEC_L_LI,[\"exec_launcher.bin\"],[\"exec_launcher.bin\", \"data_h.txt\"]\n"
     );
 }
+
+#[test]
+fn wave5_coverage_build_tags_invocation_id_bep_residue_and_workspace_status() {
+    let w = Ws::new("w5b");
+    let bin_dir = w.root.join(format!(
+        "ob/execroot/_main/bazel-out/{}-fastbuild/bin",
+        zel_analysis::build_options::auto_host_cpu()
+    ));
+    w.write(
+        "defs.bzl",
+        r##"
+def _cov_check(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".info")
+    # Also verify allow_unresolved_symlinks defaults to True on attr.label_list:
+    ctx.actions.write(
+        out,
+        "cov=%s\n" % ctx.coverage_instrumented(),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+cov_rule = rule(
+    implementation = _cov_check,
+    attrs = {"deps": attr.label_list(allow_files = True)},
+)
+
+def _sym(ctx):
+    lnk = ctx.actions.declare_symlink(ctx.label.name + ".lnk")
+    ctx.actions.symlink(output = lnk, target_path = "dangling/target")
+    return [DefaultInfo(files = depset([lnk]))]
+
+sym_rule = rule(implementation = _sym)
+
+def _write_out(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    ctx.actions.write(out, ctx.attr.val + "\n")
+    return [DefaultInfo(files = depset([out]))]
+
+write_rule = rule(
+    implementation = _write_out,
+    attrs = {"val": attr.string(default = "x")},
+)
+
+def _bin(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    rf = ctx.runfiles(files = ctx.files.data)
+    return [DefaultInfo(executable = exe, files = depset([exe]), runfiles = rf)]
+
+my_bin = rule(implementation = _bin, executable = True, attrs = {"data": attr.label_list(allow_files = True)})
+my_test = rule(implementation = _bin, test = True, attrs = {"data": attr.label_list(allow_files = True)})
+"##,
+    );
+    w.write(
+        "pkg/BUILD",
+        r#"
+load("//:defs.bzl", "cov_rule", "sym_rule", "write_rule", "my_bin", "my_test")
+sym_rule(name = "unresolved")
+cov_rule(name = "c", deps = [":unresolved"])
+write_rule(name = "g_a", val = "a", tags = ["alpha"])
+my_test(name = "g_b", local = True)
+my_bin(name = "runner")
+my_test(name = "my_sh_test", data = ["d.txt"])
+"#,
+    );
+    w.write("pkg/runner.sh", "#!/bin/sh\nexit 0\n");
+    w.write("pkg/d.txt", "hello");
+    w.write("status.sh", "#!/bin/sh\necho STABLE_FOO $MY_STATUS_VAR\n");
+
+    // 1. allow_unresolved_symlinks defaults to True + coverage_instrumented honors default filter.
+    let (code, _, err, _) = w.run(&["coverage", "//pkg:c"]);
+    assert_eq!(code, 4, "{err}");
+    assert!(
+        err.contains("Using default value for --instrumentation_filter: \"^//pkg[/:]\"."),
+        "{err}"
+    );
+    let cov_txt = std::fs::read_to_string(bin_dir.join("pkg/c.info")).unwrap();
+    assert_eq!(cov_txt.trim(), "cov=True");
+
+    // 2. --build_tag_filters uses OR for positive filters and recognizes `local = True`/`1` as `local` tag.
+    let (code, _, err, _) = w.run(&[
+        "build",
+        "--build_tag_filters=alpha,local",
+        "//pkg:g_a",
+        "//pkg:g_b",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(bin_dir.join("pkg/g_a.out").exists());
+    assert!(bin_dir.join("pkg/g_b").exists());
+
+    // 3. --invocation_id honored in BEP & command-<uuid>.profile.gz symlinked by command.profile.gz,
+    //    and `bazel build` materializes .runfiles for sh_test when --build_runfile_links=true.
+    let bep_json = w.root.join("run_bep.json");
+    let custom_inv = "11111111-2222-4333-8444-555555555555";
+    let (code, _, err, _) = w.run(&[
+        "build",
+        &format!("--invocation_id={custom_inv}"),
+        "//pkg:my_sh_test",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        w.root
+            .join(format!("ob/command-{custom_inv}.profile.gz"))
+            .exists(),
+        "per-invocation profile should exist"
+    );
+    assert!(w.root.join("ob/command.profile.gz").exists());
+    assert!(
+        bin_dir.join("pkg/my_sh_test.runfiles").is_dir(),
+        "bazel build should materialize test runfiles tree"
+    );
+
+    // 4. `bazel run` BEP redacts post-`--` arguments to REDACTED by default.
+    let (code, _, err, req) = w.run(&[
+        "run",
+        &format!("--build_event_json_file={}", bep_json.display()),
+        "//pkg:runner",
+        "--",
+        "--secret_token=xyz",
+        "arg2",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(req.is_some());
+    let bep_str = std::fs::read_to_string(&bep_json).unwrap();
+    assert!(bep_str.contains("REDACTED"), "{bep_str}");
+    assert!(!bep_str.contains("secret_token"), "{bep_str}");
+
+    // 5. workspace_status_command receives --client_env and honors SOURCE_DATE_EPOCH without
+    //    clobbering unchanged stable-status.txt (including absolute paths containing spaces and
+    //    platform separators).
+    w.write(
+        "status dir/status.sh",
+        "#!/bin/sh\necho STABLE_FOO $MY_STATUS_VAR\n",
+    );
+    let status_cmd = if cfg!(windows) {
+        w.write(
+            "status dir/status.bat",
+            "@echo off\r\necho STABLE_FOO %MY_STATUS_VAR%\r\n",
+        );
+        w.ws.join("status dir")
+            .join("status.bat")
+            .display()
+            .to_string()
+    } else {
+        w.ws.join("status dir")
+            .join("status.sh")
+            .display()
+            .to_string()
+    };
+    let (code, _, err, _) = w.run(&[
+        "build",
+        "--stamp",
+        &format!("--workspace_status_command={status_cmd}"),
+        "--client_env=MY_STATUS_VAR=from_client",
+        "--client_env=SOURCE_DATE_EPOCH=1700000000",
+        "//pkg:g_a",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let stable =
+        std::fs::read_to_string(w.root.join("ob/execroot/_main/bazel-out/stable-status.txt"))
+            .unwrap();
+    assert!(stable.contains("STABLE_FOO from_client"), "{stable}");
+    let volatile = std::fs::read_to_string(
+        w.root
+            .join("ob/execroot/_main/bazel-out/volatile-status.txt"),
+    )
+    .unwrap();
+    assert!(
+        volatile.contains("BUILD_TIMESTAMP 1700000000"),
+        "{volatile}"
+    );
+
+    #[cfg(windows)]
+    {
+        let has_git_bash = [
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\msys64\usr\bin\bash.exe",
+        ]
+        .iter()
+        .any(|p| std::path::Path::new(p).is_file());
+        if has_git_bash {
+            let win_sh_cmd =
+                w.ws.join("status dir")
+                    .join("status.sh")
+                    .display()
+                    .to_string();
+            let (code_sh, _, err_sh, _) = w.run(&[
+                "build",
+                "--stamp",
+                &format!("--workspace_status_command={win_sh_cmd}"),
+                "--client_env=MY_STATUS_VAR=from_win_sh",
+                "--client_env=SOURCE_DATE_EPOCH=1700000000",
+                "//pkg:g_a",
+            ]);
+            assert_eq!(code_sh, 0, "{err_sh}");
+            let stable_sh = std::fs::read_to_string(
+                w.root.join("ob/execroot/_main/bazel-out/stable-status.txt"),
+            )
+            .unwrap();
+            assert!(stable_sh.contains("STABLE_FOO from_win_sh"), "{stable_sh}");
+        }
+    }
+
+    // 6. --query_file decodes ISO-8859-1 bytes cleanly.
+    let qfile = w.root.join("latin1.q");
+    std::fs::write(&qfile, b"//pkg:g_a\n").unwrap();
+    let (code, out, err, _) = w.run(&["query", &format!("--query_file={}", qfile.display())]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), "//pkg:g_a");
+}
+
+#[test]
+fn actions_write_expands_tree_artifact_args_via_in_memory_fs() {
+    use zel_analysis::BuildConfigurationKey;
+    use zel_cmdline::Label;
+    use zel_events::Reporter;
+    use zel_exec::{execute_action_with, CompactPersistentActionCache, ExecOptions};
+    use zel_packages::{LoaderConfig, PackageLoader, SimpleRepoResolver};
+    use zel_rules::{AnalysisConfig, TargetResolver};
+    use zel_vfs::InMemoryFileSystem;
+
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let ws = PathFragment::create("/virtual/ws");
+    fs.create_directory_and_parents(&ws).unwrap();
+    fs.write_file(
+        &ws.get_relative_str("MODULE.bazel"),
+        b"module(name = \"m\")\n",
+    )
+    .unwrap();
+    fs.write_file(
+        &ws.get_relative_str("defs.bzl"),
+        br#"
+def _impl(ctx):
+    tree = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(
+        outputs = [tree],
+        command = "mkdir -p %s" % tree.path,
+    )
+    out_shell = ctx.actions.declare_file(ctx.label.name + ".shell.params")
+    a1 = ctx.actions.args()
+    a1.add_all([tree])
+    ctx.actions.write(out_shell, a1)
+
+    out_flags = ctx.actions.declare_file(ctx.label.name + ".flags.params")
+    a2 = ctx.actions.args()
+    a2.set_param_file_format("flag_per_line")
+    a2.add_all("--srcs", [tree])
+    ctx.actions.write(out_flags, a2)
+    return [DefaultInfo(files = depset([out_shell, out_flags]))]
+
+tree_writer = rule(implementation = _impl)
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &ws.get_relative_str("BUILD"),
+        b"load(\":defs.bzl\", \"tree_writer\")\ntree_writer(name = \"tw\")\n",
+    )
+    .unwrap();
+
+    let lc = LoaderConfig::new(
+        fs.clone() as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(ws)),
+    );
+    let resolver = TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new());
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = resolver
+        .analyze(&Label::parse_canonical("//:tw").unwrap(), &cfg)
+        .unwrap();
+
+    // Populate the tree artifact strictly inside `exec_fs` (never touching host disk).
+    let exec_fs = InMemoryFileSystem::default();
+    let execroot = PathFragment::create("/virtual/execroot/_main");
+    let tree_art = ct
+        .typed_actions
+        .iter()
+        .flat_map(|a| a.outputs.iter())
+        .find(|o| o.is_tree_artifact)
+        .unwrap()
+        .clone();
+    let tree_dir = execroot.get_relative(&tree_art.exec_path);
+    exec_fs
+        .create_directory_and_parents(&tree_dir.get_relative_str("sub"))
+        .unwrap();
+    exec_fs
+        .write_file(&tree_dir.get_relative_str("z.cc"), b"int z;")
+        .unwrap();
+    exec_fs
+        .write_file(&tree_dir.get_relative_str("sub/a space.cc"), b"int a;")
+        .unwrap();
+
+    let cache = CompactPersistentActionCache::new();
+    let reporter = Reporter::new();
+    let opts = ExecOptions::default();
+    for act in &ct.actions {
+        if act.mnemonic() == "FileWrite" {
+            let res =
+                execute_action_with(act, &execroot, &exec_fs, &cache, &reporter, &opts).unwrap();
+            assert!(res.succeeded(), "{:?}", res.failure);
+        }
+    }
+
+    let tree_prefix = tree_art.exec_path.path_string();
+    let shell_out = ct
+        .default_info
+        .files
+        .iter()
+        .find(|f| f.exec_path.path_string().ends_with(".shell.params"))
+        .unwrap();
+    let flags_out = ct
+        .default_info
+        .files
+        .iter()
+        .find(|f| f.exec_path.path_string().ends_with(".flags.params"))
+        .unwrap();
+
+    let shell_text = String::from_utf8(
+        exec_fs
+            .read_file(&execroot.get_relative(&shell_out.exec_path))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        shell_text,
+        format!("'{tree_prefix}/sub/a space.cc'\n{tree_prefix}/z.cc\n")
+    );
+
+    let flags_text = String::from_utf8(
+        exec_fs
+            .read_file(&execroot.get_relative(&flags_out.exec_path))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        flags_text,
+        format!("--srcs={tree_prefix}/sub/a space.cc {tree_prefix}/z.cc\n")
+    );
+}
+
+#[test]
+fn flag_per_line_spilled_param_file_expands_tree_artifacts_end_to_end() {
+    use zel_analysis::BuildConfigurationKey;
+    use zel_cmdline::Label;
+    use zel_events::Reporter;
+    use zel_exec::{execute_action_with, CompactPersistentActionCache, ExecOptions};
+    use zel_packages::{LoaderConfig, PackageLoader, SimpleRepoResolver};
+    use zel_rules::{AnalysisConfig, TargetResolver};
+    use zel_vfs::InMemoryFileSystem;
+
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let ws = PathFragment::create("/virtual/ws");
+    fs.create_directory_and_parents(&ws).unwrap();
+    fs.write_file(
+        &ws.get_relative_str("MODULE.bazel"),
+        b"module(name = \"m\")\n",
+    )
+    .unwrap();
+    fs.write_file(
+        &ws.get_relative_str("defs.bzl"),
+        br##"
+def _impl(ctx):
+    tree_before = ctx.actions.declare_directory("tree_before")
+    tree_fmt = ctx.actions.declare_directory("tree_fmt")
+    tree_pos_single = ctx.actions.declare_directory("tree_pos_single")
+    tree_pos_multi = ctx.actions.declare_directory("tree_pos_multi")
+    for d in [tree_before, tree_fmt, tree_pos_single, tree_pos_multi]:
+        ctx.actions.run_shell(outputs = [d], command = "mkdir -p " + d.path)
+
+    tool = ctx.actions.declare_file("tool.sh")
+    ctx.actions.write(tool, "#!/bin/sh\n", is_executable = True)
+    out = ctx.actions.declare_file("result.out")
+
+    args = ctx.actions.args()
+    args.set_param_file_format("flag_per_line")
+    args.use_param_file("@%s", use_always = True)
+    args.add("--header", "val")
+    args.add("static_pos")
+    args.add_all([tree_before], before_each = "--input")
+    args.add_all([tree_fmt], format_each = "--input=%s")
+    args.add_all([tree_pos_single])
+    args.add_all([tree_pos_multi])
+
+    ctx.actions.run(
+        executable = tool,
+        inputs = [tree_before, tree_fmt, tree_pos_single, tree_pos_multi],
+        outputs = [out],
+        arguments = [args],
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+tree_flag_rule = rule(implementation = _impl)
+"##,
+    )
+    .unwrap();
+    fs.write_file(
+        &ws.get_relative_str("BUILD"),
+        b"load(\":defs.bzl\", \"tree_flag_rule\")\ntree_flag_rule(name = \"tf\")\n",
+    )
+    .unwrap();
+
+    let lc = LoaderConfig::new(
+        fs.clone() as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(ws)),
+    );
+    let resolver = TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new());
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = resolver
+        .analyze(&Label::parse_canonical("//:tf").unwrap(), &cfg)
+        .unwrap();
+
+    let exec_fs = InMemoryFileSystem::default();
+    let execroot = PathFragment::create("/virtual/execroot/_main");
+    let find_tree = |suffix: &str| {
+        ct.typed_actions
+            .iter()
+            .flat_map(|a| a.outputs.iter())
+            .find(|o| o.is_tree_artifact && o.exec_path.path_string().ends_with(suffix))
+            .unwrap()
+            .exec_path
+            .clone()
+    };
+    let tb = find_tree("/tree_before");
+    let tf = find_tree("/tree_fmt");
+    let tps = find_tree("/tree_pos_single");
+    let tpm = find_tree("/tree_pos_multi");
+    for t in [&tb, &tf, &tps, &tpm] {
+        exec_fs
+            .create_directory_and_parents(&execroot.get_relative(t))
+            .unwrap();
+    }
+
+    exec_fs
+        .write_file(&execroot.get_relative(&tb).get_relative_str("a.in"), b"a")
+        .unwrap();
+    exec_fs
+        .write_file(&execroot.get_relative(&tb).get_relative_str("b.in"), b"b")
+        .unwrap();
+    exec_fs
+        .write_file(&execroot.get_relative(&tf).get_relative_str("c.in"), b"c")
+        .unwrap();
+    exec_fs
+        .write_file(&execroot.get_relative(&tf).get_relative_str("d.in"), b"d")
+        .unwrap();
+    exec_fs
+        .write_file(
+            &execroot.get_relative(&tps).get_relative_str("only.in"),
+            b"o",
+        )
+        .unwrap();
+    exec_fs
+        .write_file(
+            &execroot.get_relative(&tpm).get_relative_str("first.in"),
+            b"1",
+        )
+        .unwrap();
+    exec_fs
+        .write_file(
+            &execroot.get_relative(&tpm).get_relative_str("second.in"),
+            b"2",
+        )
+        .unwrap();
+
+    let cache = CompactPersistentActionCache::new();
+    let reporter = Reporter::new();
+    let opts = ExecOptions::default();
+    for act in &ct.actions {
+        if act.mnemonic() == "FileWrite" {
+            let res =
+                execute_action_with(act, &execroot, &exec_fs, &cache, &reporter, &opts).unwrap();
+            assert!(res.succeeded(), "{:?}", res.failure);
+        }
+    }
+
+    let out_art = ct
+        .default_info
+        .files
+        .iter()
+        .find(|f| f.exec_path.path_string().ends_with("/result.out"))
+        .unwrap();
+    let params_rel = PathFragment::create(&format!("{}-0.params", out_art.exec_path.path_string()));
+    let params_text = String::from_utf8(
+        exec_fs
+            .read_file(&execroot.get_relative(&params_rel))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        params_text,
+        format!(
+            "--header=val\n--input={tb}/a.in --input {tb}/b.in\n--input={tf}/c.in=--input={tf}/d.in\n",
+            tb = tb.path_string(),
+            tf = tf.path_string(),
+        )
+    );
+
+    let spawn_meta = ct
+        .actions
+        .iter()
+        .find(|a| {
+            a.outputs()
+                .iter()
+                .any(|o| o.exec_path.path_string().ends_with("/result.out"))
+        })
+        .expect("spawn action for result.out");
+    let zel_analysis::ActionAnalysisMetadata::SpawnAction { ref argv, .. } = *spawn_meta else {
+        panic!("expected SpawnAction");
+    };
+    let expanded_argv = zel_analysis::expand_tree_artifact_args(argv, &|dir| {
+        let root = execroot.get_relative(&PathFragment::create(dir));
+        let mut entries: Vec<String> = exec_fs
+            .readdir(&root)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        entries.sort();
+        Ok(entries
+            .into_iter()
+            .map(|name| format!("{dir}/{name}"))
+            .collect())
+    })
+    .unwrap();
+    assert_eq!(
+        &expanded_argv[1..],
+        &[
+            format!("@{}", params_rel.path_string()),
+            "static_pos".to_string(),
+            format!("{}/only.in", tps.path_string()),
+            format!("{tpm}/first.in={tpm}/second.in", tpm = tpm.path_string()),
+        ]
+    );
+
+    #[cfg(unix)]
+    {
+        let w = Ws::new("flag-per-line-trees");
+        w.write(
+            "defs.bzl",
+            r##"
+def _impl(ctx):
+    tree_before = ctx.actions.declare_directory("tree_before")
+    tree_fmt = ctx.actions.declare_directory("tree_fmt")
+    tree_pos = ctx.actions.declare_directory("tree_pos")
+    ctx.actions.run_shell(
+        outputs = [tree_before, tree_fmt, tree_pos],
+        command = (
+            "mkdir -p {tb} {tf} {tp} && "
+            + ": > {tb}/a.in && : > {tb}/b.in && "
+            + ": > {tf}/c.in && : > {tp}/only.in"
+        ).format(tb = tree_before.path, tf = tree_fmt.path, tp = tree_pos.path),
+    )
+
+    tool = ctx.actions.declare_file("capture.sh")
+    out = ctx.actions.declare_file("captured.txt")
+    ctx.actions.write(
+        tool,
+        "#!/bin/sh\nset -eu\npfile=\"${1#@}\"\n{\n  printf 'ARGV:'\n  printf ' <%s>' \"$@\"\n  printf '\\nPARAMS:\\n'\n  cat \"$pfile\"\n} > " + out.path + "\n",
+        is_executable = True,
+    )
+
+    args = ctx.actions.args()
+    args.set_param_file_format("flag_per_line")
+    args.use_param_file("@%s", use_always = True)
+    args.add_all([tree_before], before_each = "--input")
+    args.add_all([tree_fmt], format_each = "--input=%s")
+    args.add_all([tree_pos])
+
+    ctx.actions.run(
+        executable = tool,
+        inputs = [tree_before, tree_fmt, tree_pos],
+        outputs = [out],
+        arguments = [args],
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+capture_rule = rule(implementation = _impl)
+"##,
+        );
+        w.write(
+            "BUILD",
+            "load(':defs.bzl', 'capture_rule')\ncapture_rule(name = 'cap')\n",
+        );
+        let (code, _stdout, stderr, _) = w.run(&["build", "//:cap"]);
+        assert_eq!(code, 0, "build failed: {stderr}");
+        let captured_path = w.ws.join("bazel-bin/captured.txt");
+        let captured = std::fs::read_to_string(&captured_path).unwrap();
+        assert!(
+            captured.contains("/tree_pos/only.in>\nPARAMS:\n"),
+            "positional tree path missing from argv: {captured}"
+        );
+        assert!(
+            captured.contains("--input=")
+                && captured.contains("/tree_before/a.in --input ")
+                && captured.contains("/tree_before/b.in\n"),
+            "before_each tree values missing from param file: {captured}"
+        );
+        assert!(
+            captured.contains("/tree_fmt/c.in\n"),
+            "format_each tree value missing from param file: {captured}"
+        );
+    }
+}

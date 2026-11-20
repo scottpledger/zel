@@ -530,7 +530,7 @@ pub fn evaluate_checked(
     for pat in includes {
         if pat.contains('?') {
             return Err(GlobEvalError::BadPattern(format!(
-                "glob pattern '{pat}' contains forbidden '?' wildcard"
+                "invalid glob pattern '{pat}': wildcard ? forbidden"
             )));
         }
         if let Some(e) = check_pattern_for_error(pat) {
