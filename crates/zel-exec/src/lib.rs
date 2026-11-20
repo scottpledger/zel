@@ -877,6 +877,8 @@ pub struct ExecOptions {
     pub explain: Option<std::path::PathBuf>,
     /// `--output_filter=<regex>`: filter action output to targets matching pattern.
     pub output_filter: Option<String>,
+    /// Pre-compiled / lazily cached `--output_filter` shared across actions in a build.
+    pub compiled_output_filter: CompiledOutputFilter,
     pub bust_action_caches: Option<String>,
     pub materialize_param_files: bool,
     pub expand_param_files: bool,
@@ -898,6 +900,54 @@ pub struct ExecOptions {
     pub action_execution_salt: String,
     /// Per-build source / non-derived input metadata cache (`SingleBuildFileCache`).
     pub file_cache: Option<Arc<file_cache::SingleBuildFileCache<'static>>>,
+}
+
+/// Shared compiled `--output_filter` cache (`OutputFilter.RegexOutputFilter`).
+///
+/// Compiles the Java regex pattern once per build / `ExecOptions` (and shares it across clones via
+/// `Arc`) rather than recompiling on every non-`TestRunner` action.
+#[derive(Debug, Clone, Default)]
+pub struct CompiledOutputFilter(
+    Arc<std::sync::OnceLock<(String, Option<zel_events::OutputFilter>)>>,
+);
+
+impl CompiledOutputFilter {
+    /// Eagerly compiles `pattern` once for reuse across all actions in an execution phase.
+    pub fn from_pattern(pattern: &str) -> Self {
+        let lock = std::sync::OnceLock::new();
+        let _ = lock.set((
+            pattern.to_string(),
+            zel_events::OutputFilter::from_regex(pattern).ok(),
+        ));
+        Self(Arc::new(lock))
+    }
+
+    /// Evaluates `tag` against `pattern`, compiling `pattern` at most once when `pattern`
+    /// matches the cached pattern string.
+    pub fn show_output(&self, pattern: &str, tag: &str) -> bool {
+        let (cached_pat, compiled) = self.0.get_or_init(|| {
+            (
+                pattern.to_string(),
+                zel_events::OutputFilter::from_regex(pattern).ok(),
+            )
+        });
+        if cached_pat == pattern {
+            match compiled {
+                Some(of) => of.show_output(tag),
+                None => tag.contains(pattern),
+            }
+        } else {
+            match zel_events::OutputFilter::from_regex(pattern) {
+                Ok(of) => of.show_output(tag),
+                Err(_) => tag.contains(pattern),
+            }
+        }
+    }
+
+    /// Returns `true` once the underlying pattern cache has been populated.
+    pub fn is_compiled(&self) -> bool {
+        self.0.get().is_some()
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -2353,17 +2403,16 @@ pub fn execute_action_with(
             },
         );
     }
-    if let Some(filter) = &opts.output_filter {
-        if action.mnemonic() != "TestRunner" {
-            let owner_str = action.owner().to_string();
-            let shown = match zel_events::OutputFilter::from_regex(filter) {
-                Ok(of) => of.show_output(&owner_str),
-                Err(_) => owner_str.contains(filter),
-            };
-            if !shown {
-                outcome.stdout.clear();
-                outcome.stderr.clear();
-            }
+    if action.mnemonic() != "TestRunner" {
+        let owner_str = action.owner().to_string();
+        let shown = if let Some(filter) = &opts.output_filter {
+            opts.compiled_output_filter.show_output(filter, &owner_str)
+        } else {
+            reporter.show_output(&owner_str)
+        };
+        if !shown {
+            outcome.stdout.clear();
+            outcome.stderr.clear();
         }
     }
     outcome.wall_time_ms = started.elapsed().as_millis() as u64;

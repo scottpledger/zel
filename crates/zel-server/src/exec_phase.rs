@@ -790,6 +790,11 @@ pub(crate) fn run_build_actions(
             proc: ProcStats::default(),
         };
     }
+    let output_filter = opt_last(parsed, "output_filter");
+    let compiled_output_filter = output_filter
+        .as_deref()
+        .map(zel_exec::CompiledOutputFilter::from_pattern)
+        .unwrap_or_default();
     let opts = ExecOptions {
         announce_subcommands: parsed.subcommands,
         config_checksums: targets
@@ -803,7 +808,8 @@ pub(crate) fn run_build_actions(
         check_up_to_date: opt_bool(parsed, "check_up_to_date", false),
         client_env: client_env.clone(),
         explain: explain_path,
-        output_filter: opt_last(parsed, "output_filter"),
+        output_filter,
+        compiled_output_filter,
         bust_action_caches: opt_last(parsed, "bust_action_caches"),
         materialize_param_files: opt_bool(parsed, "materialize_param_files", false),
         expand_param_files: opt_bool(parsed, "expand_param_files", false),
@@ -3964,7 +3970,13 @@ pub(crate) fn run_tests(
             });
             continue;
         };
-        post_test_bep_events(reporter, label, &bep_status, r);
+        post_test_bep_events(
+            reporter,
+            label,
+            &bep_status,
+            r,
+            opt_bool(parsed, "zip_undeclared_test_outputs", false),
+        );
     }
     let simple: Vec<(String, TestStatus)> =
         results.iter().map(|(l, s, _)| (l.clone(), *s)).collect();
@@ -4447,7 +4459,13 @@ fn resolve_run_under(ru: &str, input: &TestPhaseInput) -> String {
 
 /// `TestResult` per attempt and the `TestSummary` of one test target (HEAD `TestAttempt`,
 /// `TestResult`, `TestSummary` build events), announced by the target's `TargetComplete`.
-fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &TestResult) {
+fn post_test_bep_events(
+    reporter: &Reporter,
+    label: &str,
+    overall: &str,
+    r: &TestResult,
+    zip_undeclared_outputs: bool,
+) {
     use zel_events::bep::BepBuilder;
     let cfg = reporter.default_config_id();
     let dir = r
@@ -4485,16 +4503,9 @@ fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &Tes
         attempt_count = attempt_count.max(atts.len() as i32);
         for (i, a) in atts.iter().enumerate() {
             let last = i + 1 == atts.len();
-            let mut outputs = Vec::new();
-            let (log, xml) = if atts.len() > 1 && !last {
-                (
-                    ud.join(format!("test_attempts/attempt_{}.log", a.attempt)),
-                    ud.join(format!("test_attempts/attempt_{}.xml", a.attempt)),
-                )
-            } else {
-                (ud.join("test.log"), ud.join("test.xml"))
-            };
-            let log_exists = log.exists();
+            let non_last_attempt = (atts.len() > 1 && !last).then_some(a.attempt);
+            let (log_exists, outputs) =
+                collect_test_attempt_outputs(&ud, non_last_attempt, zip_undeclared_outputs, &uri);
             let st = if a.timed_out {
                 "TIMEOUT"
             } else if a.exit_code == 0 && !log_exists {
@@ -4504,68 +4515,6 @@ fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &Tes
             } else {
                 "FAILED"
             };
-            if log_exists {
-                outputs.push(("test.log".to_string(), uri(&log)));
-            }
-            if xml.exists() {
-                outputs.push(("test.xml".to_string(), uri(&xml)));
-            }
-            if last {
-                let cov = ud.join("coverage.dat");
-                let lcov = ud.join("test.lcov");
-                if cov.exists() {
-                    outputs.push(("test.lcov".to_string(), uri(&cov)));
-                } else if lcov.exists() {
-                    outputs.push(("test.lcov".to_string(), uri(&lcov)));
-                }
-                let zip_out = ud.join("test.outputs/outputs.zip");
-                let manifest_out = ud.join("test.outputs/MANIFEST");
-                if zip_out.exists() {
-                    outputs.push(("test.outputs__outputs.zip".to_string(), uri(&zip_out)));
-                    if manifest_out.exists() {
-                        outputs.push((
-                            "test.outputs_manifest__MANIFEST".to_string(),
-                            uri(&manifest_out),
-                        ));
-                    }
-                } else {
-                    let outputs_dir = ud.join("test.outputs");
-                    if outputs_dir.is_dir() {
-                        fn walk_undeclared(
-                            base: &std::path::Path,
-                            cur: &std::path::Path,
-                            uri_fn: &dyn Fn(&std::path::Path) -> String,
-                            out: &mut Vec<(String, String)>,
-                        ) {
-                            let Ok(rd) = std::fs::read_dir(cur) else {
-                                return;
-                            };
-                            let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
-                            entries.sort_by_key(|e| e.file_name());
-                            for ent in entries {
-                                let p = ent.path();
-                                if p.is_dir() {
-                                    walk_undeclared(base, &p, uri_fn, out);
-                                } else if let Ok(rel) = p.strip_prefix(base) {
-                                    let rel_s = rel.to_string_lossy().replace('\\', "/");
-                                    out.push((format!("test.outputs__{rel_s}"), uri_fn(&p)));
-                                }
-                            }
-                        }
-                        walk_undeclared(&outputs_dir, &outputs_dir, &uri, &mut outputs);
-                    }
-                }
-                for extra_name in [
-                    "test.warnings",
-                    "test.unused_runfiles_log",
-                    "test.infrastructure_failure",
-                ] {
-                    let ep = ud.join(extra_name);
-                    if ep.exists() {
-                        outputs.push((extra_name.to_string(), uri(&ep)));
-                    }
-                }
-            }
             let node = BepBuilder::test_result(
                 label,
                 &cfg,
@@ -4614,6 +4563,128 @@ fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &Tes
     reporter.post_bep_node(node);
 }
 
+/// Collects BEP `test_action_output` `(name, uri)` entries for one test attempt, matching
+/// `TestRunnerAction.getTestOutputsMapping`, `TestFileNameConstants`, and
+/// `StandaloneTestStrategy.renameOutputs` (`TestAttempt.asTestResult`).
+pub(crate) fn collect_test_attempt_outputs(
+    ud: &std::path::Path,
+    non_last_attempt: Option<u32>,
+    zip_undeclared_outputs: bool,
+    uri: &dyn Fn(&std::path::Path) -> String,
+) -> (bool, Vec<(String, String)>) {
+    let mapped = |rel: &str| -> PathBuf {
+        match non_last_attempt {
+            None => ud.join(rel),
+            Some(att) => {
+                if rel == "test.log" {
+                    ud.join(format!("test_attempts/attempt_{att}.log"))
+                } else {
+                    ud.join("test_attempts").join(rel.replacen(
+                        "test",
+                        &format!("attempt_{att}"),
+                        1,
+                    ))
+                }
+            }
+        }
+    };
+    let mut outputs = Vec::new();
+    let log = mapped("test.log");
+    let log_exists = log.exists();
+    if log_exists {
+        outputs.push(("test.log".to_string(), uri(&log)));
+    }
+    if non_last_attempt.is_none() {
+        let cov = ud.join("coverage.dat");
+        let lcov = ud.join("test.lcov");
+        if cov.exists() {
+            outputs.push(("test.lcov".to_string(), uri(&cov)));
+        } else if lcov.exists() {
+            outputs.push(("test.lcov".to_string(), uri(&lcov)));
+        }
+    }
+    let stderr_out = mapped("test.err");
+    if stderr_out.exists() {
+        outputs.push(("test.stderr".to_string(), uri(&stderr_out)));
+    }
+    let xml = mapped("test.xml");
+    if xml.exists() {
+        outputs.push(("test.xml".to_string(), uri(&xml)));
+    }
+    let splitlogs = mapped("test.raw_splitlogs/test.splitlogs");
+    if splitlogs.exists() {
+        outputs.push(("test.splitlogs".to_string(), uri(&splitlogs)));
+    }
+    let warnings = mapped("test.warnings");
+    if warnings.exists() {
+        outputs.push(("test.warnings".to_string(), uri(&warnings)));
+    }
+    let outputs_dir = mapped("test.outputs");
+    if zip_undeclared_outputs {
+        let zip_out = outputs_dir.join("outputs.zip");
+        if zip_out.exists() {
+            outputs.push(("test.outputs__outputs.zip".to_string(), uri(&zip_out)));
+        }
+    } else if outputs_dir.is_dir() {
+        // `TestRunnerAction.addAllFilesInUndeclaredOutputsDirectory`: BFS queue with sorted
+        // directory entries (`Symlinks.FOLLOW`), naming each file `test.outputs/<rel_path>`.
+        let mut dirs_to_visit = std::collections::VecDeque::new();
+        let mut visited_canon = std::collections::HashSet::new();
+        if let Ok(canon) = std::fs::canonicalize(&outputs_dir) {
+            visited_canon.insert(canon);
+        }
+        dirs_to_visit.push_back(outputs_dir.clone());
+        while let Some(cur) = dirs_to_visit.pop_front() {
+            let Ok(rd) = std::fs::read_dir(&cur) else {
+                continue;
+            };
+            let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+            entries.sort_by_key(|e| e.file_name());
+            for ent in entries {
+                let child = ent.path();
+                let Ok(md) = std::fs::metadata(&child) else {
+                    continue;
+                };
+                if md.is_dir() {
+                    if let Ok(canon) = std::fs::canonicalize(&child) {
+                        if !visited_canon.insert(canon) {
+                            continue;
+                        }
+                    }
+                    dirs_to_visit.push_back(child);
+                } else if md.is_file() {
+                    if let Ok(rel) = child.strip_prefix(&outputs_dir) {
+                        let rel_s = rel.to_string_lossy().replace('\\', "/");
+                        outputs.push((format!("test.outputs/{rel_s}"), uri(&child)));
+                    }
+                }
+            }
+        }
+    }
+    for (bep_name, rel_path) in [
+        (
+            "test.outputs_manifest__MANIFEST",
+            "test.outputs_manifest/MANIFEST",
+        ),
+        (
+            "test.outputs_manifest__ANNOTATIONS",
+            "test.outputs_manifest/ANNOTATIONS",
+        ),
+        (
+            "test.outputs_manifest__ANNOTATIONS.pb",
+            "test.outputs_manifest/ANNOTATIONS.pb",
+        ),
+        ("test.unused_runfiles_log", "test.unused_runfiles_log"),
+        ("test.infrastructure_failure", "test.infrastructure_failure"),
+    ] {
+        let p = mapped(rel_path);
+        if p.exists() {
+            outputs.push((bep_name.to_string(), uri(&p)));
+        }
+    }
+    (log_exists, outputs)
+}
+
 /// `(runs, shards)` of a test target: the `testResult` ids announced by its `TargetComplete`.
 pub(crate) fn test_unit_grid(
     target: &zel_packages::Target,
@@ -4626,4 +4697,148 @@ pub(crate) fn test_unit_grid(
     let shards = effective_shard_count(attrs.shard_count, strategy.as_deref())
         .unwrap_or(attrs.shard_count) as i32;
     (runs.max(1), shards.max(1))
+}
+
+#[cfg(test)]
+mod test_bep_outputs_tests {
+    use super::collect_test_attempt_outputs;
+
+    #[test]
+    fn test_attempt_outputs_match_bazel_test_file_name_constants() {
+        let dir = std::env::temp_dir().join(format!(
+            "zel-bep-test-outputs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("test.outputs/nested/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("test.outputs_manifest")).unwrap();
+        std::fs::create_dir_all(dir.join("test.raw_splitlogs")).unwrap();
+        std::fs::write(dir.join("test.log"), b"pass\n").unwrap();
+        std::fs::write(dir.join("test.err"), b"stderr\n").unwrap();
+        std::fs::write(dir.join("test.xml"), b"<testsuites/>\n").unwrap();
+        std::fs::write(dir.join("coverage.dat"), b"TN:\n").unwrap();
+        std::fs::write(dir.join("test.raw_splitlogs/test.splitlogs"), b"split").unwrap();
+        std::fs::write(dir.join("test.warnings"), b"warn\n").unwrap();
+        std::fs::write(dir.join("test.outputs/alpha.txt"), b"a").unwrap();
+        std::fs::write(dir.join("test.outputs/nested/beta.txt"), b"b").unwrap();
+        std::fs::write(dir.join("test.outputs/nested/sub/gamma.json"), b"{}").unwrap();
+        std::fs::write(
+            dir.join("test.outputs_manifest/MANIFEST"),
+            b"alpha.txt\t1\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("test.outputs_manifest/ANNOTATIONS"), b"note").unwrap();
+        std::fs::write(
+            dir.join("test.outputs_manifest/ANNOTATIONS.pb"),
+            b"\x08\x01",
+        )
+        .unwrap();
+        std::fs::write(dir.join("test.unused_runfiles_log"), b"unused\n").unwrap();
+        std::fs::write(dir.join("test.infrastructure_failure"), b"").unwrap();
+
+        let rel_uri = |p: &std::path::Path| {
+            p.strip_prefix(&dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        };
+
+        // 1. `--nozip_undeclared_test_outputs` (Bazel default): `test.outputs/<rel>` with slashes,
+        // BFS directory order, plus `test.outputs_manifest__*` with double underscores.
+        let (log_ok, nozip) = collect_test_attempt_outputs(&dir, None, false, &rel_uri);
+        assert!(log_ok);
+        assert_eq!(
+            nozip,
+            vec![
+                ("test.log".into(), "test.log".into()),
+                ("test.lcov".into(), "coverage.dat".into()),
+                ("test.stderr".into(), "test.err".into()),
+                ("test.xml".into(), "test.xml".into()),
+                (
+                    "test.splitlogs".into(),
+                    "test.raw_splitlogs/test.splitlogs".into()
+                ),
+                ("test.warnings".into(), "test.warnings".into()),
+                (
+                    "test.outputs/alpha.txt".into(),
+                    "test.outputs/alpha.txt".into()
+                ),
+                (
+                    "test.outputs/nested/beta.txt".into(),
+                    "test.outputs/nested/beta.txt".into()
+                ),
+                (
+                    "test.outputs/nested/sub/gamma.json".into(),
+                    "test.outputs/nested/sub/gamma.json".into()
+                ),
+                (
+                    "test.outputs_manifest__MANIFEST".into(),
+                    "test.outputs_manifest/MANIFEST".into()
+                ),
+                (
+                    "test.outputs_manifest__ANNOTATIONS".into(),
+                    "test.outputs_manifest/ANNOTATIONS".into()
+                ),
+                (
+                    "test.outputs_manifest__ANNOTATIONS.pb".into(),
+                    "test.outputs_manifest/ANNOTATIONS.pb".into()
+                ),
+                (
+                    "test.unused_runfiles_log".into(),
+                    "test.unused_runfiles_log".into()
+                ),
+                (
+                    "test.infrastructure_failure".into(),
+                    "test.infrastructure_failure".into()
+                ),
+            ]
+        );
+
+        // 2. `--zip_undeclared_test_outputs`: `test.outputs__outputs.zip` and
+        // `test.outputs_manifest__*` use `TestFileNameConstants` double underscores.
+        std::fs::write(dir.join("test.outputs/outputs.zip"), b"PK\x05\x06").unwrap();
+        let (_, zipped) = collect_test_attempt_outputs(&dir, None, true, &rel_uri);
+        let zipped_names: Vec<&str> = zipped.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(zipped_names.contains(&"test.outputs__outputs.zip"));
+        assert!(zipped_names.contains(&"test.outputs_manifest__MANIFEST"));
+        assert!(zipped_names.contains(&"test.outputs_manifest__ANNOTATIONS"));
+        assert!(zipped_names.contains(&"test.outputs_manifest__ANNOTATIONS.pb"));
+        assert!(!zipped_names.iter().any(|n| n.starts_with("test.outputs/")));
+
+        // 3. Non-last flaky attempt (`StandaloneTestStrategy.renameOutputs`): `test_attempts/attempt_1.*`
+        // keeps identical `TestFileNameConstants` keys.
+        std::fs::create_dir_all(dir.join("test_attempts/attempt_1.outputs/sub")).unwrap();
+        std::fs::create_dir_all(dir.join("test_attempts/attempt_1.outputs_manifest")).unwrap();
+        std::fs::write(dir.join("test_attempts/attempt_1.log"), b"fail\n").unwrap();
+        std::fs::write(dir.join("test_attempts/attempt_1.xml"), b"<fail/>\n").unwrap();
+        std::fs::write(dir.join("test_attempts/attempt_1.outputs/sub/f.txt"), b"x").unwrap();
+        std::fs::write(
+            dir.join("test_attempts/attempt_1.outputs_manifest/MANIFEST"),
+            b"sub/f.txt\t1\n",
+        )
+        .unwrap();
+        let (att_log_ok, att_nozip) = collect_test_attempt_outputs(&dir, Some(1), false, &rel_uri);
+        assert!(att_log_ok);
+        assert_eq!(
+            att_nozip,
+            vec![
+                ("test.log".into(), "test_attempts/attempt_1.log".into()),
+                ("test.xml".into(), "test_attempts/attempt_1.xml".into()),
+                (
+                    "test.outputs/sub/f.txt".into(),
+                    "test_attempts/attempt_1.outputs/sub/f.txt".into()
+                ),
+                (
+                    "test.outputs_manifest__MANIFEST".into(),
+                    "test_attempts/attempt_1.outputs_manifest/MANIFEST".into()
+                ),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

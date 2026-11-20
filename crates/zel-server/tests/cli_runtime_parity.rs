@@ -884,3 +884,86 @@ fn fetch_vendor_client_cwd_pattern_file_and_empty_to_null_path_override() {
         "empty --execution_log_json_file= override must clear earlier path to null"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_bep_undeclared_outputs_zip_and_nozip_names() {
+    let w = make_ws("test-bep-undeclared-names");
+    w.write(
+        "p/BUILD",
+        "load(\"@rules_shell//shell:sh_test.bzl\", \"sh_test\")\nsh_test(name = \"u\", srcs = [\"u.sh\"])\n",
+    );
+    w.write(
+        "p/u.sh",
+        concat!(
+            "#!/bin/sh\n",
+            "set -eu\n",
+            "mkdir -p \"$TEST_UNDECLARED_OUTPUTS_DIR/sub\"\n",
+            "printf 'top' > \"$TEST_UNDECLARED_OUTPUTS_DIR/top.txt\"\n",
+            "printf 'nested' > \"$TEST_UNDECLARED_OUTPUTS_DIR/sub/nested.txt\"\n",
+            "printf 'annot' > \"$TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR/a.part\"\n",
+        ),
+    );
+
+    let bep_nozip = w.ws.join("bep-nozip.json");
+    let r_nozip = w.run(&[
+        "test",
+        "--nocache_test_results",
+        "--nozip_undeclared_test_outputs",
+        &format!("--build_event_json_file={}", bep_nozip.display()),
+        "//p:u",
+    ]);
+    assert_eq!(r_nozip.code, 0, "{}", r_nozip.err);
+    let nozip_txt = std::fs::read_to_string(&bep_nozip).unwrap();
+    assert!(
+        nozip_txt.contains("\"name\":\"test.outputs/top.txt\"")
+            || nozip_txt.contains("\"name\": \"test.outputs/top.txt\""),
+        "expected test.outputs/top.txt in BEP JSON, got:\n{nozip_txt}"
+    );
+    assert!(
+        nozip_txt.contains("\"name\":\"test.outputs/sub/nested.txt\"")
+            || nozip_txt.contains("\"name\": \"test.outputs/sub/nested.txt\""),
+        "expected test.outputs/sub/nested.txt in BEP JSON, got:\n{nozip_txt}"
+    );
+    assert!(
+        nozip_txt.contains("test.outputs_manifest__MANIFEST"),
+        "expected test.outputs_manifest__MANIFEST in BEP JSON, got:\n{nozip_txt}"
+    );
+    assert!(
+        nozip_txt.contains("test.outputs_manifest__ANNOTATIONS"),
+        "expected test.outputs_manifest__ANNOTATIONS in BEP JSON, got:\n{nozip_txt}"
+    );
+    assert!(
+        !nozip_txt.contains("test.outputs__top.txt")
+            && !nozip_txt.contains("test.outputs__sub/nested.txt"),
+        "unzipped undeclared outputs must not use double underscores:\n{nozip_txt}"
+    );
+
+    let bep_zip = w.ws.join("bep-zip.json");
+    let r_zip = w.run(&[
+        "test",
+        "--nocache_test_results",
+        "--zip_undeclared_test_outputs",
+        &format!("--build_event_json_file={}", bep_zip.display()),
+        "//p:u",
+    ]);
+    assert_eq!(r_zip.code, 0, "{}", r_zip.err);
+    let zip_txt = std::fs::read_to_string(&bep_zip).unwrap();
+    assert!(
+        zip_txt.contains("test.outputs__outputs.zip"),
+        "expected test.outputs__outputs.zip in BEP JSON, got:\n{zip_txt}"
+    );
+    assert!(
+        zip_txt.contains("test.outputs_manifest__MANIFEST"),
+        "expected test.outputs_manifest__MANIFEST in BEP JSON, got:\n{zip_txt}"
+    );
+    assert!(
+        zip_txt.contains("test.outputs_manifest__ANNOTATIONS"),
+        "expected test.outputs_manifest__ANNOTATIONS in BEP JSON, got:\n{zip_txt}"
+    );
+    assert!(
+        !zip_txt.contains("\"name\":\"test.outputs/")
+            && !zip_txt.contains("\"name\": \"test.outputs/"),
+        "zipped undeclared outputs must not emit individual test.outputs/* entries:\n{zip_txt}"
+    );
+}

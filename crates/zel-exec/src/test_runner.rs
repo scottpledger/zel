@@ -804,6 +804,13 @@ fn run_attempt(
         outputs.push(rel_exec(&dir.join("coverage.dat")));
         outputs.push(rel_exec(&dir.join("_coverage")));
     }
+    outputs.push(rel_exec(&dir.join("test.warnings")));
+    outputs.push(rel_exec(&dir.join("test.raw_splitlogs/test.splitlogs")));
+    outputs.push(rel_exec(&dir.join("test.unused_runfiles_log")));
+    outputs.push(rel_exec(&dir.join("test.err")));
+    outputs.push(rel_exec(&dir.join("test.outputs_manifest/MANIFEST")));
+    outputs.push(rel_exec(&dir.join("test.outputs_manifest/ANNOTATIONS")));
+    outputs.push(rel_exec(&dir.join("test.outputs_manifest/ANNOTATIONS.pb")));
     let optional_outputs = outputs.clone();
     let sp = Spawn {
         mnemonic: "TestRunner".into(),
@@ -1219,6 +1226,21 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 base
             };
             std::fs::create_dir_all(&base)?;
+            for stale_dir in [
+                "test.outputs",
+                "test.outputs_manifest",
+                "test.raw_splitlogs",
+            ] {
+                let _ = std::fs::remove_dir_all(base.join(stale_dir));
+            }
+            for stale_file in [
+                "test.warnings",
+                "test.unused_runfiles_log",
+                "test.infrastructure_failure",
+                "test.err",
+            ] {
+                let _ = std::fs::remove_file(base.join(stale_file));
+            }
             let _ = std::fs::create_dir_all(base.join("test.outputs_manifest"));
             let _ = std::fs::create_dir_all(base.join("test.raw_splitlogs"));
             let max_attempts = spec.flaky_attempts.max(1);
@@ -1303,6 +1325,24 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                         if std::fs::copy(&cov, &dst).is_ok() {
                             coverage_files.push(dst);
                         }
+                    }
+                }
+                for extra_dir in ["test.outputs_manifest", "test.raw_splitlogs"] {
+                    let src_d = adir.join(extra_dir);
+                    if src_d.is_dir() {
+                        let _ = std::fs::remove_dir_all(base.join(extra_dir));
+                        let _ = copy_dir(&src_d, &base.join(extra_dir));
+                    }
+                }
+                for extra_file in [
+                    "test.warnings",
+                    "test.unused_runfiles_log",
+                    "test.infrastructure_failure",
+                    "test.err",
+                ] {
+                    let src_f = adir.join(extra_file);
+                    if src_f.exists() {
+                        let _ = std::fs::copy(&src_f, base.join(extra_file));
                     }
                 }
                 let stop_unit = pass || r.sharding_unsupported;

@@ -1296,3 +1296,113 @@ fn streamed_test_output_emits_full_trailers_after_setup_line_cleaning() {
         "expected full sharding diagnostic trailer in streamed output, got: {out2:?}"
     );
 }
+
+#[test]
+fn output_filter_compiled_once_and_applied_across_multiple_actions() {
+    let w = ws("output-filter-multi");
+    let cache = CompactPersistentActionCache::new();
+    let fs = LocalFileSystem::default();
+    let rt = runtime(&w, StrategyOptions::default(), 4.0);
+
+    let mk_action = |owner: &str, mnemonic: &str, out_name: &str| {
+        let owner_lbl = Label::parse_canonical(owner).unwrap();
+        let art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create(out_name),
+            owner_lbl.clone(),
+        );
+        ActionAnalysisMetadata::SpawnAction {
+            owner: owner_lbl,
+            mnemonic: mnemonic.into(),
+            progress_message: format!("Doing {mnemonic} {owner}"),
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "echo out-{out_name}; echo err-{out_name} >&2; echo ok > {}",
+                    art.exec_path.path_string()
+                ),
+            ],
+            env: BTreeMap::new(),
+            inherited_env: Default::default(),
+            unset_env: Default::default(),
+            inputs: Vec::new(),
+            outputs: vec![art],
+            execution_info: BTreeMap::from([("local".into(), String::new())]),
+            tools: Vec::new(),
+            java_compile: None,
+        }
+    };
+
+    // 1. Lazy compilation via `ExecOptions { output_filter: Some(...), ..Default::default() }`
+    // populates the shared `CompiledOutputFilter` once and reuses it across clones and actions.
+    let opts = ExecOptions {
+        runtime: Some(rt.clone()),
+        output_filter: Some("^//keep:(alpha|gamma)$".into()),
+        ..Default::default()
+    };
+    assert!(!opts.compiled_output_filter.is_compiled());
+    let cloned_opts = opts.clone();
+    let reporter = Reporter::new();
+
+    let a_match1 = mk_action("//keep:alpha", "Genrule", "keep/a.out");
+    let a_drop = mk_action("//drop:beta", "Genrule", "drop/b.out");
+    let a_match2 = mk_action("//keep:gamma", "Genrule", "keep/c.out");
+    let a_test = mk_action("//drop:unit_test", "TestRunner", "drop/t.out");
+
+    let r1 = execute_action_with(&a_match1, &w.execroot, &fs, &cache, &reporter, &opts).unwrap();
+    assert!(opts.compiled_output_filter.is_compiled());
+    // Cloned `ExecOptions` shares the exact same `Arc<OnceLock<...>>` cache.
+    assert!(cloned_opts.compiled_output_filter.is_compiled());
+    assert_eq!(String::from_utf8_lossy(&r1.stdout).trim(), "out-keep/a.out");
+    assert_eq!(String::from_utf8_lossy(&r1.stderr).trim(), "err-keep/a.out");
+
+    let r2 =
+        execute_action_with(&a_drop, &w.execroot, &fs, &cache, &reporter, &cloned_opts).unwrap();
+    assert!(r2.stdout.is_empty(), "expected filtered stdout to be empty");
+    assert!(r2.stderr.is_empty(), "expected filtered stderr to be empty");
+
+    let r3 =
+        execute_action_with(&a_match2, &w.execroot, &fs, &cache, &reporter, &cloned_opts).unwrap();
+    assert_eq!(String::from_utf8_lossy(&r3.stdout).trim(), "out-keep/c.out");
+    assert_eq!(String::from_utf8_lossy(&r3.stderr).trim(), "err-keep/c.out");
+
+    // `TestRunnerAction.showsOutputUnconditionally()` bypasses `--output_filter`.
+    let r4 =
+        execute_action_with(&a_test, &w.execroot, &fs, &cache, &reporter, &cloned_opts).unwrap();
+    assert_eq!(String::from_utf8_lossy(&r4.stdout).trim(), "out-drop/t.out");
+    assert_eq!(String::from_utf8_lossy(&r4.stderr).trim(), "err-drop/t.out");
+
+    // 2. Eager pre-compilation via `CompiledOutputFilter::from_pattern` + `Reporter` fallback.
+    let precompiled = CompiledOutputFilter::from_pattern("//eager:.*");
+    assert!(precompiled.is_compiled());
+    assert!(precompiled.show_output("//eager:.*", "//eager:target"));
+    assert!(!precompiled.show_output("//eager:.*", "//other:target"));
+
+    let rep_filtered = Reporter::new();
+    rep_filtered.set_output_filter(zel_events::OutputFilter::from_regex("^//rep:ok$").unwrap());
+    let opts_via_reporter = ExecOptions {
+        runtime: Some(rt),
+        ..Default::default()
+    };
+    let r5 = execute_action_with(
+        &mk_action("//rep:skip", "Genrule", "rep/skip.out"),
+        &w.execroot,
+        &fs,
+        &cache,
+        &rep_filtered,
+        &opts_via_reporter,
+    )
+    .unwrap();
+    assert!(r5.stdout.is_empty() && r5.stderr.is_empty());
+    let r6 = execute_action_with(
+        &mk_action("//rep:ok", "Genrule", "rep/ok.out"),
+        &w.execroot,
+        &fs,
+        &cache,
+        &rep_filtered,
+        &opts_via_reporter,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&r6.stdout).trim(), "out-rep/ok.out");
+}
