@@ -241,6 +241,97 @@ impl ParsedCommandOptions {
         )
     }
 
+    /// Best-effort variant of [`Self::parse_for_command`]: runs normal parsing first, and if any
+    /// option or config fails to parse, re-parses leniently skipping invalid tokens so valid
+    /// observability/BES/TLS/auth/metadata options are still extracted.
+    pub fn parse_for_command_best_effort(command: &str, args: &[String]) -> Self {
+        if let Ok(parsed) = Self::parse_for_command(command, args) {
+            return parsed;
+        }
+        let mut opts = Self::default();
+        let mut initial_client_env = Self::extract_client_env(args);
+        opts.user_home = resolve_user_home(Some(&initial_client_env));
+
+        let has_rc_partition = args.iter().any(|a| {
+            a == "--rc_source"
+                || a == "--default_override"
+                || a.starts_with("--rc_source=")
+                || a.starts_with("--default_override=")
+        });
+
+        let effective_args_owned;
+        let effective_args: &[String] = if has_rc_partition {
+            let mut override_rc = crate::rc::BazelrcConfig::default();
+            match crate::rc::partition_rc_sources_and_apply(&mut override_rc, args) {
+                Ok(remaining) => {
+                    if !override_rc.sections.is_empty() {
+                        let rc_expanded = crate::config_expander::expand_command_args_best_effort(
+                            &override_rc,
+                            command,
+                            &[],
+                        );
+                        if !rc_expanded.is_empty() {
+                            let mut rc_env = Self::extract_client_env(&rc_expanded);
+                            rc_env.extend(initial_client_env.clone());
+                            initial_client_env = rc_env;
+                            opts.user_home = resolve_user_home(Some(&initial_client_env));
+                            let rc_prio =
+                                OptionPriority::lowest_at_category(PriorityCategory::RcFile);
+                            let _ = opts.parse_into_mode(
+                                command,
+                                &rc_expanded,
+                                rc_prio,
+                                "rc_override",
+                                None,
+                                None,
+                                true,
+                            );
+                        }
+                        let has_cli_config = remaining
+                            .iter()
+                            .take_while(|a| a.as_str() != "--")
+                            .any(|a| a == "--config" || a.starts_with("--config="));
+                        if has_cli_config {
+                            effective_args_owned =
+                                crate::config_expander::expand_cli_configs_only_best_effort(
+                                    &override_rc,
+                                    command,
+                                    &remaining,
+                                );
+                            initial_client_env
+                                .extend(Self::extract_client_env(&effective_args_owned));
+                            opts.user_home = resolve_user_home(Some(&initial_client_env));
+                        } else {
+                            effective_args_owned = remaining;
+                        }
+                    } else {
+                        effective_args_owned = remaining;
+                    }
+                    &effective_args_owned
+                }
+                Err(_) => args,
+            }
+        } else {
+            args
+        };
+
+        let priority = OptionPriority::lowest_at_category(PriorityCategory::CommandLine);
+        if let Ok((pre, post)) = opts.parse_into_mode(
+            command,
+            effective_args,
+            priority,
+            "command line",
+            None,
+            None,
+            true,
+        ) {
+            opts.pre_double_dash_residue = pre;
+            opts.post_double_dash_residue = post;
+        }
+        let _ = opts.apply_edit_options(command);
+        opts
+    }
+
     /// Parses command-line arguments without `editOptions` or invocation policy (for `canonicalize-flags`).
     pub fn parse_for_command_no_edit(
         command: &str,
@@ -592,10 +683,32 @@ impl ParsedCommandOptions {
         &mut self,
         command: &str,
         args: &[String],
+        priority: OptionPriority,
+        source: &str,
+        implicit_dependent: Option<&'static str>,
+        expanded_from: Option<&'static str>,
+    ) -> Result<(Vec<String>, Vec<String>), OptionsParsingError> {
+        self.parse_into_mode(
+            command,
+            args,
+            priority,
+            source,
+            implicit_dependent,
+            expanded_from,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn parse_into_mode(
+        &mut self,
+        command: &str,
+        args: &[String],
         mut priority: OptionPriority,
         source: &str,
         implicit_dependent: Option<&'static str>,
         expanded_from: Option<&'static str>,
+        lenient: bool,
     ) -> Result<(Vec<String>, Vec<String>), OptionsParsingError> {
         let cmd_map = get_command_options_map();
         let abbrev_map = get_command_abbrev_map();
@@ -618,6 +731,10 @@ impl ParsedCommandOptions {
             if (raw_arg.starts_with("-//") || raw_arg.starts_with("-@"))
                 && !raw_arg.starts_with("--")
             {
+                if lenient {
+                    i += 1;
+                    continue;
+                }
                 return Err(OptionsParsingError::new(format!(
                     "Invalid options syntax: {raw_arg}\nNote: Negative target patterns can only appear after the end of options marker ('--'). Flags corresponding to Starlark-defined build settings always start with '--', not '-'."
                 )));
@@ -650,12 +767,15 @@ impl ParsedCommandOptions {
                 } else {
                     arg.to_string()
                 };
-                if let Some(rewritten) = try_rewrite_command_line_option(&candidate)? {
-                    rewritten_native = rewritten;
-                    from_command_line_option_label = true;
-                    rewritten_native.as_str()
-                } else {
-                    arg
+                match try_rewrite_command_line_option(&candidate) {
+                    Ok(Some(rewritten)) => {
+                        rewritten_native = rewritten;
+                        from_command_line_option_label = true;
+                        rewritten_native.as_str()
+                    }
+                    Ok(None) => arg,
+                    Err(_) if lenient => arg,
+                    Err(e) => return Err(e),
                 }
             } else {
                 arg
@@ -724,7 +844,13 @@ impl ParsedCommandOptions {
 
             // `OptionsParserImpl.identifyOptionAndPossibleArgument`: only `-x`, `-x-` and
             // `--long[=value]` are valid shapes.
-            check_arg_syntax(arg)?;
+            if let Err(e) = check_arg_syntax(arg) {
+                if lenient {
+                    i += 1;
+                    continue;
+                }
+                return Err(e);
+            }
 
             // 4. Identify OptionDefinition (long flag, boolean `no` prefix, or abbrev)
             let (lookup_name, inline_value, is_negated_bool, _is_abbrev) =
@@ -776,12 +902,20 @@ impl ParsedCommandOptions {
                 if let Some(rest) = arg[2..name_end].strip_prefix("no") {
                     if let Some(d) = cmd_map.get(rest) {
                         if !d.uses_boolean_syntax() {
+                            if lenient {
+                                i += 1;
+                                continue;
+                            }
                             return Err(OptionsParsingError::with_arg(
                                 format!("Illegal use of 'no' prefix on non-boolean option: {arg}"),
                                 arg,
                             ));
                         }
                         if name_end != arg.len() {
+                            if lenient {
+                                i += 1;
+                                continue;
+                            }
                             return Err(OptionsParsingError::with_arg(
                                 format!("Unexpected value after boolean option: {arg}"),
                                 arg,
@@ -792,6 +926,10 @@ impl ParsedCommandOptions {
             }
 
             let Some(def) = cmd_map.get(lookup_name.as_str()) else {
+                if lenient {
+                    i += 1;
+                    continue;
+                }
                 let mut storage = Vec::new();
                 let valid_names =
                     get_valid_option_names(command, allowed_classes.as_ref(), &mut storage);
@@ -822,6 +960,10 @@ impl ParsedCommandOptions {
 
             // Check if option is allowed on the current command
             if !def.commands.is_empty() && !is_command_allowed(command, def) {
+                if lenient {
+                    i += 1;
+                    continue;
+                }
                 let mut storage = Vec::new();
                 let valid_names =
                     get_valid_option_names(command, allowed_classes.as_ref(), &mut storage);
@@ -843,6 +985,10 @@ impl ParsedCommandOptions {
             } else if def.option_type == OptionType::Void {
                 ("".to_string(), 1)
             } else if from_command_line_option_label {
+                if lenient {
+                    i += 1;
+                    continue;
+                }
                 let mut msg = format!("Expected value after {raw_arg}");
                 if let Some(nxt) = args.get(i + 1).filter(|s| !s.starts_with('-')) {
                     msg.push_str(&format!(". Did you mean {raw_arg}={nxt}?"));
@@ -850,9 +996,17 @@ impl ParsedCommandOptions {
                 return Err(OptionsParsingError::new(msg));
             } else {
                 if i + 1 >= args.len() {
+                    if lenient {
+                        i += 1;
+                        continue;
+                    }
                     return Err(OptionsParsingError::new(format!(
                         "Expected value after {arg}"
                     )));
+                }
+                if lenient && def.name == "config" && args[i + 1].starts_with('-') {
+                    i += 1;
+                    continue;
                 }
                 (args[i + 1].clone(), 2)
             };
@@ -873,7 +1027,15 @@ impl ParsedCommandOptions {
                             ));
                         }
                     }
-                    let child_p = priority.get_child_priority()?;
+                    let child_p = match priority.get_child_priority() {
+                        Ok(p) => p,
+                        Err(_) if lenient => {
+                            priority = priority.next();
+                            i += consumed;
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    };
                     let exp_source = if source.is_empty() {
                         format!("expanded from option '--{}'", def.name)
                     } else {
@@ -881,21 +1043,25 @@ impl ParsedCommandOptions {
                     };
                     let exp_vec: Vec<String> =
                         expansion_args.iter().map(|s| (*s).to_string()).collect();
-                    let (sub_pre, sub_post) = self.parse_into(
+                    let sub_res = self.parse_into_mode(
                         command,
                         &exp_vec,
                         child_p,
                         &exp_source,
                         None,
                         Some(def.name),
-                    )?;
-                    if !sub_pre.is_empty() || !sub_post.is_empty() {
-                        let mut rem = sub_pre;
-                        rem.extend(sub_post);
-                        return Err(OptionsParsingError::new(format!(
-                            "Unparsed options remain after processing {raw_value}: {}",
-                            rem.join(" ")
-                        )));
+                        lenient,
+                    );
+                    if !lenient {
+                        let (sub_pre, sub_post) = sub_res?;
+                        if !sub_pre.is_empty() || !sub_post.is_empty() {
+                            let mut rem = sub_pre;
+                            rem.extend(sub_post);
+                            return Err(OptionsParsingError::new(format!(
+                                "Unparsed options remain after processing {raw_value}: {}",
+                                rem.join(" ")
+                            )));
+                        }
                     }
                     priority = priority.next();
                     i += consumed;
@@ -909,19 +1075,36 @@ impl ParsedCommandOptions {
             if def.option_type == OptionType::Void && !def.is_expansion() {
                 if let Some(ref v) = inline_value {
                     if !is_negated_bool && v != "null" {
+                        if lenient {
+                            i += consumed;
+                            continue;
+                        }
                         return Err(OptionsParsingError::new(format!(
                             "While parsing option {command_line_form}: '{v}' unexpected"
                         )));
                     }
                 }
             }
-            let converted = convert_option_with_home(&raw_value, def, self.user_home.as_deref())
-                .map_err(|e| {
-                    OptionsParsingError::new(format!(
-                        "While parsing option {command_line_form}: {}",
-                        e.message
-                    ))
-                })?;
+            let converted =
+                match convert_option_with_home(&raw_value, def, self.user_home.as_deref()) {
+                    Ok(v) => v,
+                    Err(_) if lenient => {
+                        if consumed == 2
+                            && args.get(i + 1).is_some_and(|next| next.starts_with('-'))
+                        {
+                            i += 1;
+                        } else {
+                            i += consumed;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(OptionsParsingError::new(format!(
+                            "While parsing option {command_line_form}: {}",
+                            e.message
+                        )));
+                    }
+                };
 
             // Register flag alias mappings (used by `swap_shorthand_alias`).
             if def.name == "flag_alias" && implicit_dependent.is_none() {
@@ -1073,35 +1256,45 @@ impl ParsedCommandOptions {
                         }
                     }
                 }
-                let child_p = priority.get_child_priority()?;
-                let req_source = if source.is_empty() {
-                    format!("implicit requirement of option '--{}'", def.name)
-                } else {
-                    format!(
-                        "implicit requirement of option '--{}' (source {source})",
-                        def.name
-                    )
+                let child_p = match priority.get_child_priority() {
+                    Ok(p) => Some(p),
+                    Err(_) if lenient => None,
+                    Err(e) => return Err(e),
                 };
-                let req_vec: Vec<String> = def
-                    .implicit_requirements
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect();
-                let (sub_pre, sub_post) = self.parse_into(
-                    command,
-                    &req_vec,
-                    child_p,
-                    &req_source,
-                    Some(def.name),
-                    None,
-                )?;
-                if !sub_pre.is_empty() || !sub_post.is_empty() {
-                    let mut rem = sub_pre;
-                    rem.extend(sub_post);
-                    return Err(OptionsParsingError::new(format!(
-                        "Unparsed options remain after processing {raw_value}: {}",
-                        rem.join(" ")
-                    )));
+                if let Some(child_p) = child_p {
+                    let req_source = if source.is_empty() {
+                        format!("implicit requirement of option '--{}'", def.name)
+                    } else {
+                        format!(
+                            "implicit requirement of option '--{}' (source {source})",
+                            def.name
+                        )
+                    };
+                    let req_vec: Vec<String> = def
+                        .implicit_requirements
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect();
+                    let sub_res = self.parse_into_mode(
+                        command,
+                        &req_vec,
+                        child_p,
+                        &req_source,
+                        Some(def.name),
+                        None,
+                        lenient,
+                    );
+                    if !lenient {
+                        let (sub_pre, sub_post) = sub_res?;
+                        if !sub_pre.is_empty() || !sub_post.is_empty() {
+                            let mut rem = sub_pre;
+                            rem.extend(sub_post);
+                            return Err(OptionsParsingError::new(format!(
+                                "Unparsed options remain after processing {raw_value}: {}",
+                                rem.join(" ")
+                            )));
+                        }
+                    }
                 }
             }
 
@@ -1929,5 +2122,97 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.test_filter.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_best_effort_extracts_bes_options_despite_parse_errors() {
+        let args: Vec<String> = vec![
+            "--totally_unknown_flag",
+            "--jobs=not_a_number",
+            "--jobs",
+            "--bes_backend=grpc://127.0.0.1:1985",
+            "--bes_header=x-buildbuddy-api-key=secret",
+            "--build_metadata=REPO_URL=https://example.com/repo",
+            "--invocation_id=11111111-2222-4333-8444-555555555555",
+            "--tls_certificate=/tmp/ca.pem",
+            "--nojobs",
+            "--",
+            "--bes_backend=grpc://ignored-after-double-dash:9999",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(ParsedCommandOptions::parse_for_command("build", &args).is_err());
+        let p = ParsedCommandOptions::parse_for_command_best_effort("build", &args);
+        assert_eq!(p.get_str("bes_backend"), Some("grpc://127.0.0.1:1985"));
+        assert_eq!(
+            p.get_str("invocation_id"),
+            Some("11111111-2222-4333-8444-555555555555")
+        );
+        assert_eq!(p.get_str("tls_certificate"), Some("/tmp/ca.pem"));
+        assert_eq!(
+            p.parsed_options
+                .get("bes_header")
+                .map(|d| d.raw_values.clone()),
+            Some(vec!["x-buildbuddy-api-key=secret".to_string()])
+        );
+        assert_eq!(
+            p.parsed_options
+                .get("build_metadata")
+                .map(|d| d.raw_values.clone()),
+            Some(vec!["REPO_URL=https://example.com/repo".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_best_effort_expands_valid_rc_config_alongside_invalid_config_and_flag() {
+        let args: Vec<String> = vec![
+            "--rc_source=/ws/.bazelrc",
+            "--default_override=0:build:bb=--bes_backend=grpc://127.0.0.1:2025",
+            "--default_override=0:build:bb=--bes_results_url=https://app.buildbuddy.io/invocation/",
+            "--default_override=0:build=--bogus_rc_flag",
+            "--config=bb",
+            "--config=nonexistent_cfg",
+            "--another_bad_cli_flag",
+            "//...",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(ParsedCommandOptions::parse_for_command("build", &args).is_err());
+        let p = ParsedCommandOptions::parse_for_command_best_effort("build", &args);
+        assert_eq!(p.get_str("bes_backend"), Some("grpc://127.0.0.1:2025"));
+        assert_eq!(
+            p.get_str("bes_results_url"),
+            Some("https://app.buildbuddy.io/invocation/")
+        );
+    }
+
+    #[test]
+    fn test_best_effort_bare_config_preserves_following_flag() {
+        let with_rc: Vec<String> = vec![
+            "--rc_source=/ws/.bazelrc",
+            "--default_override=0:build:ci=--jobs=4",
+            "--config",
+            "--bes_backend=grpc://127.0.0.1:1985",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(ParsedCommandOptions::parse_for_command("build", &with_rc).is_err());
+        let p = ParsedCommandOptions::parse_for_command_best_effort("build", &with_rc);
+        assert_eq!(p.get_str("bes_backend"), Some("grpc://127.0.0.1:1985"));
+
+        let without_rc: Vec<String> = vec![
+            "--config",
+            "--bes_backend=grpc://127.0.0.1:1985",
+            "--totally_unknown_flag",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(ParsedCommandOptions::parse_for_command("build", &without_rc).is_err());
+        let p = ParsedCommandOptions::parse_for_command_best_effort("build", &without_rc);
+        assert_eq!(p.get_str("bes_backend"), Some("grpc://127.0.0.1:1985"));
     }
 }

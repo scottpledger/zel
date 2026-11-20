@@ -73,6 +73,7 @@ pub fn expand_command_args(
         &mut config_counts,
         &mut found_notes,
         &mut expanded,
+        false,
     )?;
 
     // 4. Evaluate --enable_platform_specific_config from the expanded args (last value wins)
@@ -118,6 +119,7 @@ pub fn expand_command_args(
                 &mut config_counts,
                 &mut found_notes,
                 &mut plat_expanded,
+                false,
             )?;
             let pos = insert_after_idx + 1;
             expanded.splice(pos..pos, plat_expanded);
@@ -172,8 +174,122 @@ pub fn expand_cli_configs_only(
         &mut config_counts,
         &mut found_notes,
         &mut expanded,
+        false,
     )?;
     Ok(expanded)
+}
+
+/// Best-effort variant of [`expand_command_args`] that skips undefined or cyclic `--config`
+/// entries instead of failing the entire expansion.
+pub fn expand_command_args_best_effort(
+    rc_config: &BazelrcConfig,
+    command: &str,
+    cli_args: &[String],
+) -> Vec<String> {
+    let commands_to_parse = get_command_ancestry(command);
+    let mut base_args = Vec::new();
+    for cmd in &commands_to_parse {
+        if let Some(opts) = rc_config.sections.get(*cmd) {
+            let toks: Vec<String> = opts.iter().map(|(o, _)| o.clone()).collect();
+            let toks = if *cmd == "common" {
+                split_unsupported_common_args(command, &toks).0
+            } else {
+                toks
+            };
+            base_args.extend(toks);
+        }
+    }
+    base_args.extend(cli_args.iter().cloned());
+
+    let mut expanded = Vec::new();
+    let mut longest_chain = Vec::new();
+    let mut config_counts = std::collections::BTreeMap::new();
+    let mut found_notes = Vec::new();
+    let _ = expand_configs_recursive(
+        rc_config,
+        command,
+        &commands_to_parse,
+        &base_args,
+        &mut Vec::new(),
+        &mut longest_chain,
+        &mut config_counts,
+        &mut found_notes,
+        &mut expanded,
+        true,
+    );
+
+    let mut platform_enabled: Option<(bool, usize)> = None;
+    for (idx, a) in expanded.iter().enumerate() {
+        if a == "--" {
+            break;
+        }
+        if a == "--enable_platform_specific_config" {
+            platform_enabled = Some((true, idx));
+        } else if a == "--noenable_platform_specific_config" {
+            platform_enabled = Some((false, idx));
+        } else if let Some(val) = a.strip_prefix("--enable_platform_specific_config=") {
+            if let Ok(b) = crate::converters::convert_boolean(val) {
+                platform_enabled = Some((b, idx));
+            }
+        }
+    }
+
+    if let Some((true, insert_after_idx)) = platform_enabled {
+        let platform = get_platform_name();
+        if let Ok(plat_opts) = collect_config_definition(
+            rc_config,
+            command,
+            &commands_to_parse,
+            platform,
+            &mut found_notes,
+        ) {
+            let mut plat_expanded = Vec::new();
+            let mut plat_ancestors = Vec::new();
+            let _ = expand_configs_recursive(
+                rc_config,
+                command,
+                &commands_to_parse,
+                &plat_opts,
+                &mut plat_ancestors,
+                &mut longest_chain,
+                &mut config_counts,
+                &mut found_notes,
+                &mut plat_expanded,
+                true,
+            );
+            let pos = insert_after_idx + 1;
+            expanded.splice(pos..pos, plat_expanded);
+        }
+    }
+
+    expanded
+}
+
+/// Best-effort variant of [`expand_cli_configs_only`] that skips undefined or cyclic `--config`
+/// entries while still expanding valid configs.
+pub fn expand_cli_configs_only_best_effort(
+    rc_config: &BazelrcConfig,
+    command: &str,
+    cli_args: &[String],
+) -> Vec<String> {
+    let commands_to_parse = get_command_ancestry(command);
+    let mut expanded = Vec::new();
+    let mut longest_chain = Vec::new();
+    let mut config_counts = std::collections::BTreeMap::new();
+    let mut found_notes = Vec::new();
+    let _ = expand_configs_recursive(
+        rc_config,
+        command,
+        &commands_to_parse,
+        cli_args,
+        &mut Vec::new(),
+        &mut longest_chain,
+        &mut config_counts,
+        &mut found_notes,
+        &mut expanded,
+        true,
+    );
+    expanded
 }
 
 fn collect_config_definition(
@@ -240,6 +356,7 @@ fn expand_configs_recursive(
     config_counts: &mut std::collections::BTreeMap<String, usize>,
     found_notes: &mut Vec<String>,
     out: &mut Vec<String>,
+    lenient: bool,
 ) -> Result<(), OptionsParsingError> {
     let mut i = 0;
     while i < args.len() {
@@ -259,22 +376,38 @@ fn expand_configs_recursive(
         };
 
         if let Some((cfg, consumed)) = config_name {
+            let skip_on_lenient_err = if consumed == 2 && cfg.starts_with('-') {
+                1
+            } else {
+                consumed
+            };
             if config_ancestor_set.contains(&cfg) {
+                if lenient {
+                    i += skip_on_lenient_err;
+                    continue;
+                }
                 return Err(OptionsParsingError::new(format!(
                     "Config expansion has a cycle: config value {cfg} expands to itself, see inheritance chain [{}]",
                     config_ancestor_set.join(", ")
                 )));
             }
 
-            *config_counts.entry(cfg.clone()).or_default() += 1;
-
-            let cfg_opts = collect_config_definition(
+            let cfg_opts = match collect_config_definition(
                 rc_config,
                 command,
                 commands_to_parse,
                 &cfg,
                 found_notes,
-            )?;
+            ) {
+                Ok(opts) => opts,
+                Err(_) if lenient => {
+                    i += skip_on_lenient_err;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+
+            *config_counts.entry(cfg.clone()).or_default() += 1;
 
             config_ancestor_set.push(cfg);
             if config_ancestor_set.len() > longest_chain.len() {
@@ -291,6 +424,7 @@ fn expand_configs_recursive(
                 config_counts,
                 found_notes,
                 out,
+                lenient,
             )?;
 
             config_ancestor_set.pop();
@@ -363,5 +497,27 @@ mod tests {
         assert!(err
             .message
             .contains("Config expansion has a cycle: config value foo expands to itself"));
+    }
+
+    #[test]
+    fn test_lenient_bare_config_preserves_following_flag() {
+        let mut config = BazelrcConfig::default();
+        config.sections.insert(
+            "build:ci".to_string(),
+            vec![("--jobs=4".to_string(), "rc".to_string())],
+        );
+
+        let cli = vec![
+            "--config".to_string(),
+            "--bes_backend=grpc://127.0.0.1:1985".to_string(),
+        ];
+        assert_eq!(
+            expand_cli_configs_only_best_effort(&config, "build", &cli),
+            vec!["--bes_backend=grpc://127.0.0.1:1985"]
+        );
+        assert_eq!(
+            expand_command_args_best_effort(&config, "build", &cli),
+            vec!["--bes_backend=grpc://127.0.0.1:1985"]
+        );
     }
 }

@@ -233,6 +233,32 @@ pub struct BlazeRuntime {
     pub(crate) eval_memo: Mutex<(String, std::collections::HashSet<String>, bool)>,
 }
 
+fn command_uses_external_repos(command: &str) -> bool {
+    matches!(
+        command,
+        "build" | "test" | "coverage" | "run" | "query" | "cquery" | "aquery"
+    )
+}
+
+fn command_checks_downloader_config(command: &str) -> bool {
+    matches!(
+        command,
+        "aquery"
+            | "build"
+            | "config"
+            | "coverage"
+            | "cquery"
+            | "fetch"
+            | "info"
+            | "mod"
+            | "print_action"
+            | "query"
+            | "run"
+            | "test"
+            | "vendor"
+    )
+}
+
 impl BlazeRuntime {
     pub fn new(dirs: BlazeDirectories, fs: Arc<dyn FileSystem>, server_pid: u32) -> Self {
         // The `genquery` rule evaluates its query with the query engine.
@@ -517,10 +543,7 @@ impl BlazeRuntime {
         };
 
         // External repositories (Bzlmod) are resolved lazily for commands that load packages.
-        let uses_external_repos = matches!(
-            command,
-            "build" | "test" | "coverage" | "run" | "query" | "cquery" | "aquery"
-        );
+        let uses_external_repos = command_uses_external_repos(command);
         // The Bazel server runs one build-family command at a time (this runtime's resolver slot
         // is per command).
         let _command_guard = uses_external_repos
@@ -541,43 +564,34 @@ impl BlazeRuntime {
 
         // Bazel computes the main repository mapping (resolving the module graph) before any
         // loading/analysis: a failure there aborts the command with its own exit code.
-        let module_resolution_failure: Option<i32> = if uses_external_repos {
-            self.repo_resolver.open_now().err()
-        } else {
-            None
-        };
+        // For build-family commands inside a workspace, defer these checks until `BuildObserver`
+        // is initialized so `LiveSink` is active and BES streams early failures.
+        let is_build_family = matches!(command, "build" | "test" | "coverage" | "run");
         let not_in_workspace = commands::command_spec(command)
             .filter(|spec| spec.must_run_in_workspace && !self.in_workspace());
-        let downloader_config_error: Option<String> = if matches!(
-            command,
-            "aquery"
-                | "build"
-                | "config"
-                | "coverage"
-                | "cquery"
-                | "fetch"
-                | "info"
-                | "mod"
-                | "print_action"
-                | "query"
-                | "run"
-                | "test"
-                | "vendor"
-        ) {
-            zel_bzlmod::session::check_downloader_config_with_env(
-                command,
-                cmd_args,
-                std::path::Path::new(self.dirs.workspace_dir.path_string()),
-                &client_env,
-            )
-            .err()
-        } else {
-            None
-        };
+        let defer_early_checks_to_observer = is_build_family && not_in_workspace.is_none();
+        let module_resolution_failure: Option<i32> =
+            if uses_external_repos && !defer_early_checks_to_observer {
+                self.repo_resolver.open_now().err()
+            } else {
+                None
+            };
+        let downloader_config_error: Option<String> =
+            if !defer_early_checks_to_observer && command_checks_downloader_config(command) {
+                zel_bzlmod::session::check_downloader_config_with_env(
+                    command,
+                    cmd_args,
+                    std::path::Path::new(self.dirs.workspace_dir.path_string()),
+                    &client_env,
+                )
+                .err()
+            } else {
+                None
+            };
         if downloader_config_error.is_none()
             && module_resolution_failure.is_none()
             && not_in_workspace.is_none()
-            && !matches!(command, "build" | "test" | "coverage")
+            && !is_build_family
         {
             let prev = zel_events::bes::drain_previous_uploads_ext(
                 command == "shutdown",
@@ -610,43 +624,11 @@ impl BlazeRuntime {
                 );
                 ExitCode::COMMAND_LINE_ERROR
             }
-            _ if module_resolution_failure.is_some() => {
-                let mut code = module_resolution_failure.unwrap_or(1);
-                let messages = self.repo_resolver.take_messages();
-                if code == 8 && matches!(command, "test" | "coverage") {
-                    writeln_bytes(&mut stderr, "ERROR: test command interrupted");
-                    ExitCode::INTERRUPTED
-                } else {
-                    // Evaluation failures of the root `MODULE.bazel` end the build with `BAD_MODULE` (48).
-                    if messages.iter().any(|m| {
-                        m.contains("error executing MODULE.bazel file for")
-                            || m.contains("syntax error in MODULE.bazel file for")
-                    }) {
-                        code = 48;
-                    }
-                    for line in messages {
-                        if let Some(rest) = line.strip_prefix("ERROR: ") {
-                            let rest = rest.strip_prefix("ERROR: ").unwrap_or(rest);
-                            // Bazel: "Error computing the main repository mapping: <cause>"; with several error
-                            // lines (traceback, then the `... MODULE.bazel file for` trailer) only the last carries it.
-                            let msg = if rest
-                                .contains("Error computing the main repository mapping")
-                            {
-                                rest.to_string()
-                            } else if let Some(i) = rest.rfind("\nERROR: ") {
-                                let (head, tail) = rest.split_at(i + "\nERROR: ".len());
-                                format!("{head}Error computing the main repository mapping: {tail}")
-                            } else {
-                                format!("Error computing the main repository mapping: {rest}")
-                            };
-                            writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
-                        } else {
-                            writeln_bytes(&mut stderr, &line);
-                        }
-                    }
-                    ExitCode::from_numeric(code)
-                }
-            }
+            _ if module_resolution_failure.is_some() => self.format_module_resolution_failure(
+                command,
+                module_resolution_failure.unwrap_or(1),
+                &mut stderr,
+            ),
             _ if not_in_workspace.is_some() => {
                 let msg = commands::not_in_workspace_message(command);
                 writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
@@ -826,31 +808,83 @@ impl BlazeRuntime {
         }
     }
 
-    /// Runs a build/test command inside a [`observability::BuildObserver`], so every exit path
-    /// gets the terminal UI pipeline, the BEP stream (files / BES) and the JSON trace profile.
-    fn cmd_build_or_test(
+    fn format_module_resolution_failure(
+        &self,
+        command: &str,
+        mut code: i32,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
+        let messages = self.repo_resolver.take_messages();
+        if code == 8 && matches!(command, "test" | "coverage") {
+            writeln_bytes(stderr, "ERROR: test command interrupted");
+            ExitCode::INTERRUPTED
+        } else {
+            // Evaluation failures of the root `MODULE.bazel` end the build with `BAD_MODULE` (48).
+            if messages.iter().any(|m| {
+                m.contains("error executing MODULE.bazel file for")
+                    || m.contains("syntax error in MODULE.bazel file for")
+            }) {
+                code = 48;
+            }
+            for line in messages {
+                if let Some(rest) = line.strip_prefix("ERROR: ") {
+                    let rest = rest.strip_prefix("ERROR: ").unwrap_or(rest);
+                    // Bazel: "Error computing the main repository mapping: <cause>"; with several error
+                    // lines (traceback, then the `... MODULE.bazel file for` trailer) only the last carries it.
+                    let msg = if rest.contains("Error computing the main repository mapping") {
+                        rest.to_string()
+                    } else if let Some(i) = rest.rfind("\nERROR: ") {
+                        let (head, tail) = rest.split_at(i + "\nERROR: ".len());
+                        format!("{head}Error computing the main repository mapping: {tail}")
+                    } else {
+                        format!("Error computing the main repository mapping: {rest}")
+                    };
+                    writeln_bytes(stderr, &format!("ERROR: {msg}"));
+                } else {
+                    writeln_bytes(stderr, &line);
+                }
+            }
+            ExitCode::from_numeric(code)
+        }
+    }
+
+    fn check_early_repo_and_downloader(
         &self,
         command: &str,
         args: &[String],
-        stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
-    ) -> ExitCode {
-        self.cmd_build_or_test_with_bep_args(command, args, None, stdout, stderr)
-            .0
+    ) -> Option<ExitCode> {
+        if command_checks_downloader_config(command) {
+            let client_env = self.client_env();
+            if let Err(err) = zel_bzlmod::session::check_downloader_config_with_env(
+                command,
+                args,
+                std::path::Path::new(self.dirs.workspace_dir.path_string()),
+                &client_env,
+            ) {
+                crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
+                writeln_bytes(stderr, &format!("ERROR: {err}"));
+                return Some(ExitCode::COMMAND_LINE_ERROR);
+            }
+        }
+        if command_uses_external_repos(command) {
+            if let Err(code) = self.repo_resolver.open_now() {
+                return Some(self.format_module_resolution_failure(command, code, stderr));
+            }
+        }
+        None
     }
 
-    fn cmd_build_or_test_with_bep_args(
+    fn start_build_observer(
         &self,
         command: &str,
         args: &[String],
         bep_args: Option<&[String]>,
-        stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
-    ) -> (ExitCode, String) {
-        let parsed = ParsedCommandOptions::parse_for_command(command, args).ok();
+    ) -> (observability::BuildObserver, bool) {
+        let parsed = ParsedCommandOptions::parse_for_command_best_effort(command, args);
         let debug_all_events = parsed
-            .as_ref()
-            .and_then(|p| p.get_bool("experimental_ui_debug_all_events"))
+            .get_bool("experimental_ui_debug_all_events")
             .unwrap_or(false);
         let env_inv_id = self
             .client_env()
@@ -858,15 +892,21 @@ impl BlazeRuntime {
             .cloned()
             .filter(|s| !s.is_empty());
         let has_explicit_inv_id = parsed
-            .as_ref()
-            .and_then(|p| p.get_str("invocation_id"))
+            .get_str("invocation_id")
             .is_some_and(|s| !s.is_empty());
         let obs = observability::BuildObserver::new_with_fallback_invocation_id(
-            parsed.as_ref(),
+            Some(&parsed),
             command,
             &self.dirs.output_base.to_string(),
             env_inv_id.as_deref(),
             &self.client_env(),
+        );
+        let working_dir = self.command_cwd(&parsed).to_string_lossy().into_owned();
+        obs.set_initial_invocation_context(
+            bep_args.unwrap_or(args),
+            &self.dirs.workspace_dir.to_string(),
+            &working_dir,
+            self.server_pid,
         );
         if !has_explicit_inv_id && env_inv_id.is_some() {
             writeln_bytes(
@@ -875,7 +915,18 @@ impl BlazeRuntime {
             );
         }
         obs.reporter.set_deferred_finish(true);
-        let code = self.cmd_build_or_test_inner(command, args, bep_args, stdout, stderr, &obs);
+        (obs, debug_all_events)
+    }
+
+    fn finish_build_observer(
+        &self,
+        obs: &observability::BuildObserver,
+        debug_all_events: bool,
+        command: &str,
+        code: ExitCode,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         let failure = failure::default_for(code, command, stderr);
         let code = obs.finish(stderr, code, failure.as_ref(), self.fs.as_ref());
         if debug_all_events {
@@ -946,7 +997,36 @@ impl BlazeRuntime {
         } else {
             stdout.extend(obs.take_stdout());
         }
-        (code, obs.invocation_id().to_string())
+        code
+    }
+
+    /// Runs a build/test command inside a [`observability::BuildObserver`], so every exit path
+    /// gets the terminal UI pipeline, the BEP stream (files / BES) and the JSON trace profile.
+    fn cmd_build_or_test(
+        &self,
+        command: &str,
+        args: &[String],
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
+        self.cmd_build_or_test_with_bep_args(command, args, None, stdout, stderr)
+    }
+
+    fn cmd_build_or_test_with_bep_args(
+        &self,
+        command: &str,
+        args: &[String],
+        bep_args: Option<&[String]>,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
+        let (obs, debug_all_events) = self.start_build_observer(command, args, bep_args, stderr);
+        let code = self
+            .check_early_repo_and_downloader(command, args, stderr)
+            .unwrap_or_else(|| {
+                self.cmd_build_or_test_inner(command, args, bep_args, stdout, stderr, &obs)
+            });
+        self.finish_build_observer(&obs, debug_all_events, command, code, stdout, stderr)
     }
 
     fn cmd_build_or_test_inner(
@@ -3083,16 +3163,41 @@ impl BlazeRuntime {
         exec_request: &mut Option<ExecRequest>,
     ) -> ExitCode {
         let cmd_started = std::time::Instant::now();
+        let (obs, debug_all_events) = self.start_build_observer("run", args, Some(args), stderr);
+        if let Some(early_code) = self.check_early_repo_and_downloader("run", args, stderr) {
+            return self.finish_build_observer(
+                &obs,
+                debug_all_events,
+                "run",
+                early_code,
+                stdout,
+                stderr,
+            );
+        }
         let parsed = match ParsedCommandOptions::parse_for_command("run", args) {
             Ok(p) => p,
             Err(e) => {
                 writeln_bytes(stderr, &e.format_bazel_error());
-                return ExitCode::COMMAND_LINE_ERROR;
+                return self.finish_build_observer(
+                    &obs,
+                    debug_all_events,
+                    "run",
+                    ExitCode::COMMAND_LINE_ERROR,
+                    stdout,
+                    stderr,
+                );
             }
         };
         if parsed.targets.is_empty() {
             writeln_bytes(stderr, "ERROR: Must specify a target to run");
-            return ExitCode::COMMAND_LINE_ERROR;
+            return self.finish_build_observer(
+                &obs,
+                debug_all_events,
+                "run",
+                ExitCode::COMMAND_LINE_ERROR,
+                stdout,
+                stderr,
+            );
         }
 
         let target_pattern = parsed.targets[0].clone();
@@ -3121,11 +3226,19 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                return if fetch_err.is_module_extension() {
+                let code = if fetch_err.is_module_extension() {
                     ExitCode::from_numeric(48)
                 } else {
                     ExitCode::BUILD_FAILURE
                 };
+                return self.finish_build_observer(
+                    &obs,
+                    debug_all_events,
+                    "run",
+                    code,
+                    stdout,
+                    stderr,
+                );
             }
             for m in self.repo_resolver.take_messages() {
                 writeln_bytes(stderr, &m);
@@ -3146,7 +3259,14 @@ impl BlazeRuntime {
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-            return ExitCode::PARSING_FAILURE;
+            return self.finish_build_observer(
+                &obs,
+                debug_all_events,
+                "run",
+                ExitCode::PARSING_FAILURE,
+                stdout,
+                stderr,
+            );
         }
         for m in self.repo_resolver.take_messages() {
             writeln_bytes(stderr, &m);
@@ -3160,7 +3280,14 @@ impl BlazeRuntime {
                 );
             } else {
                 writeln_bytes(stderr, "ERROR: No targets found to run");
-                return ExitCode::COMMAND_LINE_ERROR;
+                return self.finish_build_observer(
+                    &obs,
+                    debug_all_events,
+                    "run",
+                    ExitCode::COMMAND_LINE_ERROR,
+                    stdout,
+                    stderr,
+                );
             }
         }
 
@@ -3172,7 +3299,14 @@ impl BlazeRuntime {
                     stderr,
                     "ERROR: While parsing option --run_under=: Empty command",
                 );
-                return ExitCode::COMMAND_LINE_ERROR;
+                return self.finish_build_observer(
+                    &obs,
+                    debug_all_events,
+                    "run",
+                    ExitCode::COMMAND_LINE_ERROR,
+                    stdout,
+                    stderr,
+                );
             }
             if ru.starts_with("//") || ru.starts_with('@') {
                 let ru_target = ru.split_whitespace().next().unwrap();
@@ -3194,7 +3328,14 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, "INFO: 0 processes.");
                     writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                     writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                    return ExitCode::BUILD_FAILURE;
+                    return self.finish_build_observer(
+                        &obs,
+                        debug_all_events,
+                        "run",
+                        ExitCode::BUILD_FAILURE,
+                        stdout,
+                        stderr,
+                    );
                 }
             }
         }
@@ -3266,7 +3407,14 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                return ExitCode::COMMAND_LINE_ERROR;
+                return self.finish_build_observer(
+                    &obs,
+                    debug_all_events,
+                    "run",
+                    ExitCode::COMMAND_LINE_ERROR,
+                    stdout,
+                    stderr,
+                );
             }
         }
         for t in &resolved_targets {
@@ -3286,7 +3434,14 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, "INFO: 0 processes.");
                     writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                     writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                    return ExitCode::COMMAND_LINE_ERROR;
+                    return self.finish_build_observer(
+                        &obs,
+                        debug_all_events,
+                        "run",
+                        ExitCode::COMMAND_LINE_ERROR,
+                        stdout,
+                        stderr,
+                    );
                 }
             }
         }
@@ -3308,8 +3463,11 @@ impl BlazeRuntime {
         if let Some(ref rul) = run_under_label {
             build_args.push(rul.clone());
         }
-        let (build_exit, run_build_id) =
-            self.cmd_build_or_test_with_bep_args("run", &build_args, Some(args), stdout, stderr);
+        let run_build_id = obs.invocation_id().to_string();
+        let build_exit =
+            self.cmd_build_or_test_inner("run", &build_args, Some(args), stdout, stderr, &obs);
+        let build_exit =
+            self.finish_build_observer(&obs, debug_all_events, "run", build_exit, stdout, stderr);
         if build_exit != ExitCode::SUCCESS {
             // `RunCommand`: a failed build never runs the target.
             if !String::from_utf8_lossy(stderr)

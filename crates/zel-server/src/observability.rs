@@ -168,6 +168,7 @@ pub(crate) struct BuildObserver {
     artifact_uploader: Option<Arc<bes::ByteStreamBuildEventArtifactUploader>>,
     setup_errors: std::sync::Mutex<Vec<String>>,
     started: Instant,
+    start_time_millis: i64,
     cpu_at_start: f64,
     command: String,
     perform_build: bool,
@@ -181,6 +182,11 @@ pub(crate) struct BuildObserver {
     late_nodes: std::sync::Mutex<std::collections::VecDeque<zel_events::bep::BuildEventNode>>,
     patterns: std::sync::Mutex<Vec<String>>,
     working_dir: std::sync::Mutex<Option<String>>,
+    build_started: std::sync::atomic::AtomicBool,
+    initial_args: std::sync::Mutex<Vec<String>>,
+    initial_workspace_dir: std::sync::Mutex<String>,
+    initial_working_dir: std::sync::Mutex<String>,
+    initial_server_pid: std::sync::atomic::AtomicU32,
     analysis_complete: std::sync::atomic::AtomicBool,
     bep_enabled: bool,
     bep_opts: BepOptions,
@@ -656,6 +662,7 @@ impl BuildObserver {
             artifact_uploader,
             setup_errors: std::sync::Mutex::new(setup_errors),
             started,
+            start_time_millis: zel_events::now_millis(),
             cpu_at_start,
             command: command.to_string(),
             perform_build,
@@ -667,6 +674,11 @@ impl BuildObserver {
             late_nodes: Default::default(),
             patterns: Default::default(),
             working_dir: Default::default(),
+            build_started: Default::default(),
+            initial_args: Default::default(),
+            initial_workspace_dir: Default::default(),
+            initial_working_dir: Default::default(),
+            initial_server_pid: Default::default(),
             analysis_complete: Default::default(),
             bep_enabled,
             bep_opts,
@@ -701,6 +713,42 @@ impl BuildObserver {
         &self.ui
     }
 
+    /// Records command-line and workspace metadata up front so `finish` can still emit
+    /// `BuildStarted`, `BuildMetadata`, `UnstructuredCommandLine`, `OptionsParsed`, and
+    /// `StructuredCommandLine` when a command aborts before `begin_build`.
+    pub(crate) fn set_initial_invocation_context(
+        &self,
+        args: &[String],
+        workspace: &str,
+        working_dir: &str,
+        server_pid: u32,
+    ) {
+        *self.initial_args.lock().unwrap() = args.to_vec();
+        *self.initial_workspace_dir.lock().unwrap() = workspace.to_string();
+        *self.initial_working_dir.lock().unwrap() = working_dir.to_string();
+        self.initial_server_pid
+            .store(server_pid, std::sync::atomic::Ordering::SeqCst);
+        *self.workspace_dir.lock().unwrap() = workspace.to_string();
+        *self.working_dir.lock().unwrap() = Some(if !working_dir.is_empty() {
+            working_dir.to_string()
+        } else {
+            workspace.to_string()
+        });
+    }
+
+    fn ensure_build_started(&self) {
+        if !self.bep_enabled || self.build_started.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let args = self.initial_args.lock().unwrap().clone();
+        let workspace = self.initial_workspace_dir.lock().unwrap().clone();
+        let working_dir = self.initial_working_dir.lock().unwrap().clone();
+        let server_pid = self
+            .initial_server_pid
+            .load(std::sync::atomic::Ordering::SeqCst);
+        self.begin_build(&[], &args, &workspace, &working_dir, server_pid, &args);
+    }
+
     /// Posts `BuildStarted` with the standard announced children and the command line events.
     pub(crate) fn begin_build(
         &self,
@@ -713,6 +761,12 @@ impl BuildObserver {
     ) {
         *self.workspace_dir.lock().unwrap() = workspace.to_string();
         if !self.bep_enabled {
+            return;
+        }
+        if self
+            .build_started
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
             return;
         }
         *self.working_dir.lock().unwrap() = Some(if !working_dir.is_empty() {
@@ -730,7 +784,7 @@ impl BuildObserver {
         }
         r.post_bep_node(BepBuilder::build_started(
             &r.invocation_id(),
-            zel_events::now_millis(),
+            self.start_time_millis,
             zel_events::BUILD_TOOL_VERSION,
             "",
             &self.command,
@@ -1158,6 +1212,9 @@ impl BuildObserver {
         fs: &dyn FileSystem,
     ) -> ExitCode {
         let mut code = code;
+        if self.bep_enabled {
+            self.ensure_build_started();
+        }
         let text = String::from_utf8_lossy(&std::mem::take(stderr)).into_owned();
         for e in self.take_setup_errors() {
             self.reporter.handle(Event::error(None, e));
@@ -1945,7 +2002,6 @@ mod tests {
         assert_ne!(config_id("k8", "opt"), config_id("k8", "dbg"));
     }
 
-    #[cfg(unix)]
     fn runtime(root: &std::path::Path, ws: &std::path::Path) -> crate::BlazeRuntime {
         use zel_vfs::LocalFileSystem;
         let fs: Arc<dyn FileSystem> = Arc::new(LocalFileSystem::default());
@@ -1958,7 +2014,6 @@ mod tests {
         crate::BlazeRuntime::new(dirs, fs, 1)
     }
 
-    #[cfg(unix)]
     fn run(rt: &crate::BlazeRuntime, args: &[&str]) -> (i32, String, String) {
         let req = zel_proto::command_server::RunRequest {
             cookie: "c".into(),
@@ -2834,6 +2889,447 @@ mod tests {
             build_id_env.as_deref(),
             Some(run_inv.as_str()),
             "run ExecRequest BUILD_ID must match canonical invocation_id"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[derive(Clone, Default)]
+    struct MockBesServer {
+        lifecycle: Arc<std::sync::Mutex<Vec<zel_proto::dynamic::Msg>>>,
+        bep_events: Arc<std::sync::Mutex<Vec<zel_proto::dynamic::Msg>>>,
+        stream_headers: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl MockBesServer {
+        fn start() -> (Self, String) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let srv = Self::default();
+            let me = srv.clone();
+            std::thread::spawn(move || {
+                for s in listener.incoming().flatten() {
+                    let _ = s.set_nodelay(true);
+                    let (Ok(r), Ok(w)) = (s.try_clone(), s.try_clone()) else {
+                        continue;
+                    };
+                    let conn_srv = me.clone();
+                    let t = zel_remote::transport::Transport {
+                        reader: Box::new(r),
+                        writer: Box::new(w),
+                        shutdown: Box::new(move || {
+                            let _ = s.shutdown(std::net::Shutdown::Both);
+                        }),
+                    };
+                    std::thread::spawn(move || {
+                        let Ok((_conn, rx)) = zel_remote::http2::Conn::server_from(
+                            t,
+                            zel_remote::http2::LocalSettings::default(),
+                        ) else {
+                            return;
+                        };
+                        while let Ok(stream) = rx.recv() {
+                            let h = conn_srv.clone();
+                            std::thread::spawn(move || h.handle(stream));
+                        }
+                    });
+                }
+            });
+            (srv, format!("grpc://127.0.0.1:{}", addr.port()))
+        }
+
+        fn handle(&self, st: zel_remote::http2::Stream) {
+            use zel_proto::dynamic::Msg;
+            use zel_remote::grpc::{frame_message, MessageParser};
+            use zel_remote::http2::Event as H2Event;
+
+            let mut headers = Vec::new();
+            let mut parser = MessageParser::default();
+            let mut msgs = Vec::new();
+            loop {
+                match st.recv(None) {
+                    Ok(H2Event::Headers(h)) => headers = h,
+                    Ok(H2Event::Data(d)) => {
+                        parser.push(&d);
+                        while let Ok(Some(m)) = parser.next() {
+                            msgs.push(m);
+                        }
+                    }
+                    Ok(H2Event::End) => break,
+                    _ => return,
+                }
+            }
+            let path = headers
+                .iter()
+                .find(|(k, _)| k == ":path")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            let ok_headers = [
+                (":status".to_string(), "200".to_string()),
+                ("content-type".to_string(), "application/grpc".to_string()),
+            ];
+            if path == bes::PUBLISH_LIFECYCLE {
+                for m in &msgs {
+                    if let Ok(req) =
+                        Msg::decode("google.devtools.build.v1.PublishLifecycleEventRequest", m)
+                    {
+                        self.lifecycle.lock().unwrap().push(req);
+                    }
+                }
+                let _ = st.send_headers(&ok_headers, false);
+                let _ = st.send_data(&frame_message(&[]), false, None);
+                let _ = st.send_headers(&[("grpc-status".to_string(), "0".to_string())], true);
+                return;
+            }
+            if path == bes::PUBLISH_STREAM {
+                *self.stream_headers.lock().unwrap() = headers;
+                let _ = st.send_headers(&ok_headers, false);
+                for m in &msgs {
+                    let req = Msg::decode(
+                        "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                        m,
+                    )
+                    .unwrap();
+                    let obe = req.get_msg("ordered_build_event").unwrap();
+                    let seq = obe.get_i64("sequence_number");
+                    if let Some(ev) = obe.get_msg("event") {
+                        if let Some(any) = ev.get_msg("bazel_event") {
+                            if let Ok(be) =
+                                Msg::decode("build_event_stream.BuildEvent", any.get_bytes("value"))
+                            {
+                                self.bep_events.lock().unwrap().push(be);
+                            }
+                        }
+                    }
+                    let mut resp =
+                        Msg::new("google.devtools.build.v1.PublishBuildToolEventStreamResponse");
+                    resp.set_int("sequence_number", seq);
+                    if let Some(sid) = obe.get_msg("stream_id") {
+                        resp.set_msg("stream_id", sid.clone());
+                    }
+                    let _ = st.send_data(&frame_message(&resp.encode_to_vec()), false, None);
+                }
+                let _ = st.send_headers(&[("grpc-status".to_string(), "0".to_string())], true);
+            }
+        }
+
+        fn bep_jsons(&self) -> Vec<String> {
+            self.bep_events
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|m| m.to_json())
+                .collect()
+        }
+
+        fn lifecycle_count(&self) -> usize {
+            self.lifecycle.lock().unwrap().len()
+        }
+    }
+
+    fn assert_well_formed_early_failure_bep(
+        events: &[String],
+        expected_exit_code: i32,
+        expected_invocation_id: Option<&str>,
+    ) {
+        assert!(
+            !events.is_empty(),
+            "expected BES to receive BuildEvent stream"
+        );
+        assert!(
+            events[0].contains("\"id\":{\"started\":{}}"),
+            "first BEP event must be BuildStarted, got: {}",
+            events[0]
+        );
+        if let Some(inv) = expected_invocation_id {
+            assert!(
+                events[0].contains(&format!("\"uuid\":\"{inv}\"")),
+                "BuildStarted missing invocation_id {inv}: {}",
+                events[0]
+            );
+        }
+        let all = events.join("\n");
+        for needle in [
+            "\"buildMetadata\":{",
+            "\"unstructuredCommandLine\":{",
+            "\"optionsParsed\":{",
+            "\"structuredCommandLine\":{\"commandLineLabel\":\"original\"",
+            "\"structuredCommandLine\":{\"commandLineLabel\":\"tool\"",
+            "\"structuredCommandLine\":{\"commandLineLabel\":\"canonical\"",
+            "\"workspaceStatus\":{",
+            "\"buildFinished\":{}",
+            &format!("\"code\":{expected_exit_code}"),
+        ] {
+            assert!(all.contains(needle), "missing {needle} in BEP:\n{all}");
+        }
+        assert!(
+            events.last().unwrap().contains("\"lastMessage\":true"),
+            "final BEP event must set lastMessage=true: {}",
+            events.last().unwrap()
+        );
+    }
+
+    #[test]
+    fn bes_streams_module_resolution_and_downloader_failures_and_registers_live_sink() {
+        let root = std::env::temp_dir().join(format!("zel-bes-early-mod-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        // Syntax error in MODULE.bazel triggers `module_resolution_failure` (exit 48).
+        std::fs::write(ws.join("MODULE.bazel"), "def broken(\n").unwrap();
+        std::fs::write(ws.join("BUILD.bazel"), "").unwrap();
+
+        let rt = runtime(&root, &ws);
+
+        // 1. Module resolution failure on `build`: LiveSink is active and BES gets full stream.
+        let (srv, backend) = MockBesServer::start();
+        let live_sink = Arc::new(crate::live::LiveSink::default());
+        crate::live::set_current(Some(Arc::clone(&live_sink)));
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                &format!("--bes_backend={backend}"),
+                "--bes_results_url=https://results.example/invocation/",
+                "--invocation_id=11111111-1111-4111-8111-111111111111",
+                "//...",
+            ],
+        );
+        let (_, drained_err) = live_sink.drain();
+        crate::live::set_current(None);
+
+        assert_eq!(code, 48, "{err}");
+        assert!(
+            err.contains("Error computing the main repository mapping"),
+            "{err}"
+        );
+        assert!(
+            live_sink.ui_terminal_width().is_some(),
+            "LiveSink UI should be registered during module resolution failure"
+        );
+        let _ = drained_err;
+        assert_eq!(srv.lifecycle_count(), 4);
+        let events = srv.bep_jsons();
+        assert_well_formed_early_failure_bep(
+            &events,
+            48,
+            Some("11111111-1111-4111-8111-111111111111"),
+        );
+
+        // 2. Module resolution failure on `run` also streams to BES.
+        let (srv_run, backend_run) = MockBesServer::start();
+        let (code_run, err_run, _) = run(
+            &rt,
+            &[
+                "run",
+                &format!("--bes_backend={backend_run}"),
+                "--invocation_id=22222222-2222-4222-8222-222222222222",
+                "//:x",
+            ],
+        );
+        assert_eq!(code_run, 48, "{err_run}");
+        assert_eq!(srv_run.lifecycle_count(), 4);
+        assert_well_formed_early_failure_bep(
+            &srv_run.bep_jsons(),
+            48,
+            Some("22222222-2222-4222-8222-222222222222"),
+        );
+
+        // 3. Downloader config failure on `build` streams to BES with exit code 2.
+        std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
+        let (srv_dl, backend_dl) = MockBesServer::start();
+        let (code_dl, err_dl, _) = run(
+            &rt,
+            &[
+                "build",
+                &format!("--bes_backend={backend_dl}"),
+                "--invocation_id=33333333-3333-4333-8333-333333333333",
+                "--downloader_config=does_not_exist.cfg",
+                "//...",
+            ],
+        );
+        assert_eq!(code_dl, 2, "{err_dl}");
+        assert_eq!(srv_dl.lifecycle_count(), 4);
+        assert_well_formed_early_failure_bep(
+            &srv_dl.bep_jsons(),
+            2,
+            Some("33333333-3333-4333-8333-333333333333"),
+        );
+
+        // 4. `not_in_workspace` keeps exact existing behavior without sending BES RPCs.
+        let (srv_nowork, backend_nowork) = MockBesServer::start();
+        let rt_nowork = runtime(&root.join("nowork"), std::path::Path::new(""));
+        let (code_nw, err_nw, _) = run(
+            &rt_nowork,
+            &["build", &format!("--bes_backend={backend_nowork}"), "//..."],
+        );
+        assert_eq!(code_nw, 2, "{err_nw}");
+        assert!(
+            err_nw.contains("must be invoked from within a workspace"),
+            "{err_nw}"
+        );
+        assert_eq!(srv_nowork.lifecycle_count(), 0);
+        assert!(srv_nowork.bep_jsons().is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bes_streams_unrelated_flag_parse_failure() {
+        let root = std::env::temp_dir().join(format!("zel-bes-flag-err-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
+        std::fs::write(ws.join("BUILD.bazel"), "").unwrap();
+
+        let rt = runtime(&root, &ws);
+        let (srv, backend) = MockBesServer::start();
+
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                &format!("--bes_backend={backend}"),
+                "--bes_header=x-buildbuddy-api-key=header-secret",
+                "--remote_header=x-buildbuddy-api-key=remote-secret",
+                "--build_metadata=REPO_URL=https://example.com/repo",
+                "--invocation_id=44444444-4444-4444-8444-444444444444",
+                "--totally_unknown_flag_for_test",
+                "//...",
+            ],
+        );
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("Unrecognized option: --totally_unknown_flag_for_test"),
+            "{err}"
+        );
+        assert_eq!(srv.lifecycle_count(), 4);
+        let events = srv.bep_jsons();
+        assert_well_formed_early_failure_bep(
+            &events,
+            2,
+            Some("44444444-4444-4444-8444-444444444444"),
+        );
+        let all = events.join("\n");
+        assert!(
+            all.contains("x-buildbuddy-api-key=remote-secret"),
+            "OptionsParsed/StructuredCommandLine should carry --remote_header: {all}"
+        );
+        assert!(
+            all.contains("https://example.com/repo"),
+            "BuildMetadata should carry --build_metadata: {all}"
+        );
+        assert!(
+            all.contains("Unrecognized option: --totally_unknown_flag_for_test"),
+            "BEP progress should include the flag parse error stderr: {all}"
+        );
+        let hdrs = srv.stream_headers.lock().unwrap().clone();
+        assert!(
+            hdrs.iter()
+                .any(|(k, v)| k == "x-buildbuddy-api-key" && v == "header-secret"),
+            "BES gRPC stream should carry --bes_header: {hdrs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bes_streams_pre_begin_build_validation_failure() {
+        let root = std::env::temp_dir().join(format!("zel-bes-pre-begin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
+        std::fs::write(ws.join("BUILD.bazel"), "").unwrap();
+
+        let rt = runtime(&root, &ws);
+        let (srv, backend) = MockBesServer::start();
+
+        // Fails in `validate_exec_options` before `obs.begin_build(...)`.
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                &format!("--bes_backend={backend}"),
+                "--remote_header=x-buildbuddy-api-key=pre-begin-secret",
+                "--invocation_id=55555555-5555-4555-8555-555555555555",
+                "--spawn_strategy=definitely_not_a_real_strategy",
+                "//...",
+            ],
+        );
+        assert_eq!(code, 2, "{err}");
+        assert!(
+            err.contains("no strategy with that identifier was registered"),
+            "{err}"
+        );
+        assert_eq!(srv.lifecycle_count(), 4);
+        let events = srv.bep_jsons();
+        assert_well_formed_early_failure_bep(
+            &events,
+            2,
+            Some("55555555-5555-4555-8555-555555555555"),
+        );
+        let all = events.join("\n");
+        assert!(
+            all.contains("x-buildbuddy-api-key=pre-begin-secret"),
+            "OptionsParsed/StructuredCommandLine should carry --remote_header: {all}"
+        );
+        assert!(
+            all.contains("no strategy with that identifier was registered"),
+            "BEP progress should include the validation error stderr: {all}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mobile_install_skips_early_repo_and_downloader_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "zel-mobile-install-no-early-checks-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("p")).unwrap();
+        // Deliberately invalid MODULE.bazel so `open_now()` fails if called.
+        std::fs::write(ws.join("MODULE.bazel"), "def broken(\n").unwrap();
+        std::fs::write(
+            ws.join("p/mi.bzl"),
+            "def _impl(target, ctx):\n    return []\nMIASPECT = aspect(implementation = _impl)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("p/BUILD"),
+            "exports_files([\"mi.bzl\"])\nfilegroup(name = \"app\", srcs = [])\n",
+        )
+        .unwrap();
+
+        let rt = runtime(&root, &ws);
+
+        // First run `build` to install the broken MODULE.bazel into `rt.repo_resolver` so any
+        // accidental `open_now()` call from a subsequent `mobile-install` would fail.
+        let (build_code, build_err, _) = run(&rt, &["build", "//p:app"]);
+        assert_eq!(build_code, 48, "{build_err}");
+
+        // `mobile-install` is neither in `uses_external_repos` nor in the downloader config check
+        // command set, so neither `--downloader_config=does_not_exist.cfg` nor the broken
+        // MODULE.bazel should fail it.
+        let (mi_code, mi_err, _) = run(
+            &rt,
+            &[
+                "mobile-install",
+                "--downloader_config=does_not_exist.cfg",
+                "--mobile_install_aspect=//p:mi.bzl",
+                "--mobile_install_supported_rules=filegroup",
+                "--nobuild",
+                "//p:app",
+            ],
+        );
+        assert_eq!(mi_code, 0, "{mi_err}");
+        assert!(
+            !mi_err.contains("downloader") && !mi_err.contains("main repository mapping"),
+            "mobile-install should not run downloader or repo checks: {mi_err}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
