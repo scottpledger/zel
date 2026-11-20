@@ -624,6 +624,18 @@ fn open_redirect(path: &str) -> std::io::Result<std::fs::File> {
     Ok(f)
 }
 
+/// Normalizes `argv[0]` for Windows `CreateProcessW`, matching Bazel's
+/// `WindowsSubprocessFactory.processArgv0` and `AsExecutablePathForCreateProcess`: any executable
+/// path containing `'/'` or `'\\'` has `'/'` converted to `'\\'` so Windows command-line parsers
+/// such as `cmd.exe` do not treat `'/'` segments in their own `argv[0]` as switches.
+pub fn normalize_windows_argv0(argv0: &str) -> String {
+    if argv0.contains('/') || argv0.contains('\\') {
+        argv0.replace('/', "\\")
+    } else {
+        argv0.to_string()
+    }
+}
+
 /// Runs the wrapped command (`LegacyProcessWrapper::RunCommand`).
 ///
 /// `env`: when `Some`, the child environment is cleared and replaced by it. `cwd`: working
@@ -637,8 +649,28 @@ pub fn run(
         return Err(crate::cancelled_error());
     }
     let started = Instant::now();
-    let mut cmd = Command::new(&opt.args[0]);
-    cmd.args(&opt.args[1..]);
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let prog = normalize_windows_argv0(&opt.args[0]);
+        let mut c = Command::new(&prog);
+        // `WindowsSubprocessFactory.escapeArgvRest`: when `argv0.equals("cmd.exe")`, pass
+        // remaining arguments verbatim without `CommandLineToArgvW` backslash-quote escaping.
+        if prog == "cmd.exe" {
+            for arg in &opt.args[1..] {
+                c.raw_arg(arg);
+            }
+        } else {
+            c.args(&opt.args[1..]);
+        }
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new(&opt.args[0]);
+        c.args(&opt.args[1..]);
+        c
+    };
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
@@ -1058,5 +1090,81 @@ mod tests {
                 "b"
             ])
         );
+    }
+
+    #[test]
+    fn windows_argv0_normalization_replaces_forward_slashes() {
+        assert_eq!(
+            normalize_windows_argv0("C:/Windows/system32/cmd.exe"),
+            r"C:\Windows\system32\cmd.exe"
+        );
+        assert_eq!(
+            normalize_windows_argv0("bazel-out/x64_windows-fastbuild/bin/tool.exe"),
+            r"bazel-out\x64_windows-fastbuild\bin\tool.exe"
+        );
+        assert_eq!(normalize_windows_argv0("cmd.exe"), "cmd.exe");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_cmd_exe_accepts_forward_slashed_comspec_and_raw_args() {
+        let dir = std::env::temp_dir().join(format!("zel-pw-cmd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub dir")).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello ").unwrap();
+        std::fs::write(dir.join("b_nospace.txt"), "world\n").unwrap();
+        std::fs::write(dir.join("sub dir").join("b.txt"), "world\n").unwrap();
+
+        let comspec = std::env::var("ComSpec")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".to_string())
+            .replace('\\', "/");
+        let o1 = ProcessWrapperOptions {
+            args: vec![
+                comspec,
+                "/d".into(),
+                "/s".into(),
+                "/c".into(),
+                r"copy /y /b a.txt+b_nospace.txt out1.txt >nul".into(),
+            ],
+            ..Default::default()
+        };
+        let r1 = run(&o1, None, Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(
+            r1.termination,
+            Termination::Exited(0),
+            "stderr={}",
+            String::from_utf8_lossy(&r1.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("out1.txt")).unwrap(),
+            "hello world\n"
+        );
+
+        let o2 = ProcessWrapperOptions {
+            args: vec![
+                "cmd.exe".into(),
+                "/S".into(),
+                "/E:ON".into(),
+                "/V:ON".into(),
+                "/D".into(),
+                "/c".into(),
+                r#"copy /y /b "a.txt"+"sub dir\b.txt" "out2.txt" >nul"#.into(),
+            ],
+            ..Default::default()
+        };
+        let r2 = run(&o2, None, Some(dir.to_str().unwrap())).unwrap();
+        assert_eq!(
+            r2.termination,
+            Termination::Exited(0),
+            "stderr={}",
+            String::from_utf8_lossy(&r2.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("out2.txt")).unwrap(),
+            "hello world\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

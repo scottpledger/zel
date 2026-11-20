@@ -2594,9 +2594,31 @@ pub fn run_process(
         return Ok((0, vec![], vec![]));
     }
     let _ = std::fs::create_dir_all(wd);
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..])
-        .current_dir(wd)
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let prog = if argv[0].contains('/') || argv[0].contains('\\') {
+            argv[0].replace('/', "\\")
+        } else {
+            argv[0].clone()
+        };
+        let mut c = Command::new(&prog);
+        if prog == "cmd.exe" {
+            for arg in &argv[1..] {
+                c.raw_arg(arg);
+            }
+        } else {
+            c.args(&argv[1..]);
+        }
+        c
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let mut c = Command::new(&argv[0]);
+        c.args(&argv[1..]);
+        c
+    };
+    cmd.current_dir(wd)
         .env_clear()
         .envs(env)
         .stdin(Stdio::null())
