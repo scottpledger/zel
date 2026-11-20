@@ -14,12 +14,7 @@ fn host_method(
     match kind {
         "actions" => actions_method(st, ctx, method, pos, kw),
         "ctx" => ctx_method(st, ctx, method, pos, kw),
-        "args" => {
-            let a = args_of(recv).ok_or_else(|| StarlarkError("invalid Args".into()))?;
-            let mut b = a.lock().unwrap();
-            args_method(&mut b, ctx, method, pos, kw)?;
-            Ok(recv.clone())
-        }
+        "args" => args_host_method(recv, ctx, method, pos, kw),
         "runfiles" => {
             let r = runfiles_of(recv).ok_or_else(|| StarlarkError("invalid runfiles".into()))?;
             match method {
@@ -51,6 +46,12 @@ fn host_method(
             }
         }
         "template_dict" => {
+            let Value::Host(k, id) = recv else {
+                return err("invalid TemplateDict");
+            };
+            if k != "template_dict" || id.is_empty() {
+                return err("invalid TemplateDict");
+            }
             let d = template_dict_of(recv).ok_or_else(|| StarlarkError("invalid TemplateDict".into()))?;
             let key = want_str(
                 arg(pos, kw, 0, "key").ok_or_else(|| StarlarkError(format!("{method}() missing 1 required positional argument: key")))?,
@@ -62,7 +63,7 @@ fn host_method(
                     check_kwargs("add", pos, kw, &["key", "value"])?;
                     let v = want_str(arg(pos, kw, 1, "value").ok_or_else(|| StarlarkError("add() missing 1 required positional argument: value".into()))?, "add", "value")?;
                     d.lock().unwrap().push((key, v));
-                    Ok(recv.clone())
+                    Ok(Value::Host("template_dict".into(), id.to_owned()))
                 }
                 "add_joined" => {
                     if pos.len() > 2 {
@@ -104,7 +105,7 @@ fn host_method(
                     akw.insert("omit_if_empty".into(), Value::Bool(false));
                     args_method(&mut b, ctx, "add_joined", &[values], &akw)?;
                     d.lock().unwrap().push((key, b.args.pop().unwrap_or_default()));
-                    Ok(recv.clone())
+                    Ok(Value::Host("template_dict".into(), id.to_owned()))
                 }
                 other => err(format!("'TemplateDict' value has no field or method '{other}'")),
             }

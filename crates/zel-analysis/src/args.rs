@@ -436,13 +436,35 @@ fn map_elements(
     Ok(out)
 }
 
+/// Dispatches a Starlark method call on a `Value::Host("args", id)` receiver and returns the
+/// mutated receiver handle (`this` in Bazel 9.3.2 `CommandLineArgsApi` / `Args.java:305-568`) so
+/// `add`, `add_all`, `add_joined`, `use_param_file`, and `set_param_file_format` chain.
+pub(crate) fn args_host_method(
+    recv: &Value,
+    ctx: &mut EvalContext,
+    method: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> Result<Value, StarlarkError> {
+    let Value::Host(k, id) = recv else {
+        return Err(e("invalid Args"));
+    };
+    if k != "args" || id.is_empty() {
+        return Err(e("invalid Args"));
+    }
+    let a = crate::objects::args_of(recv).ok_or_else(|| e("invalid Args"))?;
+    let mut b = a.lock().unwrap();
+    args_method(&mut b, ctx, method, pos, kw)?;
+    Ok(Value::Host("args".into(), id.to_owned()))
+}
+
 pub(crate) fn args_method(
     b: &mut ArgsBuilder,
     ctx: &mut EvalContext,
     method: &str,
     pos: &[Value],
     kw: &BTreeMap<String, Value>,
-) -> Result<Value, StarlarkError> {
+) -> Result<(), StarlarkError> {
     match method {
         "add" => {
             check_kw("add", pos, 2, kw, &["arg_name_or_value", "value", "format"])?;
@@ -498,7 +520,7 @@ pub(crate) fn args_method(
             if end > start {
                 b.groups.push((start, end));
             }
-            Ok(Value::Host("args".into(), String::new()))
+            Ok(())
         }
         "add_all" => {
             check_kw(
@@ -565,7 +587,7 @@ pub(crate) fn args_method(
                 });
             }
             if mapped.is_empty() && omit_if_empty {
-                return Ok(Value::None);
+                return Ok(());
             }
             let start = b.args.len();
             let has_concrete = mapped.iter().any(|m| matches!(m, MappedItem::Concrete(_)));
@@ -609,7 +631,7 @@ pub(crate) fn args_method(
             if end > start {
                 b.groups.push((start, end));
             }
-            Ok(Value::Host("args".into(), String::new()))
+            Ok(())
         }
         "add_joined" => {
             check_kw(
@@ -685,7 +707,7 @@ pub(crate) fn args_method(
                 strs.retain(|s| seen.insert(s.clone()));
             }
             if strs.is_empty() && omit_if_empty {
-                return Ok(Value::None);
+                return Ok(());
             }
             let mut formatted = Vec::with_capacity(strs.len());
             for s in strs {
@@ -705,7 +727,7 @@ pub(crate) fn args_method(
             b.args.push(joined);
             let end = b.args.len();
             b.groups.push((start, end));
-            Ok(Value::Host("args".into(), String::new()))
+            Ok(())
         }
         "use_param_file" => {
             check_kw(
@@ -739,7 +761,7 @@ pub(crate) fn args_method(
                 leading_args: 0,
                 flag_groups: b.groups.clone(),
             });
-            Ok(Value::None)
+            Ok(())
         }
         "set_param_file_format" => {
             check_kw("set_param_file_format", pos, 1, kw, &["format"])?;
@@ -770,7 +792,7 @@ pub(crate) fn args_method(
             if let Some(p) = b.param_file.as_mut() {
                 p.format = fmt;
             }
-            Ok(Value::None)
+            Ok(())
         }
         other => Err(e(format!("'Args' value has no field or method '{other}'"))),
     }
@@ -830,5 +852,128 @@ mod tests {
         assert!(format_arg("%s %s", "v").is_err());
         assert!(validate_format_str("param_file_arg", "%%s").is_err());
         assert!(validate_format_str("param_file_arg", "100%%-%s").is_ok());
+    }
+
+    #[test]
+    fn args_host_method_preserves_receiver_handle_across_all_chained_mutations() {
+        let mut ectx = EvalContext::new(zel_vfs::PathFragment::empty(), None);
+        let a1 = crate::objects::args_value(ArgsBuilder::default());
+        let a2 = crate::objects::args_value(ArgsBuilder::default());
+        let Value::Host(_, id1) = &a1 else {
+            panic!("expected Value::Host for a1");
+        };
+        assert!(!id1.is_empty());
+        assert_ne!(a1, a2);
+
+        let list = |items: &[&str]| {
+            crate::starlark_rule::mk_list(
+                items.iter().map(|s| Value::String((*s).into())).collect(),
+            )
+        };
+
+        // Chain every mutating method (including omit_if_empty early-return paths) on `a1`.
+        let cur = args_host_method(
+            &a1,
+            &mut ectx,
+            "add_all",
+            &[Value::String("--foo".into()), list(&["x", "y", "x"])],
+            &BTreeMap::from([("uniquify".into(), Value::Bool(true))]),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        let cur = args_host_method(
+            &cur,
+            &mut ectx,
+            "add_all",
+            &[Value::String("--omitted".into()), list(&[])],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        let cur = args_host_method(
+            &cur,
+            &mut ectx,
+            "add_joined",
+            &[Value::String("--bar".into()), list(&["m", "n"])],
+            &BTreeMap::from([("join_with".into(), Value::String(",".into()))]),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        let cur = args_host_method(
+            &cur,
+            &mut ectx,
+            "add_joined",
+            &[Value::String("--omitted_join".into()), list(&[])],
+            &BTreeMap::from([("join_with".into(), Value::String(",".into()))]),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        let cur = args_host_method(
+            &cur,
+            &mut ectx,
+            "add",
+            &[Value::String("--baz".into()), Value::String("z".into())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        let cur = args_host_method(
+            &cur,
+            &mut ectx,
+            "use_param_file",
+            &[Value::String("--flagfile=%s".into())],
+            &BTreeMap::from([("use_always".into(), Value::Bool(true))]),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        let cur = args_host_method(
+            &cur,
+            &mut ectx,
+            "set_param_file_format",
+            &[Value::String("flag_per_line".into())],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(cur, a1);
+
+        // An empty-id Host("args", "") handle must be rejected, never silently mutated.
+        assert!(args_host_method(
+            &Value::Host("args".into(), String::new()),
+            &mut ectx,
+            "add",
+            &[Value::String("--bad".into())],
+            &BTreeMap::new(),
+        )
+        .is_err());
+
+        let finished1 = crate::objects::args_of(&cur)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .finish();
+        assert_eq!(
+            finished1.args,
+            vec!["--foo", "x", "y", "--bar", "m,n", "--baz", "z"]
+        );
+        let pf = finished1.param_file.expect("param_file must be set");
+        assert_eq!(pf.flag_format, "--flagfile=%s");
+        assert!(pf.use_always);
+        assert_eq!(pf.format, ParamFileFormat::FlagPerLine);
+        assert_eq!(pf.flag_groups, vec![(0, 3), (3, 5), (5, 7)]);
+
+        // `a2` was untouched by chaining on `a1`.
+        let finished2 = crate::objects::args_of(&a2)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .finish();
+        assert!(finished2.args.is_empty());
+        assert!(finished2.param_file.is_none());
     }
 }

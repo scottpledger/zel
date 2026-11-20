@@ -23,7 +23,7 @@
 //! `starlark_rule_actions.rs` (ctx/actions/runfiles/template_dict methods),
 //! `starlark_rule_driver.rs` (attribute conversion, implementation call, provider handling).
 
-use crate::args::{args_method, ArgsBuilder};
+use crate::args::{args_host_method, args_method, ArgsBuilder};
 use crate::location::{
     expand_locations_with_mapping, expand_make_variables, expand_with_locations, shell_tokenize,
     LocationMode,

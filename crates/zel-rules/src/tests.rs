@@ -4287,3 +4287,148 @@ ext_cc_lib(
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn args_and_template_dict_methods_return_self_for_arbitrary_chaining() {
+    let ws = Ws::new(&[
+        ("tpl.in", "%k1%|%k2%\n"),
+        (
+            "defs.bzl",
+            r#"
+def _ident(x):
+    return x
+
+def _impl(ctx):
+    run_out = ctx.actions.declare_file(ctx.label.name + ".run")
+    write_out = ctx.actions.declare_file(ctx.label.name + ".args")
+    tpl_out = ctx.actions.declare_file(ctx.label.name + ".tpl")
+
+    other = ctx.actions.args().add("--untouched")
+    chained = (
+        ctx.actions.args()
+        .add_all("--foo", ["a", "b", "a"], uniquify = True)
+        .add_all("--omitted", [])
+        .add_joined("--bar", depset(["x", "y"]), join_with = ",")
+        .add_joined("--omitted_join", [], join_with = ",")
+        .add("--baz", "z")
+        .use_param_file("--flagfile=%s", use_always = True)
+        .set_param_file_format("flag_per_line")
+    )
+    if chained == other:
+        fail("distinct Args instances must not compare equal")
+    if chained.add("positional_tail") != chained:
+        fail("Args.add must return receiver")
+
+    ctx.actions.run(
+        outputs = [run_out],
+        executable = "/bin/echo",
+        arguments = [chained],
+    )
+
+    written = (
+        ctx.actions.args()
+        .use_param_file("%s", use_always = True)
+        .set_param_file_format("multiline")
+        .add("line1")
+        .add_all(["line2", "line3"])
+        .add_joined(["p", "q"], join_with = ":")
+    )
+    ctx.actions.write(output = write_out, content = written)
+
+    tdict = (
+        ctx.actions.template_dict()
+        .add("%k1%", "hello")
+        .add_joined("%k2%", depset(["u", "v"]), join_with = ";", map_each = _ident)
+    )
+    ctx.actions.expand_template(
+        template = ctx.file.tpl,
+        output = tpl_out,
+        substitutions = {},
+        computed_substitutions = tdict,
+    )
+
+    # Verify `other` never received mutations from `chained` or `written`.
+    other_out = ctx.actions.declare_file(ctx.label.name + ".other")
+    ctx.actions.write(output = other_out, content = other)
+    return [DefaultInfo(files = depset([run_out, write_out, tpl_out, other_out]))]
+
+chained_rule = rule(
+    implementation = _impl,
+    attrs = {"tpl": attr.label(allow_single_file = True, default = "//:tpl.in")},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "chained_rule")
+chained_rule(name = "t")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:t").expect("analysis should succeed");
+    let spawn = ct
+        .typed_actions
+        .iter()
+        .find(|a| a.outputs.iter().any(|o| o.basename() == "t.run"))
+        .expect("spawn action for t.run");
+    let (argv, param_files) = spawn.command_line();
+    // `flag_per_line` keeps non-flags (`positional_tail`) on the command line alongside `--flagfile=...`.
+    assert_eq!(argv[0], "/bin/echo");
+    assert!(
+        argv.iter().any(|a| a.starts_with("--flagfile=")),
+        "expected --flagfile arg in {argv:?}"
+    );
+    assert!(
+        argv.contains(&"positional_tail".to_string()),
+        "expected positional_tail on command line in {argv:?}"
+    );
+    assert_eq!(param_files.len(), 1);
+    assert_eq!(param_files[0].1, b"--foo=a b\n--bar=x,y\n--baz=z\n");
+
+    let write_action = ct
+        .typed_actions
+        .iter()
+        .find(|a| a.outputs.iter().any(|o| o.basename() == "t.args"))
+        .expect("write action for t.args");
+    match &write_action.kind {
+        ActionKind::FileWrite { content, .. } => {
+            assert_eq!(content.render(), b"line1\nline2\nline3\np:q\n");
+        }
+        other => panic!("expected FileWrite, got {other:?}"),
+    }
+
+    let other_action = ct
+        .typed_actions
+        .iter()
+        .find(|a| a.outputs.iter().any(|o| o.basename() == "t.other"))
+        .expect("write action for t.other");
+    match &other_action.kind {
+        ActionKind::FileWrite { content, .. } => {
+            assert_eq!(content.render(), b"--untouched\n");
+        }
+        other => panic!("expected FileWrite, got {other:?}"),
+    }
+
+    let tpl_action = ct
+        .typed_actions
+        .iter()
+        .find(|a| a.outputs.iter().any(|o| o.basename() == "t.tpl"))
+        .expect("template expansion action for t.tpl");
+    match &tpl_action.kind {
+        ActionKind::TemplateExpand {
+            computed_substitutions,
+            ..
+        } => {
+            assert_eq!(
+                computed_substitutions,
+                &vec![
+                    ("%k1%".to_string(), "hello".to_string()),
+                    ("%k2%".to_string(), "u;v".to_string()),
+                ]
+            );
+        }
+        other => panic!("expected TemplateExpand, got {other:?}"),
+    }
+}
