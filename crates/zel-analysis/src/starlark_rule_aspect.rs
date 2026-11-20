@@ -331,6 +331,15 @@ fn apply_aspect_path(
             continue;
         }
 
+        struct AspectOwnerGuard<'a>(&'a dyn DepResolver);
+        impl Drop for AspectOwnerGuard<'_> {
+            fn drop(&mut self) {
+                self.0.pop_aspect_owner();
+            }
+        }
+        resolver.push_aspect_owner(&current_ct.label, &current_ct.configuration);
+        let _aspect_owner_guard = AspectOwnerGuard(resolver.as_ref());
+
         let loc = rule.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
         let prefix = format!(
             "{loc}in {aspect_id} aspect on {} rule {}: ",

@@ -92,6 +92,12 @@ pub trait PatternExpander: Send + Sync + std::fmt::Debug {
                     .collect()
             })
     }
+
+    /// True only for the default [`LoaderExpander`] installed automatically by
+    /// [`TargetResolver::new`] when `AnalysisConfig::expander` is `None`.
+    fn is_default_loader_expander(&self) -> bool {
+        false
+    }
 }
 
 impl AnalysisConfig {
@@ -242,6 +248,70 @@ impl AnalysisConfig {
             ..Default::default()
         }
     }
+
+    /// Whether another command's `AnalysisConfig` has identical analysis-affecting settings,
+    /// allowing an existing `TargetResolver` (and its toolchain/platform expansion caches) to be
+    /// reused across commands when no inputs changed.
+    ///
+    /// Uses exhaustive struct destructuring so adding any field to `AnalysisConfig` forces a
+    /// compile-time decision on how it participates in cache compatibility.
+    pub fn matches_for_reuse(&self, other: &Self) -> bool {
+        let Self {
+            registered_toolchains,
+            extra_execution_platforms,
+            toolchain_patterns,
+            extra_toolchain_pattern_count,
+            execution_platform_patterns,
+            expander,
+            allow_unresolved_symlinks,
+            no_compact_repo_mapping,
+            check_visibility,
+            host_platform,
+            platforms_repo,
+            shell_executable,
+            sibling_repository_layout,
+            // Derived memoization cache invalidated via `state_generation` whenever inputs change.
+            expansion_cache: _,
+        } = self;
+        let Self {
+            registered_toolchains: o_registered_toolchains,
+            extra_execution_platforms: o_extra_execution_platforms,
+            toolchain_patterns: o_toolchain_patterns,
+            extra_toolchain_pattern_count: o_extra_toolchain_pattern_count,
+            execution_platform_patterns: o_execution_platform_patterns,
+            expander: o_expander,
+            allow_unresolved_symlinks: o_allow_unresolved_symlinks,
+            no_compact_repo_mapping: o_no_compact_repo_mapping,
+            check_visibility: o_check_visibility,
+            host_platform: o_host_platform,
+            platforms_repo: o_platforms_repo,
+            shell_executable: o_shell_executable,
+            sibling_repository_layout: o_sibling_repository_layout,
+            expansion_cache: _,
+        } = other;
+        let expander_matches = match (expander, o_expander) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                Arc::ptr_eq(a, b)
+                    || (a.is_default_loader_expander() && b.is_default_loader_expander())
+            }
+            (Some(a), None) => a.is_default_loader_expander(),
+            (None, Some(b)) => b.is_default_loader_expander(),
+        };
+        registered_toolchains == o_registered_toolchains
+            && extra_execution_platforms == o_extra_execution_platforms
+            && toolchain_patterns == o_toolchain_patterns
+            && extra_toolchain_pattern_count == o_extra_toolchain_pattern_count
+            && execution_platform_patterns == o_execution_platform_patterns
+            && expander_matches
+            && allow_unresolved_symlinks == o_allow_unresolved_symlinks
+            && no_compact_repo_mapping == o_no_compact_repo_mapping
+            && check_visibility == o_check_visibility
+            && host_platform == o_host_platform
+            && platforms_repo == o_platforms_repo
+            && shell_executable == o_shell_executable
+            && sibling_repository_layout == o_sibling_repository_layout
+    }
 }
 
 pub struct TargetResolver {
@@ -262,10 +332,22 @@ pub struct TargetResolver {
     order: Mutex<Vec<Arc<ConfiguredTarget>>>,
     /// Memoized aspect applications (see `DepResolver::aspect_cache_get`).
     aspects: Mutex<HashMap<String, Arc<ConfiguredTarget>>>,
+    /// Set once top-level CLI `--aspects` have been applied via `analyze_with_aspects`.
+    /// Resolvers with CLI aspects must not be reused by subsequent commands without those aspects.
+    has_cli_aspects: std::sync::atomic::AtomicBool,
+    /// Active `(owner_key, rule_stack_depth)` stack while evaluating aspects, so extra
+    /// dependencies pulled in by aspects are recorded in `all_deps` under the aspected target
+    /// without mutating `stack` or `edges`.
+    #[allow(clippy::type_complexity)]
+    aspect_owners: Mutex<Vec<((String, String), usize)>>,
     /// Direct dependency edges of configured targets as seen by `check_dependency` (consumer
     /// key -> deps in attribute order); used by `cquery`.
     #[allow(clippy::type_complexity)]
     edges: Mutex<HashMap<(String, String), Vec<(Label, BuildConfigurationKey)>>>,
+    /// All analysis dependency edges recorded across `analyze()` calls (including toolchains,
+    /// output files, aliases, transitions, and aspect targets) for root-scoped graph queries.
+    #[allow(clippy::type_complexity)]
+    all_deps: Mutex<HashMap<(String, String), Vec<(String, String)>>>,
     /// Analysis-time rule warnings (`ruleContext.ruleWarning`), in the order they were reported.
     warnings: Mutex<Vec<String>>,
     me: Weak<TargetResolver>,
@@ -440,6 +522,10 @@ impl PatternExpander for LoaderExpander {
             })
             .collect())
     }
+
+    fn is_default_loader_expander(&self) -> bool {
+        true
+    }
 }
 
 impl TargetResolver {
@@ -461,7 +547,10 @@ impl TargetResolver {
             defer_cycle_dedup: std::sync::atomic::AtomicBool::new(false),
             order: Mutex::new(Vec::new()),
             aspects: Mutex::new(HashMap::new()),
+            has_cli_aspects: std::sync::atomic::AtomicBool::new(false),
+            aspect_owners: Mutex::new(Vec::new()),
             edges: Mutex::new(HashMap::new()),
+            all_deps: Mutex::new(HashMap::new()),
             warnings: Mutex::new(Vec::new()),
             me: me.clone(),
         })
@@ -687,6 +776,21 @@ impl TargetResolver {
             }
         };
         let k = key(label, cfg);
+        let owner = {
+            let st = self.stack.lock().unwrap();
+            let ao = self.aspect_owners.lock().unwrap();
+            match ao.last() {
+                Some((aspect_owner, depth)) if st.len() == *depth => Some(aspect_owner.clone()),
+                _ => st.last().cloned(),
+            }
+        };
+        if let Some(owner) = owner {
+            let mut deps = self.all_deps.lock().unwrap();
+            let entry = deps.entry(owner).or_default();
+            if !entry.contains(&k) {
+                entry.push(k.clone());
+            }
+        }
         if let Some(c) = self.cache.lock().unwrap().get(&k) {
             return Ok(c.clone());
         }
@@ -797,6 +901,22 @@ impl TargetResolver {
         self.stack.lock().unwrap().pop();
         self.stack_cfg.lock().unwrap().pop();
         let ct = Arc::new(r?);
+        let actual_k = key(&ct.label, &ct.configuration);
+        if actual_k != k {
+            // Incoming rule-level transitions (e.g. `process_wrapper` in `rules_rust`) change
+            // `ct.configuration` relative to the lookup key `k`. Link `k <-> actual_k` in both
+            // directions so `reachable_keys` reaches `actual_k` when this target is a dependency
+            // (reached via `k`) and reaches its child deps (recorded under `k`) when it is a root.
+            let mut deps = self.all_deps.lock().unwrap();
+            let fwd = deps.entry(k.clone()).or_default();
+            if !fwd.contains(&actual_k) {
+                fwd.push(actual_k.clone());
+            }
+            let rev = deps.entry(actual_k).or_default();
+            if !rev.contains(&k) {
+                rev.push(k.clone());
+            }
+        }
         self.cache.lock().unwrap().insert(k, ct.clone());
         self.order.lock().unwrap().push(ct.clone());
         Ok(ct)
@@ -817,6 +937,76 @@ impl TargetResolver {
         v
     }
 
+    /// Number of configured targets cached in this resolver.
+    pub fn analyzed_count(&self) -> usize {
+        self.cache.lock().unwrap().len()
+    }
+
+    /// Collects the set of `(label, cfg)` keys transitively reachable from `roots`.
+    fn reachable_keys(
+        &self,
+        roots: &[Arc<ConfiguredTarget>],
+    ) -> std::collections::HashSet<(String, String)> {
+        let deps = self.all_deps.lock().unwrap();
+        let mut visited: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut work: Vec<(String, String)> = Vec::with_capacity(roots.len());
+        for r in roots {
+            let k = key(&r.label, &r.configuration);
+            if visited.insert(k.clone()) {
+                work.push(k);
+            }
+        }
+        while let Some(cur) = work.pop() {
+            if let Some(children) = deps.get(&cur) {
+                for ch in children {
+                    if visited.insert(ch.clone()) {
+                        work.push(ch.clone());
+                    }
+                }
+            }
+        }
+        visited
+    }
+
+    /// Every configured target transitively reachable from `roots`, in analysis order, plus
+    /// aspect-decorated targets attached to reachable nodes.
+    pub fn reachable_targets(&self, roots: &[Arc<ConfiguredTarget>]) -> Vec<Arc<ConfiguredTarget>> {
+        let reachable = self.reachable_keys(roots);
+        let mut v: Vec<Arc<ConfiguredTarget>> = self
+            .order
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|ct| reachable.contains(&key(&ct.label, &ct.configuration)))
+            .cloned()
+            .collect();
+        for ct in self.aspects.lock().unwrap().values() {
+            if reachable.contains(&key(&ct.label, &ct.configuration)) {
+                v.push(ct.clone());
+            }
+        }
+        v
+    }
+
+    /// Resets per-command transient bookkeeping while preserving cached configured targets,
+    /// loaded packages, dependency edges, and toolchain/platform expansion caches.
+    pub fn prepare_for_reuse(&self) {
+        self.stack.lock().unwrap().clear();
+        self.stack_cfg.lock().unwrap().clear();
+        self.aspect_owners.lock().unwrap().clear();
+        self.reported_cycles.lock().unwrap().clear();
+        self.warnings.lock().unwrap().clear();
+        self.defer_cycle_dedup
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether top-level CLI `--aspects` were applied to any target in this resolver.
+    pub fn has_cli_aspects(&self) -> bool {
+        self.has_cli_aspects
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Analyses `label` in `cfg` and applies the top-level `aspects` (`--aspects`, values as
     /// returned by [`PackageLoader::load_bzl_export`]) in order; `params` are the raw
     /// `--aspects_parameters` values.
@@ -831,7 +1021,17 @@ impl TargetResolver {
         if aspects.is_empty() {
             return Ok(ct);
         }
+        self.has_cli_aspects
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let me: Arc<dyn DepResolver> = self.me();
+        struct RootAspectOwnerGuard<'a>(&'a TargetResolver);
+        impl Drop for RootAspectOwnerGuard<'_> {
+            fn drop(&mut self) {
+                <TargetResolver as DepResolver>::pop_aspect_owner(self.0);
+            }
+        }
+        <TargetResolver as DepResolver>::push_aspect_owner(self, &ct.label, &ct.configuration);
+        let _root_owner_guard = RootAspectOwnerGuard(self);
         let mut inputs = zel_analysis::starlark_rule::AnalysisInputs::new(me);
         inputs.sibling_repository_layout =
             self.config.sibling_repository_layout || self.loader.config().sibling_repository_layout;
@@ -864,6 +1064,32 @@ impl TargetResolver {
             }
         }
         Ok(g)
+    }
+
+    /// Action graph built from a precomputed slice of reachable configured targets plus `extra`
+    /// (e.g. roots decorated by top-level aspects).
+    pub fn action_graph_for_targets(
+        targets: &[Arc<ConfiguredTarget>],
+        extra: &[Arc<ConfiguredTarget>],
+    ) -> Result<zel_analysis::ActionGraph, zel_analysis::ActionConflict> {
+        let mut g = zel_analysis::ActionGraph::new();
+        for ct in targets.iter().chain(extra.iter()) {
+            for a in &ct.typed_actions {
+                g.register(a)?;
+            }
+        }
+        Ok(g)
+    }
+
+    /// Action graph scoped to configured targets transitively reachable from `roots` (plus
+    /// `roots` themselves, which may carry top-level aspects), so unrelated targets cached from
+    /// previous commands in a reused resolver cannot cause spurious action conflicts.
+    pub fn action_graph_for_roots(
+        &self,
+        roots: &[Arc<ConfiguredTarget>],
+    ) -> Result<zel_analysis::ActionGraph, zel_analysis::ActionConflict> {
+        let targets = self.reachable_targets(roots);
+        Self::action_graph_for_targets(&targets, roots)
     }
 
     /// Direct dependencies (label and configuration) of the configured target `label` in `cfg`,
@@ -958,6 +1184,7 @@ impl TargetResolver {
         let mut cache = self.cache.lock().unwrap();
         let mut order = self.order.lock().unwrap();
         let mut edges = self.edges.lock().unwrap();
+        let mut all_deps = self.all_deps.lock().unwrap();
         let mut pkg_sets = self.pkg_sets.lock().unwrap();
         for (k, ct) in other.cache.lock().unwrap().iter() {
             if (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
@@ -968,6 +1195,17 @@ impl TargetResolver {
                 if let Some(e) = other.edges.lock().unwrap().get(k) {
                     edges.insert(k.clone(), e.clone());
                 }
+                let actual_k = key(&ct.label, &ct.configuration);
+                let other_all_deps = other.all_deps.lock().unwrap();
+                if let Some(d) = other_all_deps.get(k) {
+                    all_deps.insert(k.clone(), d.clone());
+                }
+                if actual_k != *k {
+                    if let Some(d) = other_all_deps.get(&actual_k) {
+                        all_deps.insert(actual_k, d.clone());
+                    }
+                }
+                drop(other_all_deps);
                 if let Some(p) = other.pkg_sets.lock().unwrap().get(k) {
                     pkg_sets.insert(k.clone(), p.clone());
                 }
@@ -978,14 +1216,21 @@ impl TargetResolver {
     pub fn clear_exec(&self) {
         let mut cache = self.cache.lock().unwrap();
         cache.retain(|_, ct| ct.configuration.core_only);
-        let kept_keys: std::collections::HashSet<(String, String)> =
+        let mut kept_keys: std::collections::HashSet<(String, String)> =
             cache.keys().cloned().collect();
+        for ct in cache.values() {
+            kept_keys.insert(key(&ct.label, &ct.configuration));
+        }
         drop(cache);
         self.order
             .lock()
             .unwrap()
             .retain(|ct| ct.configuration.core_only);
         self.edges
+            .lock()
+            .unwrap()
+            .retain(|k, _| kept_keys.contains(k));
+        self.all_deps
             .lock()
             .unwrap()
             .retain(|k, _| kept_keys.contains(k));
@@ -1001,14 +1246,21 @@ impl TargetResolver {
             (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
                 || ct.configuration.core_only
         });
-        let kept_keys: std::collections::HashSet<(String, String)> =
+        let mut kept_keys: std::collections::HashSet<(String, String)> =
             cache.keys().cloned().collect();
+        for ct in cache.values() {
+            kept_keys.insert(key(&ct.label, &ct.configuration));
+        }
         drop(cache);
         self.order.lock().unwrap().retain(|ct| {
             (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
                 || ct.configuration.core_only
         });
         self.edges
+            .lock()
+            .unwrap()
+            .retain(|k, _| kept_keys.contains(k));
+        self.all_deps
             .lock()
             .unwrap()
             .retain(|k, _| kept_keys.contains(k));
@@ -1028,15 +1280,7 @@ impl TargetResolver {
             }));
         }
         self.config.clear_caches();
-        if config.check_visibility != self.config.check_visibility
-            || config.allow_unresolved_symlinks != self.config.allow_unresolved_symlinks
-            || config.no_compact_repo_mapping != self.config.no_compact_repo_mapping
-            || config.sibling_repository_layout != self.config.sibling_repository_layout
-            || config.host_platform != self.config.host_platform
-            || config.shell_executable != self.config.shell_executable
-            || config.toolchain_patterns != self.config.toolchain_patterns
-            || config.execution_platform_patterns != self.config.execution_platform_patterns
-        {
+        if !self.config.matches_for_reuse(&config) {
             self.retain_exec_only();
             if config.sibling_repository_layout != self.config.sibling_repository_layout {
                 self.clear_exec();
@@ -1562,6 +1806,18 @@ impl DepResolver for TargetResolver {
         self.aspects.lock().unwrap().insert(key, value);
     }
 
+    fn push_aspect_owner(&self, label: &Label, cfg: &BuildConfigurationKey) {
+        let depth = self.stack.lock().unwrap().len();
+        self.aspect_owners
+            .lock()
+            .unwrap()
+            .push((key(label, cfg), depth));
+    }
+
+    fn pop_aspect_owner(&self) {
+        self.aspect_owners.lock().unwrap().pop();
+    }
+
     fn aspect_toolchains(
         &self,
         owner: &Label,
@@ -1948,4 +2204,105 @@ pub(crate) fn source_file_target_with_layout(
     groups.insert("default".to_string(), vec![art]);
     ct.output_groups = zel_analysis::OutputGroupInfo { groups };
     ct
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct CustomExpander;
+
+    impl PatternExpander for CustomExpander {
+        fn expand(&self, _patterns: &[String], _rule_class: &str) -> Result<Vec<Label>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn analysis_config_matches_for_reuse_checks_all_fields() {
+        let base = AnalysisConfig::new();
+        assert!(base.matches_for_reuse(&AnalysisConfig::new()));
+
+        let mut c = base.clone();
+        c.registered_toolchains
+            .push(Label::parse_canonical("//:tc").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.extra_execution_platforms
+            .push(Label::parse_canonical("//:ep").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.toolchain_patterns.push("//:tc".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.extra_toolchain_pattern_count = 1;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.execution_platform_patterns.push("//:ep".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let custom: Arc<dyn PatternExpander> = Arc::new(CustomExpander);
+        let mut c = base.clone();
+        c.expander = Some(Arc::clone(&custom));
+        assert!(!base.matches_for_reuse(&c));
+        assert!(!c.matches_for_reuse(&base));
+        let mut c_same = base.clone();
+        c_same.expander = Some(Arc::clone(&custom));
+        assert!(c.matches_for_reuse(&c_same));
+
+        // Two distinct default `LoaderExpander` instances (as created by `TargetResolver::new`
+        // and `TargetResolver::update_for_command`) are compatible with each other and with `None`,
+        // but never with a custom `PatternExpander`.
+        let fs = Arc::new(zel_vfs::InMemoryFileSystem::default());
+        let loader = zel_packages::PackageLoader::new(zel_packages::LoaderConfig::new(
+            fs,
+            Arc::new(zel_packages::SimpleRepoResolver::new(
+                zel_vfs::PathFragment::create("/ws"),
+            )),
+        ));
+        let mut def_a = base.clone();
+        def_a.expander = Some(Arc::new(LoaderExpander {
+            loader: loader.clone(),
+        }));
+        let mut def_b = base.clone();
+        def_b.expander = Some(Arc::new(LoaderExpander { loader }));
+        assert!(def_a.matches_for_reuse(&def_b));
+        assert!(def_a.matches_for_reuse(&base));
+        assert!(base.matches_for_reuse(&def_a));
+        assert!(!def_a.matches_for_reuse(&c));
+        assert!(!c.matches_for_reuse(&def_a));
+
+        let mut c = base.clone();
+        c.allow_unresolved_symlinks = false;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.no_compact_repo_mapping = true;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.check_visibility = false;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.host_platform = Some(Label::parse_canonical("//:host").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.platforms_repo = "other_platforms".to_string();
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.shell_executable = Some("/bin/zsh".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.sibling_repository_layout = true;
+        assert!(!base.matches_for_reuse(&c));
+    }
 }

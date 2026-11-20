@@ -1090,7 +1090,9 @@ fn describe_command(
 
 #[allow(clippy::type_complexity)]
 static COMPUTED_DIGEST_CACHE: std::sync::LazyLock<
-    std::sync::RwLock<std::collections::HashMap<(DigestFunction, String), (u64, u64, String)>>,
+    std::sync::RwLock<
+        std::collections::HashMap<(DigestFunction, String), (u64, u64, u64, u64, Vec<u8>)>,
+    >,
 > = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
 pub fn invalidate_computed_digest(path: &str) {
@@ -1099,6 +1101,58 @@ pub fn invalidate_computed_digest(path: &str) {
             w.remove(&(df, path.to_string()));
         }
     }
+}
+
+/// Computes `path`'s digest using `digest`, consulting the process-wide `(inode, size, mtime,
+/// ctime)` cache when `max_entries > 0` and the file is outside the 2-second racy-mtime window.
+pub(crate) fn cached_file_digest_bytes(
+    digest: DigestFunction,
+    fs: &dyn FileSystem,
+    path: &PathFragment,
+    st: &zel_vfs::FileStatus,
+    max_entries: usize,
+) -> io::Result<Vec<u8>> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let cacheable = max_entries > 0
+        && st.last_modified_time_ms != 0
+        && now_ms.saturating_sub(st.last_modified_time_ms) >= 2000;
+    if cacheable {
+        if let Ok(r) = COMPUTED_DIGEST_CACHE.read() {
+            if let Some((nid, sz, mt, ct, cached)) =
+                r.get(&(digest, path.path_string().to_string()))
+            {
+                if *nid == st.node_id
+                    && *sz == st.size
+                    && *mt == st.last_modified_time_ms
+                    && *ct == st.last_change_time_ms
+                {
+                    return Ok(cached.clone());
+                }
+            }
+        }
+    }
+    let bytes = fs.read_file(path)?;
+    let sum = digest.hash(&bytes);
+    if cacheable {
+        if let Ok(mut w) = COMPUTED_DIGEST_CACHE.write() {
+            if w.len() < max_entries {
+                w.insert(
+                    (digest, path.path_string().to_string()),
+                    (
+                        st.node_id,
+                        st.size,
+                        st.last_modified_time_ms,
+                        st.last_change_time_ms,
+                        sum.clone(),
+                    ),
+                );
+            }
+        }
+    }
+    Ok(sum)
 }
 
 /// Recursively deletes a file, symlink, or directory tree via `FileSystem`.
@@ -1313,7 +1367,13 @@ pub fn path_digest(
                     let slash_rel = format!("/{rel}");
                     buf.extend_from_slice(slash_rel.as_bytes());
                     buf.push(0);
-                    if let Ok(b) = fs.read_file(resolved_path) {
+                    if let Ok(fst) = fs.stat(resolved_path, true) {
+                        if let Ok(d) =
+                            cached_file_digest_bytes(digest, fs, resolved_path, &fst, 100_000)
+                        {
+                            buf.extend_from_slice(zel_util::to_hex(&d).as_bytes());
+                        }
+                    } else if let Ok(b) = fs.read_file(resolved_path) {
                         buf.extend_from_slice(digest.hex(&b).as_bytes());
                     }
                     buf.push(0);
@@ -1335,33 +1395,9 @@ pub fn path_digest(
     if !st.is_file {
         return None;
     }
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let cacheable = st.last_modified_time_ms != 0
-        && (st.size > 65536 || now_ms.saturating_sub(st.last_modified_time_ms) >= 2000);
-    if cacheable {
-        if let Ok(r) = COMPUTED_DIGEST_CACHE.read() {
-            if let Some((sz, mt, cached)) = r.get(&(digest, path.path_string().to_string())) {
-                if *sz == st.size && *mt == st.last_modified_time_ms {
-                    return Some(cached.clone());
-                }
-            }
-        }
-    }
-    let res = fs.read_file(path).ok().map(|b| digest.hex(&b));
-    if cacheable {
-        if let (Some(ref v), Ok(mut w)) = (&res, COMPUTED_DIGEST_CACHE.write()) {
-            if w.len() < 100_000 {
-                w.insert(
-                    (digest, path.path_string().to_string()),
-                    (st.size, st.last_modified_time_ms, v.clone()),
-                );
-            }
-        }
-    }
-    res
+    cached_file_digest_bytes(digest, fs, path, &st, 100_000)
+        .ok()
+        .map(|d| zel_util::to_hex(&d))
 }
 
 /// Decodes raw `.d` bytes as ISO-8859-1 (`Latin-1`), matching Bazel's `DepsScanner`.

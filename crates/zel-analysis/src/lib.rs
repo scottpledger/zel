@@ -907,7 +907,20 @@ impl BuildConfigurationKey {
 
     /// `BuildOptions.checksum()` of the (test-trimmed) configuration non-test targets use.
     pub fn checksum(&self) -> String {
-        self.build_options().checksum()
+        static CACHE: std::sync::OnceLock<
+            std::sync::RwLock<std::collections::HashMap<BuildConfigurationKey, String>>,
+        > = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+        if let Some(hit) = cache.read().unwrap().get(self) {
+            return hit.clone();
+        }
+        let sum = self.build_options().checksum();
+        let mut guard = cache.write().unwrap();
+        if guard.len() >= 2048 {
+            guard.clear();
+        }
+        guard.insert(self.clone(), sum.clone());
+        sum
     }
 
     pub fn short_hash(&self) -> String {
@@ -2889,5 +2902,28 @@ mod tests {
         assert!(!disabled_cfg
             .to_exec()
             .bool_option("incompatible_stop_exporting_build_file_path", false));
+    }
+
+    #[test]
+    fn checksum_cache_is_sound_across_mutations() {
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        let h1 = cfg.checksum();
+        assert_eq!(h1, cfg.build_options().checksum());
+        assert_eq!(h1, cfg.checksum());
+
+        cfg.user_defines.insert("FOO".to_string(), "1".to_string());
+        let h2 = cfg.checksum();
+        assert_eq!(h2, cfg.build_options().checksum());
+        assert_ne!(h1, h2);
+
+        cfg.user_defines.insert("FOO".to_string(), "2".to_string());
+        let h3 = cfg.checksum();
+        assert_eq!(h3, cfg.build_options().checksum());
+        assert_ne!(h2, h3);
+
+        cfg.is_exec = true;
+        let h4 = cfg.checksum();
+        assert_eq!(h4, cfg.build_options().checksum());
+        assert_ne!(h3, h4);
     }
 }

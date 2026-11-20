@@ -373,6 +373,7 @@ impl BlazeRuntime {
         if result.is_ok() {
             let mut m = self.eval_memo.lock().unwrap_or_else(|e| e.into_inner());
             if cache_discarded {
+                self.bump_state_generation();
                 if let Some(r) = self.last_resolver.lock().unwrap().as_ref() {
                     r.retain_exec_only();
                     if guard
@@ -771,7 +772,23 @@ impl BlazeRuntime {
                 return Err(ExitCode::COMMAND_LINE_ERROR);
             }
         };
-        let resolver = TargetResolver::new(loader.clone(), acfg);
+        let can_reuse_resolver = self.skyframe.is_tracking_incremental_state()
+            && !parsed.get_bool("discard_analysis_cache").unwrap_or(false)
+            && opt_list(parsed, "aspects").is_empty()
+            && self.last_resolver_gen.load(Ordering::SeqCst)
+                == self.state_generation.load(Ordering::SeqCst);
+        let resolver = if can_reuse_resolver {
+            let prev = self.last_resolver.lock().unwrap().clone();
+            match prev {
+                Some(r) if !r.has_cli_aspects() && r.config.matches_for_reuse(&acfg) => {
+                    r.prepare_for_reuse();
+                    r
+                }
+                _ => TargetResolver::new(loader.clone(), acfg),
+            }
+        } else {
+            TargetResolver::new(loader.clone(), acfg)
+        };
         // Every rule resolves toolchains (genrule included), which validates the registered
         // execution platforms first.
         if !resolver.config.execution_platform_patterns.is_empty() {
@@ -1525,10 +1542,11 @@ impl BlazeRuntime {
                 }
             }
         }
-        Self::report_deprecated_deps(&resolver, loader, stderr);
-        // Action conflicts (`ActionConflictException`): two actions generating the same file.
         let decorated: Vec<Arc<ConfiguredTarget>> = out_roots.iter().flatten().cloned().collect();
-        if let Err(c) = resolver.action_graph(&decorated) {
+        let reachable = resolver.reachable_targets(&decorated);
+        Self::report_deprecated_deps(&reachable, loader, stderr);
+        // Action conflicts (`ActionConflictException`): two actions generating the same file.
+        if let Err(c) = TargetResolver::action_graph_for_targets(&reachable, &decorated) {
             report_analysis_error(stderr, &c.message);
             writeln_bytes(
                 stderr,
@@ -1545,12 +1563,14 @@ impl BlazeRuntime {
             parsed,
             loader,
             &resolver,
+            &reachable,
             &mut out_roots,
             &mut failed,
             key,
             stderr,
         )?;
-        let configured = select_actions(&resolver, &out_roots, parsed, &skipped_targets);
+        let configured =
+            select_actions(&resolver, &reachable, &out_roots, parsed, &skipped_targets);
         Ok(AnalysisOutcome {
             resolver,
             roots: out_roots,
@@ -2024,17 +2044,25 @@ impl BlazeRuntime {
         parsed: &ParsedCommandOptions,
         loader: &Arc<PackageLoader>,
         resolver: &Arc<TargetResolver>,
+        all: &[Arc<ConfiguredTarget>],
         out_roots: &mut [Option<Arc<ConfiguredTarget>>],
         failed: &mut Vec<String>,
         key: &BuildConfigurationKey,
         stderr: &mut Vec<u8>,
     ) -> Result<HashSet<String>, ExitCode> {
         use zel_packages::attr::AttrValue;
-        let all = resolver.analyzed_targets();
+        let mut pkg_cache: HashMap<
+            zel_cmdline::PackageIdentifier,
+            Option<Arc<zel_packages::Package>>,
+        > = HashMap::new();
+        let mut load_pkg = |pid: &zel_cmdline::PackageIdentifier| {
+            pkg_cache
+                .entry(pid.clone())
+                .or_insert_with(|| loader.load_package(pid).ok().map(Arc::new))
+                .clone()
+        };
         let has_any_compat = all.iter().any(|ct| {
-            loader
-                .load_package(ct.label.package_identifier())
-                .ok()
+            load_pkg(ct.label.package_identifier())
                 .and_then(|pkg| pkg.targets.get(ct.label.name()).cloned())
                 .and_then(|t| match t {
                     PkgTarget::Rule(r) => r.attr_or_default("target_compatible_with"),
@@ -2065,12 +2093,12 @@ impl BlazeRuntime {
         }
         let mut incompat: HashMap<(String, String), IncompatInfo> = HashMap::new();
 
-        for ct in &all {
+        for ct in all {
             let ct_key = (ct.label.canonical_form(), ct.configuration.checksum());
             let mut direct_constraints: Vec<String> = Vec::new();
             let mut direct_config_settings: Vec<String> = Vec::new();
 
-            if let Ok(pkg) = loader.load_package(ct.label.package_identifier()) {
+            if let Some(pkg) = load_pkg(ct.label.package_identifier()) {
                 if let Some(PkgTarget::Rule(r)) = pkg.targets.get(ct.label.name()) {
                     if let Some(tcw) = r.attr_or_default("target_compatible_with") {
                         let labels: Vec<Label> = match tcw {
@@ -2313,13 +2341,13 @@ impl BlazeRuntime {
     /// analysed rule depending, from another package, on a rule that sets `deprecation`; rules
     /// that are deprecated themselves stay quiet).
     fn report_deprecated_deps(
-        resolver: &TargetResolver,
+        reachable: &[Arc<ConfiguredTarget>],
         loader: &Arc<PackageLoader>,
         stderr: &mut Vec<u8>,
     ) {
         use zel_packages::attr::AttrValue;
         let mut seen: HashSet<String> = HashSet::new();
-        for ct in resolver.analyzed_targets() {
+        for ct in reachable {
             if ct.aspect_name.is_some()
                 || !ct.label.repository().is_main()
                 || !seen.insert(ct.label.canonical_form())
@@ -2413,19 +2441,23 @@ pub(crate) fn report_analysis_error(stderr: &mut Vec<u8>, e: &str) {
 /// is needed too. Non-root test rules are not tests of this invocation (`is_test = false`).
 fn select_actions(
     resolver: &TargetResolver,
+    reachable: &[Arc<ConfiguredTarget>],
     roots: &[Option<Arc<ConfiguredTarget>>],
     parsed: &ParsedCommandOptions,
     skipped_targets: &HashSet<String>,
 ) -> Vec<ConfiguredTarget> {
     let _ = is_test_command(parsed);
-    let mut all = resolver.analyzed_targets();
+    let root_cts: Vec<Arc<ConfiguredTarget>> = roots.iter().flatten().cloned().collect();
+    let mut all = reachable.to_vec();
     // Roots decorated by top-level aspects are not the cached instances: substitute them.
-    for r in roots.iter().flatten() {
+    for r in &root_cts {
         if let Some(i) = all
             .iter()
             .position(|c| c.label == r.label && c.configuration == r.configuration)
         {
             all[i] = r.clone();
+        } else {
+            all.push(r.clone());
         }
     }
     // Producers of each output path: (target index, action index).
@@ -2639,7 +2671,7 @@ pub(crate) fn print_failure_trailer(
         stderr,
         &format!(
             "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
-            out.elapsed.as_secs_f64(),
+            crate::command_elapsed_secs(),
             out.schedule.critical_path_ms as f64 / 1000.0
         ),
     );

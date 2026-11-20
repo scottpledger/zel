@@ -1,7 +1,12 @@
 //! `RepoResolver` backed by Bzlmod: external repositories are fetched on demand into
 //! `<output_base>/external/<canonical>` and labels are resolved through repo mappings.
 
-use crate::rt::Rt;
+use crate::lockfile::LockfileMode;
+use crate::model::{AttrVal, ModuleOverride};
+use crate::rt::{FileStamp, RevalidateOutcome, Rt};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use zel_cmdline::{RepositoryMapping, RepositoryName};
 use zel_packages::lookup::RepoResolver;
@@ -138,6 +143,7 @@ fn resolve_autoload_module_repo(
 pub struct LazyBzlmodResolver {
     cfg: crate::session::BzlmodConfig,
     session: Mutex<Option<Result<Arc<crate::session::Session>, String>>>,
+    warnings_emitted: AtomicBool,
     errors: Mutex<Vec<String>>,
     fail_code: Mutex<Option<i32>>,
 }
@@ -147,9 +153,31 @@ impl LazyBzlmodResolver {
         Self {
             cfg,
             session: Mutex::new(None),
+            warnings_emitted: AtomicBool::new(false),
             errors: Mutex::new(vec![]),
             fail_code: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn from_cached(
+        cfg: crate::session::BzlmodConfig,
+        session: Arc<crate::session::Session>,
+    ) -> Self {
+        Self {
+            cfg,
+            session: Mutex::new(Some(Ok(session))),
+            warnings_emitted: AtomicBool::new(false),
+            errors: Mutex::new(vec![]),
+            fail_code: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn opened_session(&self) -> Option<Arc<crate::session::Session>> {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok().cloned())
     }
 
     /// Eagerly resolves the module graph (Bazel computes the main repository mapping before
@@ -170,13 +198,7 @@ impl LazyBzlmodResolver {
         let mut g = self.session.lock().unwrap();
         if g.is_none() {
             *g = Some(match crate::session::Session::open(self.cfg.clone()) {
-                Ok(s) => {
-                    let mut e = self.errors.lock().unwrap();
-                    for w in &s.warnings {
-                        e.push(format!("WARNING: {w}"));
-                    }
-                    Ok(Arc::new(s))
-                }
+                Ok(s) => Ok(Arc::new(s)),
                 Err(e) => {
                     *self.fail_code.lock().unwrap() = Some(e.exit_code);
                     let mut es = self.errors.lock().unwrap();
@@ -192,7 +214,16 @@ impl LazyBzlmodResolver {
                 }
             });
         }
-        g.as_ref().and_then(|r| r.as_ref().ok().cloned())
+        let session = g.as_ref().and_then(|r| r.as_ref().ok().cloned());
+        if let Some(s) = &session {
+            if !self.warnings_emitted.swap(true, Ordering::SeqCst) && !s.warnings.is_empty() {
+                let mut e = self.errors.lock().unwrap();
+                for w in &s.warnings {
+                    e.push(format!("WARNING: {w}"));
+                }
+            }
+        }
+        session
     }
 
     /// Messages (warnings, fetch progress, errors) produced so far; drains the buffer.
@@ -285,12 +316,80 @@ impl RepoResolver for LazyBzlmodResolver {
     }
 }
 
+struct CachedBzlmodSession {
+    session: Arc<crate::session::Session>,
+    watched_files: Vec<(PathBuf, FileStamp)>,
+}
+
+fn collect_watched_files(
+    cfg: &crate::session::BzlmodConfig,
+    resolution: &crate::resolve::Resolution,
+) -> Vec<(PathBuf, FileStamp)> {
+    let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
+    for name in ["MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel"] {
+        paths.insert(cfg.workspace.join(name));
+    }
+    for p in &resolution.root_module_file_paths {
+        paths.insert(p.clone());
+    }
+    if cfg.lockfile_mode != LockfileMode::Off {
+        paths.insert(cfg.workspace.join("MODULE.bazel.lock"));
+        paths.insert(cfg.output_base.join("MODULE.bazel.lock"));
+    }
+    let watch_override_dir = |paths: &mut BTreeSet<PathBuf>, dir: &Path| {
+        let abs = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            cfg.workspace.join(dir)
+        };
+        for name in ["MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel"] {
+            paths.insert(abs.join(name));
+        }
+    };
+    for ov in resolution.overrides.values() {
+        if let ModuleOverride::NonRegistry(spec) = ov {
+            if spec.rule_name == "local_repository" {
+                if let Some((_, AttrVal::Str(p))) = spec.attrs.iter().find(|(k, _)| k == "path") {
+                    watch_override_dir(&mut paths, Path::new(p));
+                }
+            }
+        }
+    }
+    for (_, p) in &cfg.override_modules {
+        watch_override_dir(&mut paths, Path::new(p));
+    }
+    for (_, p) in &cfg.inject_modules {
+        watch_override_dir(&mut paths, Path::new(p));
+    }
+    for (_, p) in &cfg.inject_repositories {
+        watch_override_dir(&mut paths, Path::new(p));
+    }
+    for p in cfg.override_repository.values() {
+        watch_override_dir(&mut paths, p);
+    }
+    if let Some(v) = &cfg.vendor_dir {
+        paths.insert(v.join("VENDOR.bazel"));
+    }
+    paths
+        .into_iter()
+        .map(|p| {
+            let stamp = FileStamp::capture(&p);
+            (p, stamp)
+        })
+        .collect()
+}
+
 /// Per-runtime owner of the external repository resolver of the running command: the slot read
 /// by package loading plus the concrete [`LazyBzlmodResolver`] (for registrations / lockfile).
 #[derive(Clone, Default)]
 pub struct CommandResolver {
     slot: zel_packages::lookup::RepoResolverSlot,
     installed: Arc<Mutex<Option<Arc<LazyBzlmodResolver>>>>,
+    cached: Arc<Mutex<Option<CachedBzlmodSession>>>,
+    /// Last config observed in a workspace without `MODULE.bazel`, so warm commands in plain
+    /// workspaces know Bzlmod state did not change.
+    last_no_module_cfg: Arc<Mutex<Option<crate::session::BzlmodConfig>>>,
+    invalidated_this_command: Arc<AtomicBool>,
 }
 
 impl CommandResolver {
@@ -301,6 +400,20 @@ impl CommandResolver {
     /// The slot to hand to the Skyframe executor.
     pub fn slot(&self) -> zel_packages::lookup::RepoResolverSlot {
         self.slot.clone()
+    }
+
+    /// Discards any cached Bzlmod session (e.g. on `clean`, `mod`/`fetch`/`vendor`, or
+    /// `--nokeep_state_after_build`).
+    pub fn invalidate_cache(&self) {
+        *self.cached.lock().unwrap() = None;
+        *self.last_no_module_cfg.lock().unwrap() = None;
+        self.invalidated_this_command.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the current command reopened the Bzlmod session or evicted any cached
+    /// repository / module extension result.
+    pub fn was_invalidated_this_command(&self) -> bool {
+        self.invalidated_this_command.load(Ordering::SeqCst)
     }
 
     /// Installs a [`LazyBzlmodResolver`] as the external repository resolver for `command`
@@ -332,7 +445,7 @@ impl CommandResolver {
         output_base: &std::path::Path,
         client_env: std::collections::BTreeMap<String, String>,
     ) {
-        let installed = (|| {
+        let parsed_cfg = (|| {
             let parsed =
                 zel_options::ParsedCommandOptions::parse_for_command(command, args).ok()?;
             let mut cfg = crate::session::BzlmodConfig::from_parsed(
@@ -345,8 +458,58 @@ impl CommandResolver {
             // Build/query/... compute the main repository mapping first: registry I/O failures
             // there are EXTERNAL_DEPS errors (32), not the internal error `mod` reports.
             cfg.main_mapping_errors = true;
-            Some(Arc::new(LazyBzlmodResolver::new(cfg)))
+            Some(cfg)
         })();
+        self.invalidated_this_command.store(false, Ordering::SeqCst);
+        let installed = parsed_cfg.map(|cfg| {
+            let has_module_file = cfg.workspace.join("MODULE.bazel").exists();
+            let cacheable = !cfg.force && cfg.lockfile_mode != LockfileMode::Refresh;
+            let mut cached_guard = self.cached.lock().unwrap();
+            if cacheable {
+                if let Some(entry) = cached_guard.as_ref() {
+                    if entry.session.matches_config(&cfg)
+                        && entry.watched_files.iter().all(|(p, s)| s.matches(p))
+                    {
+                        match entry.session.rt.revalidate_for_command() {
+                            RevalidateOutcome::Unchanged => {
+                                *self.last_no_module_cfg.lock().unwrap() =
+                                    (!has_module_file).then(|| cfg.clone());
+                                self.invalidated_this_command.store(false, Ordering::SeqCst);
+                                return Arc::new(LazyBzlmodResolver::from_cached(
+                                    cfg,
+                                    Arc::clone(&entry.session),
+                                ));
+                            }
+                            RevalidateOutcome::PartialInvalidation => {
+                                *self.last_no_module_cfg.lock().unwrap() =
+                                    (!has_module_file).then(|| cfg.clone());
+                                self.invalidated_this_command.store(true, Ordering::SeqCst);
+                                return Arc::new(LazyBzlmodResolver::from_cached(
+                                    cfg,
+                                    Arc::clone(&entry.session),
+                                ));
+                            }
+                            RevalidateOutcome::MustReopen => {}
+                        }
+                    }
+                }
+            }
+            let had_cached = cached_guard.take().is_some();
+            if !has_module_file {
+                let mut prev = self.last_no_module_cfg.lock().unwrap();
+                let unchanged = !had_cached
+                    && prev
+                        .as_ref()
+                        .is_some_and(|prev_cfg| prev_cfg.matches_for_reuse(&cfg));
+                *prev = Some(cfg.clone());
+                self.invalidated_this_command
+                    .store(!unchanged, Ordering::SeqCst);
+                return Arc::new(LazyBzlmodResolver::new(cfg));
+            }
+            *self.last_no_module_cfg.lock().unwrap() = None;
+            self.invalidated_this_command.store(true, Ordering::SeqCst);
+            Arc::new(LazyBzlmodResolver::new(cfg))
+        });
         match installed {
             Some(r) => {
                 self.slot.set(Some(r.clone()));
@@ -402,7 +565,18 @@ impl CommandResolver {
         match r {
             Some(r) => {
                 r.finish();
-                r.take_messages()
+                let msgs = r.take_messages();
+                let cacheable = !r.cfg.force && r.cfg.lockfile_mode != LockfileMode::Refresh;
+                if cacheable {
+                    if let Some(session) = r.opened_session() {
+                        let watched_files = collect_watched_files(&r.cfg, &session.resolution);
+                        *self.cached.lock().unwrap() = Some(CachedBzlmodSession {
+                            session,
+                            watched_files,
+                        });
+                    }
+                }
+                msgs
             }
             None => vec![],
         }

@@ -176,15 +176,52 @@ impl BlazeDirectories {
     }
 }
 
-/// Stateful Bazel server runtime holding the persistent Skyframe graph (via
-/// [`SkyframeExecutor`]) and the persistent `CompactPersistentActionCache`.
-static COMMAND_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+thread_local! {
+    static COMMAND_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
 
-/// Seconds since the running build-like command started (for `INFO: Elapsed time` lines).
+struct CommandStartGuard(Option<std::time::Instant>);
+
+impl CommandStartGuard {
+    /// Starts a fresh command timer for the current thread and restores the previous value on drop.
+    fn start() -> Self {
+        let prev = COMMAND_START.with(|c| c.replace(Some(std::time::Instant::now())));
+        Self(prev)
+    }
+
+    /// Ensures a command timer is active on the current thread without overriding an outer one
+    /// started by `dispatch_command`.
+    fn ensure_started() -> Self {
+        let prev = COMMAND_START.with(|c| {
+            let old = c.get();
+            if old.is_none() {
+                c.set(Some(std::time::Instant::now()));
+            }
+            old
+        });
+        Self(prev)
+    }
+}
+
+impl Drop for CommandStartGuard {
+    fn drop(&mut self) {
+        let prev = self.0;
+        COMMAND_START.with(|c| c.set(prev));
+    }
+}
+
+/// Start instant of the running command (for `BuildObserver` / BEP / profile timing).
+pub(crate) fn command_start_instant() -> std::time::Instant {
+    COMMAND_START
+        .with(|c| c.get())
+        .unwrap_or_else(std::time::Instant::now)
+}
+
+/// Seconds since the running command started (for `INFO: Elapsed time` lines).
 pub(crate) fn command_elapsed_secs() -> f64 {
     COMMAND_START
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .with(|c| c.get())
         .map(|t| t.elapsed().as_secs_f64())
         .unwrap_or(0.0)
 }
@@ -207,6 +244,7 @@ pub struct BlazeRuntime {
     /// Monotonic command counter (one `sync` of the graph per command).
     pub command_seq: std::sync::atomic::AtomicU64,
     pub(crate) synced_command: Mutex<Option<(u64, String)>>,
+    pub(crate) last_sync_option_parts: Mutex<Option<Vec<String>>>,
     pub action_cache: Mutex<CompactPersistentActionCache>,
     pub server_pid: u32,
     pub shutdown_requested: AtomicBool,
@@ -222,6 +260,11 @@ pub struct BlazeRuntime {
     /// `command_lock` for the build-family commands that read it.
     client_env: Mutex<Arc<BTreeMap<String, String>>>,
     pub last_resolver: Mutex<Option<Arc<zel_rules::TargetResolver>>>,
+    /// Monotonic generation incremented whenever filesystem, loading-option, Bzlmod, or build
+    /// configuration state changes. `last_resolver` is only reused by `analyze_roots` when
+    /// `last_resolver_gen` matches `state_generation`.
+    pub(crate) state_generation: std::sync::atomic::AtomicU64,
+    pub(crate) last_resolver_gen: std::sync::atomic::AtomicU64,
     /// The previous analysis' top-level `BuildOptions` (`SkyframeBuildView.originalConfigurationOptions`)
     /// and whether it asked to discard the analysis cache (`skyframeAnalysisWasDiscarded`).
     pub last_build_options: Mutex<Option<analysis_phase::AnalysisCacheState>>,
@@ -299,6 +342,7 @@ impl BlazeRuntime {
             skyframe,
             command_seq: std::sync::atomic::AtomicU64::new(0),
             synced_command: Mutex::new(None),
+            last_sync_option_parts: Mutex::new(None),
             action_cache: Mutex::new(action_cache),
             server_pid,
             shutdown_requested: AtomicBool::new(false),
@@ -308,6 +352,8 @@ impl BlazeRuntime {
             command_lock: Mutex::new(()),
             client_env: Mutex::new(Arc::new(BTreeMap::new())),
             last_resolver: Mutex::new(None),
+            state_generation: std::sync::atomic::AtomicU64::new(1),
+            last_resolver_gen: std::sync::atomic::AtomicU64::new(0),
             last_build_options: Mutex::new(None),
             last_terminal_size: Mutex::new(None),
             eval_memo: Mutex::new((String::new(), Default::default(), false)),
@@ -317,6 +363,15 @@ impl BlazeRuntime {
     /// The client environment of the running command (`CommandEnvironment.getClientEnv`).
     pub(crate) fn client_env(&self) -> Arc<BTreeMap<String, String>> {
         Arc::clone(&self.client_env.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    pub(crate) fn bump_state_generation(&self) {
+        self.state_generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub(crate) fn invalidate_analysis_cache(&self) {
+        self.bump_state_generation();
+        *self.last_resolver.lock().unwrap() = None;
     }
 
     pub fn host_cpu() -> &'static str {
@@ -332,6 +387,13 @@ impl BlazeRuntime {
 
     /// Executes a single Bazel command and returns a `RunResponse`.
     pub fn dispatch_command(&self, req: &RunRequest, response_cookie: &str) -> RunResponse {
+        let _cmd_start_guard = CommandStartGuard::start();
+        let _scoped_our = zel_bzlmod::session::scoped_output_user_root(Some(std::path::Path::new(
+            self.dirs.output_user_root.path_string(),
+        )));
+        let _scoped_ib = zel_bzlmod::session::scoped_install_base(Some(std::path::Path::new(
+            self.dirs.install_base.path_string(),
+        )));
         self.command_seq.fetch_add(1, Ordering::SeqCst);
         let args: Vec<String> = req
             .arg
@@ -558,6 +620,15 @@ impl BlazeRuntime {
                 ob,
                 (*client_env).clone(),
             );
+            if self.repo_resolver.was_invalidated_this_command() {
+                self.skyframe.evaluator.delete_functions(&[
+                    zel_skyframe::SkyFunctionName::PACKAGE_LOAD,
+                    zel_skyframe::SkyFunctionName::FILE_STATE,
+                    zel_skyframe::SkyFunctionName::FILE,
+                    zel_skyframe::SkyFunctionName::DIRECTORY_LISTING,
+                ]);
+                self.invalidate_analysis_cache();
+            }
         } else {
             *self.client_env.lock().unwrap_or_else(|e| e.into_inner()) = Arc::clone(&client_env);
         }
@@ -687,6 +758,7 @@ impl BlazeRuntime {
 
         if uses_external_repos {
             let messages = self.repo_resolver.finish();
+            self.refresh_loading_signature_after_finish();
             if !matches!(command, "query" | "cquery" | "aquery")
                 && exit_code != ExitCode::COMMAND_LINE_ERROR
             {
@@ -713,7 +785,8 @@ impl BlazeRuntime {
         }
         if !keep_state {
             self.skyframe.evaluator.clear();
-            *self.last_resolver.lock().unwrap() = None;
+            self.repo_resolver.invalidate_cache();
+            self.invalidate_analysis_cache();
             *self.last_build_options.lock().unwrap() = None;
             *self.eval_memo.lock().unwrap() = (String::new(), Default::default(), false);
         }
@@ -786,6 +859,8 @@ impl BlazeRuntime {
     ) -> ExitCode {
         let ws = std::path::PathBuf::from(self.dirs.workspace_dir.path_string());
         let ob = std::path::PathBuf::from(self.dirs.output_base.path_string());
+        self.repo_resolver.invalidate_cache();
+        self.invalidate_analysis_cache();
         crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
         let out = zel_bzlmod::commands::run_bzlmod_command_with_env(
             command,
@@ -1039,8 +1114,7 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
         obs: &observability::BuildObserver,
     ) -> ExitCode {
-        let cmd_started = std::time::Instant::now();
-        *COMMAND_START.lock().unwrap_or_else(|e| e.into_inner()) = Some(cmd_started);
+        let _cmd_start_guard = CommandStartGuard::ensure_started();
         let parsed = match ParsedCommandOptions::parse_for_command(command, args) {
             Ok(p) => p,
             Err(e) => {
@@ -1060,7 +1134,7 @@ impl BlazeRuntime {
                     stderr,
                     &format!(
                         "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                        cmd_started.elapsed().as_secs_f64()
+                        command_elapsed_secs()
                     ),
                 );
                 writeln_bytes(stderr, "INFO: 0 processes.");
@@ -1092,10 +1166,7 @@ impl BlazeRuntime {
                             writeln_bytes(stderr, &format!("ERROR: no repository visible as '@{name}' from the main repository, but overridden with --override_repository. Use --inject_repository to add new repositories."));
                             writeln_bytes(
                                 stderr,
-                                &format!(
-                                    "INFO: Elapsed time: {:.3}s",
-                                    cmd_started.elapsed().as_secs_f64()
-                                ),
+                                &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
                             );
                             writeln_bytes(stderr, "INFO: 0 processes.");
                             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -1112,10 +1183,7 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, &format!("ERROR: Failed to initialize sandbox: [unix_jni.cc:382] {sb} (No such file or directory)"));
                     writeln_bytes(
                         stderr,
-                        &format!(
-                            "INFO: Elapsed time: {:.3}s",
-                            cmd_started.elapsed().as_secs_f64()
-                        ),
+                        &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
                     );
                     writeln_bytes(stderr, "INFO: 0 processes.");
                     writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -1242,6 +1310,7 @@ impl BlazeRuntime {
             fn drop(&mut self) {
                 if self.1 {
                     self.0.skyframe.discard_analysis_cache();
+                    self.0.invalidate_analysis_cache();
                 }
             }
         }
@@ -1287,7 +1356,7 @@ impl BlazeRuntime {
                     stderr,
                     &format!(
                         "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                        cmd_started.elapsed().as_secs_f64()
+                        command_elapsed_secs()
                     ),
                 );
                 writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -1333,7 +1402,7 @@ impl BlazeRuntime {
             );
         }
 
-        let load_start = std::time::Instant::now();
+        let _ = &self.repo_resolver;
         let resolver = self.pattern_resolver(&parsed);
         let build_manual_tests = exec_phase::opt_bool(&parsed, "build_manual_tests", false);
         let filter_manual = !build_manual_tests;
@@ -1502,7 +1571,7 @@ impl BlazeRuntime {
                                     stderr,
                                     &format!(
                                         "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                                        cmd_started.elapsed().as_secs_f64()
+                                        command_elapsed_secs()
                                     ),
                                 );
                                 writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -1556,7 +1625,7 @@ impl BlazeRuntime {
                                     stderr,
                                     &format!(
                                         "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                                        cmd_started.elapsed().as_secs_f64()
+                                        command_elapsed_secs()
                                     ),
                                 );
                                 writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -1599,7 +1668,7 @@ impl BlazeRuntime {
                         stderr,
                         &format!(
                             "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                            cmd_started.elapsed().as_secs_f64()
+                            command_elapsed_secs()
                         ),
                     );
                     writeln_bytes(stderr, "INFO: 0 processes.");
@@ -1641,12 +1710,11 @@ impl BlazeRuntime {
                 }
                 writeln_bytes(stderr, &m);
             }
-            let el = load_start.elapsed();
             writeln_bytes(
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    el.as_secs_f64()
+                    command_elapsed_secs()
                 ),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
@@ -1665,12 +1733,11 @@ impl BlazeRuntime {
                 }
                 writeln_bytes(stderr, &m);
             }
-            let el = load_start.elapsed();
             writeln_bytes(
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    el.as_secs_f64()
+                    command_elapsed_secs()
                 ),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
@@ -1678,7 +1745,6 @@ impl BlazeRuntime {
             return ExitCode::BUILD_FAILURE;
         }
         let topo_targets = order;
-        let _ = load_start;
         // Skymeld (the default): analysis and execution are one interleaved phase.
         obs.mark_phase(
             if exec_phase::opt_bool(&parsed, "build", true)
@@ -1692,21 +1758,25 @@ impl BlazeRuntime {
 
         // Analysis: dependency-aware configured-target analysis of the requested targets.
         let build_loader = Arc::clone(resolver.loader());
-        let mut config = match self.build_config_key(&parsed, &build_loader) {
-            Ok(c) => c,
-            Err(e) => {
-                writeln_bytes(stderr, &format!("ERROR: {e}"));
-                let el = load_start.elapsed();
-                writeln_bytes(
-                    stderr,
-                    &format!(
-                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                        el.as_secs_f64()
-                    ),
-                );
-                writeln_bytes(stderr, "INFO: 0 processes.");
-                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                return ExitCode::COMMAND_LINE_ERROR;
+        let mut config = {
+            let _prof = obs
+                .profiler
+                .profile(zel_events::profiler::ProfilerTask::INFO, "build_config_key");
+            match self.build_config_key(&parsed, &build_loader) {
+                Ok(c) => c,
+                Err(e) => {
+                    writeln_bytes(stderr, &format!("ERROR: {e}"));
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                            command_elapsed_secs()
+                        ),
+                    );
+                    writeln_bytes(stderr, "INFO: 0 processes.");
+                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                    return ExitCode::COMMAND_LINE_ERROR;
+                }
             }
         };
         let mut default_inst_filter_msgs: Option<String> = None;
@@ -1751,7 +1821,7 @@ impl BlazeRuntime {
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    cmd_started.elapsed().as_secs_f64()
+                    command_elapsed_secs()
                 ),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
@@ -1773,7 +1843,10 @@ impl BlazeRuntime {
             return ExitCode::SUCCESS;
         }
         let pre_analysis_len = stderr.len();
-        let analysis =
+        let analysis = {
+            let _prof = obs
+                .profiler
+                .profile(zel_events::profiler::ProfilerTask::INFO, "analyze_roots");
             match self.analyze_roots(&parsed, &build_loader, &resolved_targets, &config, stderr) {
                 Ok(a) => a,
                 Err(code) => {
@@ -1797,7 +1870,7 @@ impl BlazeRuntime {
                                 stderr,
                                 &format!(
                                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                                    cmd_started.elapsed().as_secs_f64()
+                                    command_elapsed_secs()
                                 ),
                             );
                             writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -1825,8 +1898,13 @@ impl BlazeRuntime {
                     }
                     return code;
                 }
-            };
+            }
+        };
         *self.last_resolver.lock().unwrap() = Some(analysis.resolver.clone());
+        self.last_resolver_gen.store(
+            self.state_generation.load(Ordering::SeqCst),
+            Ordering::SeqCst,
+        );
         // `RunUnder`: a label run_under must be an executable target.
         if command == "test" || command == "coverage" {
             if let Some(ru) = exec_phase::opt_last(&parsed, "run_under") {
@@ -1866,7 +1944,7 @@ impl BlazeRuntime {
                             stderr,
                             &format!(
                                 "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                                cmd_started.elapsed().as_secs_f64()
+                                command_elapsed_secs()
                             ),
                         );
                         writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -1918,12 +1996,11 @@ impl BlazeRuntime {
                 .join("stable-status.txt");
             if !stable.exists() {
                 writeln_bytes(stderr, "ERROR: action 'BazelWorkspaceStatusAction stable-status.txt' is not up-to-date");
-                let el = load_start.elapsed();
                 writeln_bytes(
                     stderr,
                     &format!(
                         "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                        el.as_secs_f64()
+                        command_elapsed_secs()
                     ),
                 );
                 writeln_bytes(stderr, "INFO: 0 processes.");
@@ -2099,58 +2176,72 @@ impl BlazeRuntime {
         let testlogs_dir = self.dirs.bazel_testlogs(cpu, &parsed.compilation_mode);
 
         let mut source_artifacts = Vec::new();
-        let configured_targets: Vec<zel_analysis::ConfiguredTarget> = analysis.configured.clone();
-        for ct in &configured_targets {
-            for act in &ct.actions {
-                for inp in act.inputs() {
-                    if inp.is_source {
-                        source_artifacts.push(inp);
+        let configured_targets: Vec<zel_analysis::ConfiguredTarget> = {
+            let _prof = obs.profiler.profile(
+                zel_events::profiler::ProfilerTask::INFO,
+                "collect_source_artifacts",
+            );
+            let configured_targets: Vec<zel_analysis::ConfiguredTarget> =
+                analysis.configured.clone();
+            for ct in &configured_targets {
+                for act in &ct.actions {
+                    for inp in act.inputs() {
+                        if inp.is_source {
+                            source_artifacts.push(inp);
+                        }
                     }
                 }
-            }
-            for a in ct
-                .default_info
-                .default_runfiles
-                .iter()
-                .chain(ct.default_info.data_runfiles.iter())
-            {
-                if a.is_source {
-                    source_artifacts.push(a.clone());
-                }
-            }
-            if let Some(rs) = &ct.runfiles_support {
-                for a in &rs.runfiles.artifacts {
+                for a in ct
+                    .default_info
+                    .default_runfiles
+                    .iter()
+                    .chain(ct.default_info.data_runfiles.iter())
+                {
                     if a.is_source {
                         source_artifacts.push(a.clone());
                     }
                 }
+                if let Some(rs) = &ct.runfiles_support {
+                    for a in &rs.runfiles.artifacts {
+                        if a.is_source {
+                            source_artifacts.push(a.clone());
+                        }
+                    }
+                }
             }
-        }
+            configured_targets
+        };
         let analysis_failed = !analysis.failed.is_empty();
 
-        if let Err(e) = plant_symlink_forest(
-            self.fs.as_ref(),
-            &self.dirs.workspace_dir,
-            &execroot,
-            &self.dirs.output_path(),
-            &bin_dir,
-            &testlogs_dir,
-            &source_artifacts,
-        ) {
-            writeln_bytes(
-                stderr,
-                &format!("ERROR: Source forest creation failed: {e}"),
+        {
+            let _prof = obs.profiler.profile(
+                zel_events::profiler::ProfilerTask::INFO,
+                format!("plant_symlink_forest(n={})", source_artifacts.len()),
             );
-            writeln_bytes(
-                stderr,
-                &format!(
-                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    cmd_started.elapsed().as_secs_f64()
-                ),
-            );
-            writeln_bytes(stderr, "INFO: 0 processes.");
-            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-            return ExitCode::COMMAND_LINE_ERROR;
+            if let Err(e) = plant_symlink_forest(
+                self.fs.as_ref(),
+                &self.dirs.workspace_dir,
+                &execroot,
+                &self.dirs.output_path(),
+                &bin_dir,
+                &testlogs_dir,
+                &source_artifacts,
+            ) {
+                writeln_bytes(
+                    stderr,
+                    &format!("ERROR: Source forest creation failed: {e}"),
+                );
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        command_elapsed_secs()
+                    ),
+                );
+                writeln_bytes(stderr, "INFO: 0 processes.");
+                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
         }
 
         if let Err(e) = self.write_workspace_status_files(&parsed, &self.dirs.output_path()) {
@@ -2190,7 +2281,7 @@ impl BlazeRuntime {
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    cmd_started.elapsed().as_secs_f64()
+                    command_elapsed_secs()
                 ),
             );
             writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -2237,7 +2328,7 @@ impl BlazeRuntime {
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    cmd_started.elapsed().as_secs_f64()
+                    command_elapsed_secs()
                 ),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
@@ -2254,7 +2345,6 @@ impl BlazeRuntime {
         if !matches!(command, "build" | "test" | "run" | "coverage") {
             obs.mark_phase(zel_events::profiler::ProfilePhase::EXECUTE);
         }
-        let exec_start = std::time::Instant::now();
         let workspace_name_owned = self.dirs.execroot_workspace_name();
         let workspace_name = workspace_name_owned.as_str();
         let use_action_cache = exec_phase::opt_bool(&parsed, "use_action_cache", true);
@@ -2488,7 +2578,7 @@ impl BlazeRuntime {
                     stderr,
                     &format!(
                         "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                        build_out.elapsed.as_secs_f64()
+                        command_elapsed_secs()
                     ),
                 );
                 writeln_bytes(stderr, "INFO: 0 processes.");
@@ -2547,13 +2637,12 @@ impl BlazeRuntime {
                 || parsed.targets == vec!["//..."]
                 || parsed.targets == vec!["..."])
         {
-            let total_elapsed = exec_start.elapsed();
             let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
             writeln_bytes(
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
-                    total_elapsed.as_secs_f64(),
+                    command_elapsed_secs(),
                     total_crit_path
                 ),
             );
@@ -2987,7 +3076,7 @@ impl BlazeRuntime {
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                    build_out.elapsed.as_secs_f64()
+                    command_elapsed_secs()
                 ),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
@@ -3022,13 +3111,12 @@ impl BlazeRuntime {
                     || parsed.targets == vec!["//..."]
                     || parsed.targets == vec!["..."])
             {
-                let total_elapsed = exec_start.elapsed();
                 let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
                 writeln_bytes(
                     stderr,
                     &format!(
                         "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
-                        total_elapsed.as_secs_f64(),
+                        command_elapsed_secs(),
                         total_crit_path
                     ),
                 );
@@ -3044,13 +3132,12 @@ impl BlazeRuntime {
             if !test_keep_going && any_test_failed && !parsed.keep_going {
                 writeln_bytes(stderr, "ERROR: Test failed, aborting");
             }
-            let total_elapsed = exec_start.elapsed();
             let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
             writeln_bytes(
                 stderr,
                 &format!(
                     "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
-                    total_elapsed.as_secs_f64(),
+                    command_elapsed_secs(),
                     total_crit_path
                 ),
             );
@@ -3163,7 +3250,7 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
         exec_request: &mut Option<ExecRequest>,
     ) -> ExitCode {
-        let cmd_started = std::time::Instant::now();
+        let _cmd_start_guard = CommandStartGuard::ensure_started();
         let (obs, debug_all_events) = self.start_build_observer("run", args, Some(args), stderr);
         if let Some(early_code) = self.check_early_repo_and_downloader("run", args, stderr) {
             return self.finish_build_observer(
@@ -3219,10 +3306,7 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, &formatted);
                 writeln_bytes(
                     stderr,
-                    &format!(
-                        "INFO: Elapsed time: {:.3}s",
-                        cmd_started.elapsed().as_secs_f64()
-                    ),
+                    &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
                 );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -3252,10 +3336,7 @@ impl BlazeRuntime {
             writeln_bytes(stderr, &format!("ERROR: {}", err.message));
             writeln_bytes(
                 stderr,
-                &format!(
-                    "INFO: Elapsed time: {:.3}s",
-                    cmd_started.elapsed().as_secs_f64()
-                ),
+                &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -3321,10 +3402,7 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, &format!("ERROR: {}", err.message));
                     writeln_bytes(
                         stderr,
-                        &format!(
-                            "INFO: Elapsed time: {:.3}s",
-                            cmd_started.elapsed().as_secs_f64()
-                        ),
+                        &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
                     );
                     writeln_bytes(stderr, "INFO: 0 processes.");
                     writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -3400,10 +3478,7 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, &format!("ERROR: {msg}"));
                 writeln_bytes(
                     stderr,
-                    &format!(
-                        "INFO: Elapsed time: {:.3}s",
-                        cmd_started.elapsed().as_secs_f64()
-                    ),
+                    &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
                 );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -3427,10 +3502,7 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, &format!("ERROR: {msg}"));
                     writeln_bytes(
                         stderr,
-                        &format!(
-                            "INFO: Elapsed time: {:.3}s",
-                            cmd_started.elapsed().as_secs_f64()
-                        ),
+                        &format!("INFO: Elapsed time: {:.3}s", command_elapsed_secs()),
                     );
                     writeln_bytes(stderr, "INFO: 0 processes.");
                     writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");

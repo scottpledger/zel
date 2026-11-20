@@ -686,6 +686,33 @@ pub struct UrlRewriter {
     pub all_blocked_message: Option<String>,
 }
 
+impl PartialEq for UrlRewriter {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            allow,
+            block,
+            rewrites,
+            all_blocked_message,
+        } = self;
+        let Self {
+            allow: o_allow,
+            block: o_block,
+            rewrites: o_rewrites,
+            all_blocked_message: o_all_blocked_message,
+        } = other;
+        allow == o_allow
+            && block == o_block
+            && all_blocked_message == o_all_blocked_message
+            && rewrites.len() == o_rewrites.len()
+            && rewrites
+                .iter()
+                .zip(o_rewrites)
+                .all(|((p1, _, r1), (p2, _, r2))| p1 == p2 && r1 == r2)
+    }
+}
+
+impl Eq for UrlRewriter {}
+
 impl UrlRewriter {
     /// Parse the contents of a downloader config file. `path` is used for error locations.
     pub fn parse(path: &str, contents: &str) -> Result<UrlRewriter, String> {
