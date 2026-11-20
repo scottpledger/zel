@@ -50,6 +50,45 @@ impl RepoResolver for BzlmodRepoResolver {
             .collect();
         RepositoryMapping::new_ordered(entries, owner.clone())
     }
+
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        resolve_autoload_module_repo(&self.rt.resolution, module_name, repo_name).or_else(|| {
+            let main_map = self.mapping(&RepositoryName::main());
+            for name in [repo_name, module_name] {
+                let r = main_map.get(name);
+                if r.is_visible() && self.repo_root(&r).is_some() {
+                    return Some(r);
+                }
+            }
+            None
+        })
+    }
+}
+
+fn resolve_autoload_module_repo(
+    res: &crate::resolve::Resolution,
+    module_name: &str,
+    repo_name: &str,
+) -> Option<RepositoryName> {
+    let best = res
+        .canonical_repo_names
+        .iter()
+        .filter(|(_, mk)| !mk.is_root() && (mk.name == module_name || mk.name == repo_name))
+        .max_by(|(_, a), (_, b)| a.version.cmp(&b.version));
+    let (canon, mk) = best?;
+    let min_ver = match module_name {
+        "protobuf" => Some("29.0-rc1"),
+        "rules_android" => Some("0.6.0-rc1"),
+        _ => None,
+    };
+    if let Some(min_s) = min_ver {
+        if let Ok(min_v) = crate::version::Version::parse(min_s) {
+            if !mk.version.is_empty() && mk.version <= min_v {
+                return None;
+            }
+        }
+    }
+    Some(RepositoryName::create_unvalidated(canon.as_str()))
 }
 
 /// Resolver that opens the Bzlmod session lazily, on the first lookup of a non-main repository,
@@ -174,6 +213,23 @@ impl RepoResolver for LazyBzlmodResolver {
                 .map(|(a, c)| (a, RepositoryName::create_unvalidated(c)))
                 .collect();
         RepositoryMapping::new_ordered(entries, owner.clone())
+    }
+
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        if !self.cfg.workspace.join("MODULE.bazel").exists() {
+            return None;
+        }
+        let s = self.session()?;
+        resolve_autoload_module_repo(&s.rt.resolution, module_name, repo_name).or_else(|| {
+            let main_map = self.mapping(&RepositoryName::main());
+            for name in [repo_name, module_name] {
+                let r = main_map.get(name);
+                if r.is_visible() && self.repo_root(&r).is_some() {
+                    return Some(r);
+                }
+            }
+            None
+        })
     }
 }
 

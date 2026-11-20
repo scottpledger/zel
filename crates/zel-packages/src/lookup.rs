@@ -32,6 +32,27 @@ pub trait RepoResolver: Send + Sync {
     fn module_name_and_version(&self, _repo: &RepositoryName) -> Option<(String, String)> {
         None
     }
+    /// Resolves a Bzlmod module (by `module_name` and legacy `repo_name`, e.g. `"protobuf"` /
+    /// `"com_google_protobuf"`, `"rules_cc"` / `"rules_cc"`) to its canonical repository name
+    /// across the resolved dependency graph (`AutoloadSymbols.getLoadKeys`).
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        let main_map = self.mapping(&RepositoryName::main());
+        for name in [repo_name, module_name] {
+            let r = main_map.get(name);
+            if r.is_visible() && self.repo_root(&r).is_some() {
+                return Some(r);
+            }
+        }
+        // Fallback: check direct canonical repo name (e.g. `SimpleRepoResolver` with only `external`
+        // populated, or `RepositoryMapping::always_fallback()`).
+        for name in [repo_name, module_name] {
+            let candidate = RepositoryName::create_unvalidated(name);
+            if self.repo_root(&candidate).is_some() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
 }
 
 /// A per-runtime holder for the external repository resolver of the command currently running.

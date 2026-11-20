@@ -20,11 +20,9 @@ _VIRTUAL_IMPORTS = "/_virtual_imports/"
 _PROTO_EXTENSION = ".proto"
 
 def extract_proto_info(target):
-    """Extracts ProtoInfo from a target supporting both Starlark and legacy keys."""
+    """Extracts ProtoInfo from a target."""
     if _ProtobufProtoInfo in target:
         return target[_ProtobufProtoInfo]
-    if ProtoInfo in target:
-        return target[ProtoInfo]
     fail("Target %s does not provide ProtoInfo" % target.label)
 
 def well_known_proto_libs():

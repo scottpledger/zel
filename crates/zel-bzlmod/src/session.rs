@@ -481,8 +481,9 @@ impl BzlmodConfig {
             inject_repositories: parse_map_flag("inject_repository", true)?,
             module_mirrors,
             main_mapping_errors: false,
-            semantics_fingerprint: crate::semantics_fp::stable_fingerprint(
+            semantics_fingerprint: crate::semantics_fp::stable_fingerprint_with_others(
                 &crate::semantics_fp::bool_overrides(parsed),
+                &crate::semantics_fp::other_overrides(parsed),
             ),
             downloader_rewriter: {
                 let downloader_configs: Vec<String> = raw(parsed, "downloader_config")

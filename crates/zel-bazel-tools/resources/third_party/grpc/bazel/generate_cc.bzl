@@ -51,7 +51,7 @@ def _generate_cc_impl(ctx):
     includes = list(includes_from_deps(ctx.attr.srcs))
     extra_wkt_dirs = []
     for wkt in ctx.attr.well_known_protos:
-        if (_ProtobufProtoInfo in wkt) or (ProtoInfo in wkt):
+        if _ProtobufProtoInfo in wkt:
             includes.extend(includes_from_deps([wkt]))
         else:
             for wkt_file in wkt.files.to_list():
@@ -109,7 +109,7 @@ _generate_cc = rule(
         "srcs": attr.label_list(
             mandatory = True,
             allow_empty = False,
-            providers = [[_ProtobufProtoInfo], [ProtoInfo]],
+            providers = [_ProtobufProtoInfo],
         ),
         "plugin": attr.label(
             executable = True,

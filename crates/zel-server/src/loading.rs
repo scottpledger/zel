@@ -184,6 +184,11 @@ impl BlazeRuntime {
             .unwrap_or(false);
         cfg.incompatible_disable_transitions_on =
             opt_list(parsed, "incompatible_disable_transitions_on");
+        cfg.incompatible_autoload_externally = opt_list(parsed, "incompatible_autoload_externally");
+        cfg.incompatible_disable_autoloads_in_main_repo = parsed
+            .get_bool("incompatible_disable_autoloads_in_main_repo")
+            .unwrap_or(true);
+        cfg.repositories_without_autoloads = opt_list(parsed, "repositories_without_autoloads");
         let mut sig_parts: Vec<String> = vec![
             format!("allow_empty_glob={}", cfg.allow_empty_glob),
             format!("sibling_repo={}", cfg.sibling_repository_layout),
@@ -201,6 +206,18 @@ impl BlazeRuntime {
             format!(
                 "disable_transitions_on={:?}",
                 cfg.incompatible_disable_transitions_on
+            ),
+            format!(
+                "autoload_externally={:?}",
+                cfg.incompatible_autoload_externally
+            ),
+            format!(
+                "disable_autoloads_in_main_repo={}",
+                cfg.incompatible_disable_autoloads_in_main_repo
+            ),
+            format!(
+                "repos_without_autoloads={:?}",
+                cfg.repositories_without_autoloads
             ),
             format!("deleted={:?}", cfg.lookup.deleted_packages),
         ];

@@ -21,7 +21,7 @@
 
 use crate::syntax::ast::{pattern_names, AssignTarget, CompClause, Expr, Stmt};
 use crate::syntax::location::Location;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 /// A static (parse/resolve time) error with its source location.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -369,6 +369,17 @@ pub const UNIVERSE: &[&str] = &[
 /// module-level binding, nor `predeclared`/universal. Mirrors Bazel's resolver, which reports
 /// these statically (so unreachable code is checked too).
 pub fn check_undefined_names(stmts: &[Stmt], predeclared: &[String]) -> Vec<SyntaxError> {
+    check_undefined_names_with_guards(stmts, predeclared, &BTreeMap::new())
+}
+
+/// Like [`check_undefined_names`], additionally rejecting unshadowed references to predeclared
+/// `guarded` symbols (Bazel's `GuardedValue`, e.g. removed symbols `CcInfo`, `DebugPackageInfo`)
+/// with their custom error message.
+pub fn check_undefined_names_with_guards(
+    stmts: &[Stmt],
+    predeclared: &[String],
+    guarded: &BTreeMap<String, String>,
+) -> Vec<SyntaxError> {
     let mut module = HashSet::new();
     for s in stmts {
         collect_stmt_bindings(s, &mut module, true);
@@ -376,9 +387,11 @@ pub fn check_undefined_names(stmts: &[Stmt], predeclared: &[String]) -> Vec<Synt
     let mut w = NameWalker {
         scopes: vec![module.clone()],
         predeclared: predeclared.iter().cloned().collect(),
+        guarded,
         candidates: {
             let mut c: Vec<String> = module.into_iter().collect();
             c.extend(predeclared.iter().cloned());
+            c.extend(guarded.keys().cloned());
             c.extend(UNIVERSE.iter().map(|s| s.to_string()));
             c
         },
@@ -437,14 +450,15 @@ fn collect_stmt_bindings(s: &Stmt, out: &mut HashSet<String>, include_load_def: 
     }
 }
 
-struct NameWalker {
+struct NameWalker<'a> {
     scopes: Vec<HashSet<String>>,
     predeclared: HashSet<String>,
+    guarded: &'a BTreeMap<String, String>,
     candidates: Vec<String>,
     errors: Vec<SyntaxError>,
 }
 
-impl NameWalker {
+impl NameWalker<'_> {
     fn defined(&self, name: &str) -> bool {
         self.scopes.iter().any(|s| s.contains(name))
             || self.predeclared.contains(name)
@@ -521,18 +535,25 @@ impl NameWalker {
         match e {
             Expr::Ident(name, loc) => {
                 if !self.defined(name) {
-                    let suggestion = did_you_mean(
-                        name,
-                        self.candidates.iter().map(|s| s.as_str()).chain(
-                            self.scopes
-                                .iter()
-                                .flat_map(|scope| scope.iter().map(|s| s.as_str())),
-                        ),
-                    );
-                    self.errors.push(SyntaxError {
-                        location: loc.clone(),
-                        message: format!("name '{name}' is not defined{suggestion}"),
-                    });
+                    if let Some(msg) = self.guarded.get(name) {
+                        self.errors.push(SyntaxError {
+                            location: loc.clone(),
+                            message: msg.clone(),
+                        });
+                    } else {
+                        let suggestion = did_you_mean(
+                            name,
+                            self.candidates.iter().map(|s| s.as_str()).chain(
+                                self.scopes
+                                    .iter()
+                                    .flat_map(|scope| scope.iter().map(|s| s.as_str())),
+                            ),
+                        );
+                        self.errors.push(SyntaxError {
+                            location: loc.clone(),
+                            message: format!("name '{name}' is not defined{suggestion}"),
+                        });
+                    }
                 }
             }
             Expr::Literal(_) => {}

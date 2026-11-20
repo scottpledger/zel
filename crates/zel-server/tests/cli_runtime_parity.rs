@@ -1683,3 +1683,127 @@ java_package_configuration(
         bad_local.err
     );
 }
+
+#[test]
+fn bazel9_removed_symbols_and_autoload_externally_e2e() {
+    let w = make_ws("autoload-e2e");
+    let ext_dir = w.ws.parent().unwrap().join("ext_cc_repo");
+    std::fs::create_dir_all(&ext_dir).unwrap();
+    std::fs::write(
+        ext_dir.join("MODULE.bazel"),
+        "module(name = \"ext_cc_repo\", version = \"1.0.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_dir.join("a.c"), "int f(void) { return 0; }\n").unwrap();
+    // External repo calls bare cc_library without load(), like redis / sqlite4java in rules_itest.
+    std::fs::write(
+        ext_dir.join("BUILD.bazel"),
+        "cc_library(name = \"legacy_lib\", srcs = [\"a.c\"])\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(ext_dir.join("bzl")).unwrap();
+    std::fs::write(ext_dir.join("bzl/defs.bzl"), "MY_CC_INFO = CcInfo\n").unwrap();
+    std::fs::write(
+        ext_dir.join("bzl/BUILD.bazel"),
+        "load(\":defs.bzl\", \"MY_CC_INFO\")\nfilegroup(name = \"ok\")\n",
+    )
+    .unwrap();
+
+    w.write(
+        "MODULE.bazel",
+        &format!(
+            r#"module(name = "w")
+bazel_dep(name = "rules_cc", version = "0.2.17")
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "ext_cc_repo", version = "1.0.0")
+local_path_override(module_name = "ext_cc_repo", path = "{}")
+"#,
+            ext_dir.display()
+        ),
+    );
+    w.write("bad/defs.bzl", "X = CcInfo\n");
+    w.write("bad/BUILD", "load(':defs.bzl', 'X')\n");
+
+    // 1. Default Bazel 9.3.2: bare CcInfo in main repo .bzl fails with exact removal diagnostic.
+    let r = w.run(&["query", "//bad:all"]);
+    assert_ne!(
+        r.code, 0,
+        "expected failure on bare CcInfo, stdout={}",
+        r.out
+    );
+    assert!(
+        r.err.contains(
+            "The CcInfo symbol has been removed, add the following to your BUILD/bzl file:\n\nload(\"@rules_cc//cc/common:cc_info.bzl\", \"CcInfo\")"
+        ),
+        "unexpected error:\n{}",
+        r.err
+    );
+
+    // 2. Default Bazel 9.3.2: external repo bare cc_library hits _removed_rule_failure.
+    let r = w.run(&["query", "@ext_cc_repo//:legacy_lib"]);
+    assert_ne!(
+        r.code, 0,
+        "expected failure on bare cc_library without autoload"
+    );
+    assert!(
+        r.err.contains("rule has been removed"),
+        "unexpected error:\n{}",
+        r.err
+    );
+
+    // 3. Repeating `--incompatible_autoload_externally=` then `+@rules_cc` (matching
+    //    rules_itest/examples/.bazelrc) autoloads cc_library and CcInfo from real @rules_cc!
+    let r = w.run(&[
+        "query",
+        "--incompatible_autoload_externally=",
+        "--incompatible_autoload_externally=+@rules_cc",
+        "@ext_cc_repo//:legacy_lib",
+    ]);
+    assert_eq!(
+        r.code, 0,
+        "expected autoloaded cc_library to succeed, err:\n{}",
+        r.err
+    );
+    assert!(
+        r.out.contains("legacy_lib"),
+        "expected legacy_lib in query output, got:\n{}",
+        r.out
+    );
+
+    let r = w.run(&[
+        "query",
+        "--incompatible_autoload_externally=",
+        "--incompatible_autoload_externally=+@rules_cc",
+        "@ext_cc_repo//bzl:ok",
+    ]);
+    assert_eq!(
+        r.code, 0,
+        "expected autoloaded CcInfo in external .bzl to succeed, err:\n{}",
+        r.err
+    );
+    assert!(r.out.contains(":ok"), "got:\n{}", r.out);
+
+    // 4. Main repo still disables autoloads by default, and enables them with
+    //    --incompatible_disable_autoloads_in_main_repo=false.
+    let r = w.run(&[
+        "query",
+        "--incompatible_autoload_externally=+@rules_cc",
+        "//bad:all",
+    ]);
+    assert_ne!(
+        r.code, 0,
+        "main repo should still fail bare CcInfo by default"
+    );
+
+    let r = w.run(&[
+        "query",
+        "--incompatible_autoload_externally=+@rules_cc",
+        "--noincompatible_disable_autoloads_in_main_repo",
+        "//bad:all",
+    ]);
+    assert_eq!(
+        r.code, 0,
+        "main repo should autoload CcInfo when --noincompatible_disable_autoloads_in_main_repo is set, err:\n{}",
+        r.err
+    );
+}

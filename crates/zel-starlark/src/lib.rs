@@ -42,7 +42,8 @@ pub use syntax::ast::{
 };
 pub use syntax::bazel_syntax::source_from_bytes;
 pub use syntax::checks::{
-    check_dot_bazel_file_syntax, check_undefined_names, did_you_mean, SyntaxError,
+    check_dot_bazel_file_syntax, check_undefined_names, check_undefined_names_with_guards,
+    did_you_mean, SyntaxError,
 };
 pub use syntax::lexer::{Lexer, LexerError};
 pub use syntax::location::Location;
@@ -171,6 +172,9 @@ pub struct EvalContext {
     /// labels in their shorthand display form like Bazel's `Label.debugPrint`.
     pub main_repo_mapping: Option<Arc<BTreeMap<String, String>>>,
     pub static_universe: Vec<String>,
+    /// Predeclared guarded/removed symbols (Bazel's `GuardedValue`, e.g. `CcInfo`) mapping symbol
+    /// name -> diagnostic message emitted if referenced without being shadowed.
+    pub guarded_globals: BTreeMap<String, String>,
     /// Location of the most recent call dispatched to the host callback.
     pub last_call_loc: Location,
     /// Keyword argument names of the most recent call in source order (`**` entries last).
@@ -245,6 +249,7 @@ impl EvalContext {
             static_names: false,
             main_repo_mapping: None,
             static_universe: Vec::new(),
+            guarded_globals: BTreeMap::new(),
             last_call_loc: Location::default(),
             call_kw_order: Vec::new(),
             pending_dup_kw: None,
@@ -314,7 +319,11 @@ impl EvalContext {
 
         if self.strict_names {
             let predeclared: Vec<String> = self.globals.keys().cloned().collect();
-            let errs = syntax::checks::check_undefined_names(&stmts, &predeclared);
+            let errs = syntax::checks::check_undefined_names_with_guards(
+                &stmts,
+                &predeclared,
+                &self.guarded_globals,
+            );
             if let Some(first) = errs.into_iter().next() {
                 return Err(StarlarkError(first.message));
             }
@@ -592,7 +601,8 @@ impl EvalContext {
         if self.strict_names || self.static_names {
             let mut predeclared: Vec<String> = self.globals.keys().cloned().collect();
             predeclared.extend(self.static_universe.iter().cloned());
-            for e in check_undefined_names(&stmts, &predeclared) {
+            for e in check_undefined_names_with_guards(&stmts, &predeclared, &self.guarded_globals)
+            {
                 undefined.push(((e.location.line, e.location.column), e.to_string()));
             }
         }

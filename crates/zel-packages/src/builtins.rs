@@ -267,4 +267,12 @@ impl RepoResolver for BuiltinsResolver {
         }
         self.inner.mapping(owner)
     }
+
+    fn module_name_and_version(&self, repo: &RepositoryName) -> Option<(String, String)> {
+        self.inner.module_name_and_version(repo)
+    }
+
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        self.inner.autoload_module_repo(module_name, repo_name)
+    }
 }
