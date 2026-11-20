@@ -329,9 +329,11 @@ fn run_credential_helper(
     use std::io::Write;
     use std::process::{Command, Stdio};
     #[cfg(windows)]
-    let exec_helper = PathBuf::from(helper.to_string_lossy().replace('/', "\\"));
+    let exec_buf = PathBuf::from(helper.to_string_lossy().replace('/', "\\"));
+    #[cfg(windows)]
+    let exec_helper: &Path = exec_buf.as_path();
     #[cfg(not(windows))]
-    let exec_helper = helper;
+    let exec_helper: &Path = helper;
     let mut child = retry_etxtbsy(|| {
         let mut cmd = Command::new(exec_helper);
         cmd.arg("get")

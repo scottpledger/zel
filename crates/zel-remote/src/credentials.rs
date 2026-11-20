@@ -799,9 +799,11 @@ fn invoke_helper_process(
 ) -> Result<HelperOutput, CredentialError> {
     let display = path.display().to_string();
     #[cfg(windows)]
-    let exec_path = PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+    let exec_buf = PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+    #[cfg(windows)]
+    let exec_path: &Path = exec_buf.as_path();
     #[cfg(not(windows))]
-    let exec_path = path;
+    let exec_path: &Path = path;
     let mut child = retry_etxtbsy(|| {
         Command::new(exec_path)
             .arg("get")

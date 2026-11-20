@@ -846,13 +846,12 @@ impl BesConfig {
         self.has_client_env = true;
     }
 
-    /// Effective `project_id` sent on BES requests (`--bes_instance_name` or `--project_id`).
+    /// Effective `project_id` sent on BES requests (`--project_id` or `--bes_instance_name`).
     pub fn effective_project_id(&self) -> Option<&str> {
-        if !self.instance_name.is_empty() {
-            Some(self.instance_name.as_str())
-        } else {
-            self.project_id.as_deref().filter(|s| !s.is_empty())
-        }
+        self.project_id
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| (!self.instance_name.is_empty()).then_some(self.instance_name.as_str()))
     }
 
     /// `INFO: Streaming build results to: <url>/<invocation id>` line, when a non-empty results
