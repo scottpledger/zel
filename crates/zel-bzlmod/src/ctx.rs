@@ -2924,6 +2924,7 @@ fn maybe_watch_dirents(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<
 }
 
 /// `DirectoryTreeDigestValue`: delegates to [`crate::lockfile::compute_dirtree_digest`].
+#[cfg(test)]
 pub(crate) fn compute_dirtree_digest(p: &Path) -> Result<String, std::io::Error> {
     match crate::lockfile::compute_dirtree_digest(p).as_str() {
         "ENOENT" => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
