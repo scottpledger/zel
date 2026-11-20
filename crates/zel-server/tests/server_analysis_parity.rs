@@ -1224,12 +1224,13 @@ fn main() {
 "#,
     )
     .unwrap();
-    let status = std::process::Command::new("rustc")
-        .arg(&make_tree_src)
-        .arg("-o")
-        .arg(w.ws.join(&make_tree_name))
-        .status()
-        .expect("rustc must be available");
+    let status =
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg(&make_tree_src)
+            .arg("-o")
+            .arg(w.ws.join(&make_tree_name))
+            .status()
+            .expect("rustc must be available");
     assert!(status.success(), "compiling make_tree helper failed");
 
     let map_tool_src = w.root.join("map_tool.rs");
@@ -1255,12 +1256,13 @@ fn main() {
 "#,
     )
     .unwrap();
-    let status = std::process::Command::new("rustc")
-        .arg(&map_tool_src)
-        .arg("-o")
-        .arg(w.ws.join(&map_tool_name))
-        .status()
-        .expect("rustc must be available");
+    let status =
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg(&map_tool_src)
+            .arg("-o")
+            .arg(w.ws.join(&map_tool_name))
+            .status()
+            .expect("rustc must be available");
     assert!(status.success(), "compiling map_tool helper failed");
 
     w.write("hdr.txt", "v1\n");
@@ -1616,12 +1618,13 @@ fn main() {
     )
     .unwrap();
     std::fs::create_dir_all(w.ws.join("pkg")).unwrap();
-    let status = std::process::Command::new("rustc")
-        .arg(&cat_unused_src)
-        .arg("-o")
-        .arg(w.ws.join("pkg").join(&cat_unused_name))
-        .status()
-        .expect("rustc must be available");
+    let status =
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg(&cat_unused_src)
+            .arg("-o")
+            .arg(w.ws.join("pkg").join(&cat_unused_name))
+            .status()
+            .expect("rustc must be available");
     assert!(status.success(), "compiling cat_unused helper failed");
 
     let run_log_starlark = run_log.to_string_lossy().replace('\\', "/");
@@ -1833,12 +1836,13 @@ fn main() {
 "#,
     )
     .unwrap();
-    let status = std::process::Command::new("rustc")
-        .arg(&make_trees_src)
-        .arg("-o")
-        .arg(w.ws.join(&make_trees_name))
-        .status()
-        .expect("rustc must be available");
+    let status =
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg(&make_trees_src)
+            .arg("-o")
+            .arg(w.ws.join(&make_trees_name))
+            .status()
+            .expect("rustc must be available");
     assert!(status.success(), "compiling make_trees helper failed");
 
     let copy_tag_src = w.root.join("copy_tag.rs");
@@ -1856,12 +1860,13 @@ fn main() {
 "#,
     )
     .unwrap();
-    let status = std::process::Command::new("rustc")
-        .arg(&copy_tag_src)
-        .arg("-o")
-        .arg(w.ws.join(&copy_tag_name))
-        .status()
-        .expect("rustc must be available");
+    let status =
+        std::process::Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+            .arg(&copy_tag_src)
+            .arg("-o")
+            .arg(w.ws.join(&copy_tag_name))
+            .status()
+            .expect("rustc must be available");
     assert!(status.success(), "compiling copy_tag helper failed");
 
     let write_defs = |helper_prefix: &str,

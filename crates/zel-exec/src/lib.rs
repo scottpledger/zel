@@ -4438,6 +4438,28 @@ mod tests {
     }
 
     #[test]
+    fn sub_mapper_child_entrypoint() {
+        if std::env::var("ZEL_SUB_MAPPER_MODE").as_deref() != Ok("1") {
+            return;
+        }
+        use std::io::Write;
+        let rel = std::env::var("ZEL_SUB_MAPPER_REL").expect("ZEL_SUB_MAPPER_REL");
+        let log_path = std::env::var("ZEL_SUB_MAPPER_LOG").expect("ZEL_SUB_MAPPER_LOG");
+        let in_path = std::env::var("ZEL_SUB_MAPPER_IN").expect("ZEL_SUB_MAPPER_IN");
+        let out_path = std::env::var("ZEL_SUB_MAPPER_OUT").expect("ZEL_SUB_MAPPER_OUT");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap();
+        writeln!(f, "{rel}").unwrap();
+        let body = std::fs::read_to_string(in_path).unwrap();
+        // Intentionally omit `create_dir_all` on `out_path` to verify `SpawnAction` pre-creates
+        // nested parent directories inside output tree artifacts.
+        std::fs::write(out_path, body.to_ascii_uppercase()).unwrap();
+    }
+
+    #[test]
     fn map_directory_incremental_rebuild_reuses_unchanged_sub_action_cache_and_prunes_stale() {
         #[derive(Debug)]
         struct TestMapExpander {
@@ -4468,18 +4490,33 @@ mod tests {
                             .get_relative_str(&out_rel),
                         owner_label: self.owner.clone(),
                     };
+                    let env = BTreeMap::from([
+                        ("ZEL_SUB_MAPPER_MODE".to_string(), "1".to_string()),
+                        ("ZEL_SUB_MAPPER_REL".to_string(), rel.clone()),
+                        (
+                            "ZEL_SUB_MAPPER_LOG".to_string(),
+                            self.log_file.to_string_lossy().into_owned(),
+                        ),
+                        (
+                            "ZEL_SUB_MAPPER_IN".to_string(),
+                            in_art.exec_path.path_string().to_string(),
+                        ),
+                        (
+                            "ZEL_SUB_MAPPER_OUT".to_string(),
+                            out_art.exec_path.path_string().to_string(),
+                        ),
+                    ]);
                     acts.push(ActionAnalysisMetadata::SpawnAction {
                         owner: self.owner.clone(),
                         mnemonic: "MapSub".to_string(),
                         progress_message: format!("Mapping {rel}"),
                         argv: vec![
                             self.mapper_bin.to_string_lossy().into_owned(),
-                            rel.clone(),
-                            self.log_file.to_string_lossy().into_owned(),
-                            in_art.exec_path.path_string().to_string(),
-                            out_art.exec_path.path_string().to_string(),
+                            "--exact".to_string(),
+                            "tests::sub_mapper_child_entrypoint".to_string(),
+                            "--quiet".to_string(),
                         ],
-                        env: BTreeMap::new(),
+                        env,
                         inherited_env: BTreeSet::new(),
                         unset_env: BTreeSet::new(),
                         inputs: vec![in_art.clone()],
@@ -4504,36 +4541,10 @@ mod tests {
         std::fs::create_dir_all(&exec_dir).unwrap();
         let log_file = tmp.join("runs.log");
 
-        // Compile a tiny cross-platform helper so the test runs identically on Linux, macOS, and Windows,
-        // and intentionally omit `create_dir_all` on `out_file` to verify `SpawnAction` pre-creates nested
-        // parent directories inside output tree artifacts.
-        let mapper_src = tmp.join("sub_mapper.rs");
-        let mapper_bin = tmp.join(format!("sub_mapper{}", std::env::consts::EXE_SUFFIX));
-        std::fs::write(
-            &mapper_src,
-            r#"
-use std::io::Write;
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let rel = &args[1];
-    let log_path = &args[2];
-    let in_path = &args[3];
-    let out_path = &args[4];
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log_path).unwrap();
-    writeln!(f, "{rel}").unwrap();
-    let body = std::fs::read_to_string(in_path).unwrap();
-    std::fs::write(out_path, body.to_ascii_uppercase()).unwrap();
-}
-"#,
-        )
-        .unwrap();
-        let status = std::process::Command::new("rustc")
-            .arg(&mapper_src)
-            .arg("-o")
-            .arg(&mapper_bin)
-            .status()
-            .expect("rustc must be available");
-        assert!(status.success(), "compiling sub_mapper helper failed");
+        // Re-invoke the running test binary (`current_exe()`) in child-helper mode so this test
+        // runs hermetically on Linux (including Bazel's `linux-sandbox` where `HOME=$TEST_TMPDIR`
+        // and no `rustup` toolchain is configured), macOS, and Windows without `/bin/sh` or `rustc`.
+        let mapper_bin = std::env::current_exe().expect("current_exe must be available");
 
         let execroot = PathFragment::create(exec_dir.to_str().unwrap());
         let fs = zel_vfs::LocalFileSystem::default();
