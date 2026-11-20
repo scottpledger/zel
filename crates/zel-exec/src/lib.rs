@@ -1187,10 +1187,11 @@ where
         let mut entries = fs.readdir(cur_abs)?;
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         for e in entries {
+            let clean_name = e.name.replace('\\', "/");
             let rel = if apparent_rel.is_empty() {
-                e.name.clone()
+                clean_name
             } else {
-                format!("{apparent_rel}/{}", e.name)
+                format!("{apparent_rel}/{clean_name}")
             };
             let child_abs = cur_abs.get_relative_str(&e.name);
             let lst = fs.stat(&child_abs, false)?;
@@ -2636,9 +2637,17 @@ pub fn execute_action_with(
             } else {
                 progress_message.clone()
             };
-            // `SkyframeActionExecutor.deleteOutputs`: remove any stale output paths before the action executes.
+            // `SkyframeActionExecutor.deleteOutputs` + `createOutputDirectories`: remove any stale
+            // output paths and ensure output directories (including nested parent directories inside
+            // output tree artifacts) exist before the action executes.
             for o in spawn_outputs {
-                let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+                let out_abs = execroot.get_relative(&o.exec_path);
+                let _ = fs.delete(&out_abs);
+                if o.is_tree_artifact {
+                    fs.create_directory_and_parents(&out_abs)?;
+                } else if let Some(parent) = out_abs.parent_directory() {
+                    fs.create_directory_and_parents(&parent)?;
+                }
             }
             // `add_all(tree_artifact)` placeholders expand to the files of the (now produced)
             // directory (`expand_directories`).
@@ -4299,6 +4308,19 @@ mod tests {
                 .contains("child broken is a dangling symbolic link"),
             "unexpected error: {err_dangling}"
         );
+
+        // 6. Windows drive-prefixed tree path (`C:/...`) normalizes nested relative paths with `/`.
+        let win_tree = PathFragment::create(
+            "C:\\execroot\\_main\\bazel-out\\x64_windows-fastbuild\\bin\\pkg\\tree",
+        );
+        fs.create_directory_and_parents(&win_tree.get_relative_str("nested/deep"))
+            .unwrap();
+        fs.write_file(&win_tree.get_relative_str("nested/deep/item.txt"), b"win")
+            .unwrap();
+        let mut win_kids = Vec::new();
+        collect_tree_children(&fs, &win_tree, &parent_art, &owner, &mut win_kids).unwrap();
+        assert_eq!(win_kids.len(), 1);
+        assert_eq!(win_kids[0].0, "nested/deep/item.txt");
     }
 
     #[test]
@@ -4307,6 +4329,7 @@ mod tests {
         struct TestMapExpander {
             owner: Label,
             out_dir: Artifact,
+            mapper_bin: std::path::PathBuf,
             log_file: std::path::PathBuf,
         }
 
@@ -4331,18 +4354,17 @@ mod tests {
                             .get_relative_str(&out_rel),
                         owner_label: self.owner.clone(),
                     };
-                    let script = format!(
-                        "printf '%s\\n' '{}' >> '{}' && tr 'a-z' 'A-Z' < '{}' > '{}'",
-                        rel,
-                        self.log_file.display(),
-                        in_art.exec_path.path_string(),
-                        out_art.exec_path.path_string()
-                    );
                     acts.push(ActionAnalysisMetadata::SpawnAction {
                         owner: self.owner.clone(),
                         mnemonic: "MapSub".to_string(),
                         progress_message: format!("Mapping {rel}"),
-                        argv: vec!["/bin/sh".into(), "-c".into(), script],
+                        argv: vec![
+                            self.mapper_bin.to_string_lossy().into_owned(),
+                            rel.clone(),
+                            self.log_file.to_string_lossy().into_owned(),
+                            in_art.exec_path.path_string().to_string(),
+                            out_art.exec_path.path_string().to_string(),
+                        ],
                         env: BTreeMap::new(),
                         inherited_env: BTreeSet::new(),
                         unset_env: BTreeSet::new(),
@@ -4367,6 +4389,37 @@ mod tests {
         std::fs::create_dir_all(&exec_dir).unwrap();
         let log_file = tmp.join("runs.log");
 
+        // Compile a tiny cross-platform helper so the test runs identically on Linux, macOS, and Windows,
+        // and intentionally omit `create_dir_all` on `out_file` to verify `SpawnAction` pre-creates nested
+        // parent directories inside output tree artifacts.
+        let mapper_src = tmp.join("sub_mapper.rs");
+        let mapper_bin = tmp.join(format!("sub_mapper{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(
+            &mapper_src,
+            r#"
+use std::io::Write;
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let rel = &args[1];
+    let log_path = &args[2];
+    let in_path = &args[3];
+    let out_path = &args[4];
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log_path).unwrap();
+    writeln!(f, "{rel}").unwrap();
+    let body = std::fs::read_to_string(in_path).unwrap();
+    std::fs::write(out_path, body.to_ascii_uppercase()).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        let status = std::process::Command::new("rustc")
+            .arg(&mapper_src)
+            .arg("-o")
+            .arg(&mapper_bin)
+            .status()
+            .expect("rustc must be available");
+        assert!(status.success(), "compiling sub_mapper helper failed");
+
         let execroot = PathFragment::create(exec_dir.to_str().unwrap());
         let fs = zel_vfs::LocalFileSystem::default();
         let cache = CompactPersistentActionCache::new();
@@ -4388,9 +4441,9 @@ mod tests {
 
         let in_abs = exec_dir.join(in_dir.exec_path.path_string());
         let out_abs = exec_dir.join(out_dir.exec_path.path_string());
-        std::fs::create_dir_all(&in_abs).unwrap();
+        std::fs::create_dir_all(in_abs.join("sub")).unwrap();
         std::fs::write(in_abs.join("a.txt"), "alpha-v1").unwrap();
-        std::fs::write(in_abs.join("b.txt"), "beta-v1").unwrap();
+        std::fs::write(in_abs.join("sub").join("b.txt"), "beta-v1").unwrap();
 
         let map_action =
             ActionAnalysisMetadata::MapDirectoryAction(Box::new(zel_analysis::MapDirectorySpec {
@@ -4408,37 +4461,38 @@ mod tests {
                 expander: std::sync::Arc::new(TestMapExpander {
                     owner,
                     out_dir: out_dir.clone(),
+                    mapper_bin,
                     log_file: log_file.clone(),
                 }),
             }));
 
-        // 1. Initial build executes both `a.txt` and `b.txt` child actions.
+        // 1. Initial build executes both `a.txt` and `sub/b.txt` child actions.
         let r1 = execute_action(&map_action, &execroot, &fs, &cache, &reporter, false).unwrap();
-        assert!(r1.succeeded());
+        assert!(r1.succeeded(), "{:?}", r1.failure);
         assert!(!r1.cache_hit);
         let runs1: Vec<String> = std::fs::read_to_string(&log_file)
             .unwrap()
             .lines()
             .map(str::to_string)
             .collect();
-        assert_eq!(runs1, vec!["a.txt", "b.txt"]);
+        assert_eq!(runs1, vec!["a.txt", "sub/b.txt"]);
         assert_eq!(
             std::fs::read_to_string(out_abs.join("a.txt.out")).unwrap(),
             "ALPHA-V1"
         );
         assert_eq!(
-            std::fs::read_to_string(out_abs.join("b.txt.out")).unwrap(),
+            std::fs::read_to_string(out_abs.join("sub").join("b.txt.out")).unwrap(),
             "BETA-V1"
         );
 
-        // 2. Modify only `b.txt`: `MapDirectoryAction` misses cache, `a.txt` hits sub-action cache,
-        //    and ONLY `b.txt` re-executes!
+        // 2. Modify only `sub/b.txt`: `MapDirectoryAction` misses cache, `a.txt` hits sub-action cache,
+        //    and ONLY `sub/b.txt` re-executes!
         std::fs::write(&log_file, "").unwrap();
-        std::fs::write(in_abs.join("b.txt"), "beta-v2").unwrap();
+        std::fs::write(in_abs.join("sub").join("b.txt"), "beta-v2").unwrap();
         invalidate_computed_digest(execroot.get_relative(&in_dir.exec_path).path_string());
 
         let r2 = execute_action(&map_action, &execroot, &fs, &cache, &reporter, false).unwrap();
-        assert!(r2.succeeded());
+        assert!(r2.succeeded(), "{:?}", r2.failure);
         assert!(!r2.cache_hit);
         let runs2: Vec<String> = std::fs::read_to_string(&log_file)
             .unwrap()
@@ -4447,7 +4501,7 @@ mod tests {
             .collect();
         assert_eq!(
             runs2,
-            vec!["b.txt"],
+            vec!["sub/b.txt"],
             "unchanged child action a.txt must hit action cache"
         );
         assert_eq!(
@@ -4455,23 +4509,23 @@ mod tests {
             "ALPHA-V1"
         );
         assert_eq!(
-            std::fs::read_to_string(out_abs.join("b.txt.out")).unwrap(),
+            std::fs::read_to_string(out_abs.join("sub").join("b.txt.out")).unwrap(),
             "BETA-V2"
         );
 
-        // 3. Remove `a.txt` from input tree: `out_tree/a.txt.out` is pruned and `b.txt` still hits cache!
+        // 3. Remove `a.txt` from input tree: `out_tree/a.txt.out` is pruned and `sub/b.txt` still hits cache!
         std::fs::write(&log_file, "").unwrap();
         std::fs::remove_file(in_abs.join("a.txt")).unwrap();
         invalidate_computed_digest(execroot.get_relative(&in_dir.exec_path).path_string());
 
         let r3 = execute_action(&map_action, &execroot, &fs, &cache, &reporter, false).unwrap();
-        assert!(r3.succeeded());
+        assert!(r3.succeeded(), "{:?}", r3.failure);
         assert!(
             !out_abs.join("a.txt.out").exists(),
             "stale child output should be pruned"
         );
         assert_eq!(
-            std::fs::read_to_string(out_abs.join("b.txt.out")).unwrap(),
+            std::fs::read_to_string(out_abs.join("sub").join("b.txt.out")).unwrap(),
             "BETA-V2"
         );
         assert_eq!(std::fs::read_to_string(&log_file).unwrap(), "");

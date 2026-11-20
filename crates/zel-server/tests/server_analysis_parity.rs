@@ -67,6 +67,13 @@ impl Ws {
             r.exec_request,
         )
     }
+
+    fn bin_dir(&self) -> PathBuf {
+        self.root.join(format!(
+            "ob/execroot/_main/bazel-out/{}-fastbuild/bin",
+            zel_analysis::build_options::auto_host_cpu()
+        ))
+    }
 }
 
 impl Drop for Ws {
@@ -1239,9 +1246,6 @@ fn main() {
     let stage = std::env::var("MAP_STAGE").unwrap_or_else(|_| "missing".to_string());
     let body = std::fs::read_to_string(in_file).unwrap();
     let hdr = std::fs::read_to_string(hdr_file).unwrap();
-    if let Some(parent) = std::path::Path::new(out_file).parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
     std::fs::write(
         out_file,
         format!("{prefix}:{stage}:{}:{rel}:{body}", hdr.trim()),
@@ -1371,7 +1375,15 @@ pipeline(
     let (code, _, err, _) = w.run(&["build", "//:mapped"]);
     assert_eq!(code, 0, "map_directory build failed: {err}");
 
-    let bin_dir = w.ws.join("bazel-bin").join("mapped_stage2");
+    let bin_dir = w.bin_dir().join("mapped_stage2");
+    #[cfg(unix)]
+    assert!(
+        w.ws.join("bazel-bin")
+            .join("mapped_stage2")
+            .join("alpha.txt.mapped.mapped")
+            .exists(),
+        "expected bazel-bin convenience symlink on unix"
+    );
     let alpha_out =
         std::fs::read_to_string(bin_dir.join("alpha.txt.mapped.mapped")).expect("alpha output");
     let beta_out = std::fs::read_to_string(bin_dir.join("sub").join("beta.txt.mapped.mapped"))
@@ -1516,18 +1528,31 @@ inspector_test(name = "inspect_wrapped", target_under_test = ":wrapped")
     );
 
     // With `--allow_analysis_failures`, both `:wrapped` and `analysis_test` `:inspect_wrapped`
-    // succeed and observe `AnalysisFailureInfo` populated from `:bad`!
-    let (ok_code, _, ok_err, _) =
-        w.run(&["test", "--allow_analysis_failures", "//:inspect_wrapped"]);
-    assert_eq!(
-        ok_code, 0,
-        "expected --allow_analysis_failures test to pass: {ok_err}"
-    );
-
-    let (build_code, _, build_err, _) =
-        w.run(&["build", "--allow_analysis_failures", "//:wrapped"]);
+    // build cleanly and record `AnalysisFailureInfo` from `:bad` on every platform!
+    let (build_code, _, build_err, _) = w.run(&[
+        "build",
+        "--allow_analysis_failures",
+        "//:wrapped",
+        "//:inspect_wrapped",
+    ]);
     assert_eq!(
         build_code, 0,
         "expected --allow_analysis_failures build to succeed: {build_err}"
     );
+    let test_script = std::fs::read_to_string(w.bin_dir().join("inspect_wrapped"))
+        .expect("inspect_wrapped analysis_test script");
+    assert!(
+        test_script.contains("exit 0"),
+        "expected AnalysisTestResultInfo(success = True) script, got: {test_script}"
+    );
+
+    #[cfg(unix)]
+    {
+        let (ok_code, _, ok_err, _) =
+            w.run(&["test", "--allow_analysis_failures", "//:inspect_wrapped"]);
+        assert_eq!(
+            ok_code, 0,
+            "expected --allow_analysis_failures test to pass: {ok_err}"
+        );
+    }
 }
