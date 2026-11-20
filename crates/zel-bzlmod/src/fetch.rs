@@ -48,6 +48,34 @@ fn parse_bzl_label(label: &str) -> (String, String, String) {
     (repo.to_string(), pkg.to_string(), name.to_string())
 }
 
+#[allow(clippy::type_complexity)]
+struct RecordTagMappingsGuard {
+    prev: Option<Option<Vec<(String, String, String)>>>,
+}
+
+impl RecordTagMappingsGuard {
+    fn enter() -> Self {
+        let prev = crate::rt::RECORD_TAG_MAPPINGS
+            .with(|g| std::mem::replace(&mut *g.borrow_mut(), Some(vec![])));
+        Self { prev: Some(prev) }
+    }
+
+    fn finish(mut self) -> Vec<(String, String, String)> {
+        let prev = self.prev.take().unwrap_or(None);
+        crate::rt::RECORD_TAG_MAPPINGS
+            .with(|g| std::mem::replace(&mut *g.borrow_mut(), prev))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for RecordTagMappingsGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = prev);
+        }
+    }
+}
+
 /// Java `os.name` lower-cased and `os.arch` lower-cased (`DigestWriter.computePredeclaredInputHash`).
 fn java_os_name_and_arch() -> (&'static str, &'static str) {
     let name = match std::env::consts::OS {
@@ -1330,14 +1358,7 @@ impl Rt {
             }
         };
         // Build the `modules` list.
-        struct RecordTagMappingsGuard;
-        impl Drop for RecordTagMappingsGuard {
-            fn drop(&mut self) {
-                crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = None);
-            }
-        }
-        crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = Some(vec![]));
-        let _tag_mappings_guard = RecordTagMappingsGuard;
+        let tag_mappings_guard = RecordTagMappingsGuard::enter();
         let mut modules = vec![];
         let mut root_has_non_dev = false;
         let mut ordered: Vec<(&ModuleKey, &ExtensionUsage)> = usages.to_vec();
@@ -1446,6 +1467,7 @@ impl Rt {
                 "com.google.devtools.build.lib.bazel.bzlmod.StarlarkBazelModule",
             ));
         }
+        let recorded_tag_mappings = tag_mappings_guard.finish();
         // Lockfile lookup.
         let lock_key = crate::lockfile::extension_key(id);
         let ext_display = crate::lockfile::extension_display(id);
@@ -1670,10 +1692,7 @@ impl Rt {
         // The repo mapping entries used while loading the extension's .bzl files.
         let mut static_mappings = self.recorded_repo_mapping_entries(&key);
         // Labels in tag attributes resolved through the using module's repo mapping.
-        for e in crate::rt::RECORD_TAG_MAPPINGS
-            .with(|g| g.borrow_mut().take())
-            .unwrap_or_default()
-        {
+        for e in recorded_tag_mappings {
             if !static_mappings.contains(&e) {
                 static_mappings.push(e);
             }
@@ -3865,6 +3884,201 @@ inspect_repo(name = "via_use_repo_rule")
             out.stdout.contains("original_name = \"artifact\""),
             "stdout: {}",
             out.stdout
+        );
+    }
+
+    #[test]
+    fn nested_extension_eval_preserves_outer_recorded_tag_repo_mappings() {
+        // 1. Direct re-entrancy check on `RecordTagMappingsGuard`: both `finish()` and early `Drop`
+        //    restore any outer in-progress `RECORD_TAG_MAPPINGS` vector rather than clobbering it.
+        {
+            let outer = RecordTagMappingsGuard::enter();
+            crate::rt::RECORD_TAG_MAPPINGS.with(|g| {
+                g.borrow_mut().as_mut().unwrap().push((
+                    String::new(),
+                    "my_dep".to_string(),
+                    "dep_a+".to_string(),
+                ));
+            });
+            {
+                let inner_finished = RecordTagMappingsGuard::enter();
+                crate::rt::RECORD_TAG_MAPPINGS.with(|g| {
+                    g.borrow_mut().as_mut().unwrap().push((
+                        String::new(),
+                        "inner_only".to_string(),
+                        "inner+".to_string(),
+                    ));
+                });
+                let inner_entries = inner_finished.finish();
+                assert_eq!(
+                    inner_entries,
+                    vec![(
+                        String::new(),
+                        "inner_only".to_string(),
+                        "inner+".to_string()
+                    )]
+                );
+            }
+            {
+                let _inner_dropped_early = RecordTagMappingsGuard::enter();
+                crate::rt::RECORD_TAG_MAPPINGS.with(|g| {
+                    g.borrow_mut().as_mut().unwrap().push((
+                        String::new(),
+                        "discarded".to_string(),
+                        "discarded+".to_string(),
+                    ));
+                });
+            }
+            let outer_entries = outer.finish();
+            assert_eq!(
+                outer_entries,
+                vec![(String::new(), "my_dep".to_string(), "dep_a+".to_string())]
+            );
+            assert!(crate::rt::RECORD_TAG_MAPPINGS.with(|g| g.borrow().is_none()));
+        }
+
+        // 2. End-to-end nested extension evaluation during lockfile staleness checks:
+        //    Run 1 records `REPO_MAPPING:+inner+inner_repo,my_dep` on `outer` (because `outer.bzl`
+        //    loads `@inner_repo//:helper.bzl`) alongside `outer`'s tag mapping `("", "my_dep")`.
+        //    In Run 2 (after removing that `load` from `outer.bzl`), a fresh session evaluates
+        //    `outer` first; `recorded_inputs_outdated_with_mappings` inspects `+inner+inner_repo`
+        //    and triggers nested `eval_extension(inner)` before `outer` finishes recording inputs.
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
+        let base = tmpdir("nested_tag_mappings");
+        let ws = base.join("ws");
+        let dep_dir = base.join("dep_a");
+        write(
+            &dep_dir,
+            "MODULE.bazel",
+            "module(name = 'dep_a', version = '1.0')\n",
+        );
+        write(&dep_dir, "BUILD.bazel", "filegroup(name = 't')\n");
+        write(&dep_dir, "defs.bzl", "D = 'ok'\n");
+
+        let reg = base.join("reg");
+        add_module(
+            &reg,
+            "dep_a",
+            "1.0",
+            "module(name = 'dep_a', version = '1.0')\n",
+            &format!(
+                r#"{{"type":"local_path","path":"{}"}}"#,
+                dep_dir.display().to_string().replace('\\', "/")
+            ),
+        );
+
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "inner.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('helper.bzl', 'load(\"@my_dep//:defs.bzl\", \"D\")\\nH = D\\n')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _inner(mctx):\n",
+                "    r(name = 'inner_repo')\n",
+                "inner = module_extension(implementation = _inner)\n",
+            ),
+        );
+        write(
+            &ws,
+            "outer.bzl",
+            concat!(
+                "load('@inner_repo//:helper.bzl', 'H')\n",
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('info.txt', rctx.attr.val)\n",
+                "r = repository_rule(implementation = _r, attrs = {'val': attr.string()})\n",
+                "cfg = tag_class(attrs = {'lbl': attr.label()})\n",
+                "def _outer(mctx):\n",
+                "    lbls = [str(t.lbl) for m in mctx.modules for t in m.tags.cfg]\n",
+                "    r(name = 'outer_repo', val = H + ':' + ','.join(lbls))\n",
+                "outer = module_extension(implementation = _outer, tag_classes = {'cfg': cfg})\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "bazel_dep(name = 'dep_a', version = '1.0', repo_name = 'my_dep')\n",
+                "inner = use_extension('//:inner.bzl', 'inner')\n",
+                "use_repo(inner, 'inner_repo')\n",
+                "outer = use_extension('//:outer.bzl', 'outer')\n",
+                "outer.cfg(lbl = '@my_dep//:t')\n",
+                "use_repo(outer, 'outer_repo')\n",
+            ),
+        );
+
+        let reg_flag = format!("--registry={}", crate::file_url_for_path(&reg));
+        let args = vec![
+            reg_flag.clone(),
+            "--check_direct_dependencies=off".to_string(),
+            "--lockfile_mode=update".to_string(),
+            "--repo=@outer_repo".to_string(),
+        ];
+        let out1 = crate::commands::run_bzlmod_command("fetch", &args, &ws, &base.join("ob1"));
+        assert_eq!(out1.exit_code, 0, "stderr: {}", out1.stderr);
+
+        let lock1 = crate::lockfile::Lockfile::read(
+            &ws.join("MODULE.bazel.lock"),
+            crate::lockfile::LockfileMode::Error,
+        )
+        .unwrap();
+        let outer_entry1 = &lock1.module_extensions["//:outer.bzl%outer"]["general"];
+        assert!(
+            outer_entry1
+                .recorded_inputs
+                .iter()
+                .any(|s| s == "REPO_MAPPING:+inner+inner_repo,my_dep dep_a+"),
+            "expected inner_repo load mapping in lock1: {:?}",
+            outer_entry1.recorded_inputs
+        );
+        assert!(
+            outer_entry1
+                .recorded_inputs
+                .iter()
+                .any(|s| s == "REPO_MAPPING:,my_dep dep_a+"),
+            "expected outer tag mapping in lock1: {:?}",
+            outer_entry1.recorded_inputs
+        );
+
+        // Drop the `@inner_repo` load from `outer.bzl` so `outer` is evaluated BEFORE `inner`
+        // in a fresh session, causing `recorded_inputs_outdated_with_mappings` to evaluate `inner`
+        // mid-flight while checking `REPO_MAPPING:+inner+inner_repo,my_dep`.
+        write(
+            &ws,
+            "outer.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('info.txt', rctx.attr.val)\n",
+                "r = repository_rule(implementation = _r, attrs = {'val': attr.string()})\n",
+                "cfg = tag_class(attrs = {'lbl': attr.label()})\n",
+                "def _outer(mctx):\n",
+                "    lbls = [str(t.lbl) for m in mctx.modules for t in m.tags.cfg]\n",
+                "    r(name = 'outer_repo', val = ','.join(lbls))\n",
+                "outer = module_extension(implementation = _outer, tag_classes = {'cfg': cfg})\n",
+            ),
+        );
+
+        let out2 = crate::commands::run_bzlmod_command("fetch", &args, &ws, &base.join("ob2"));
+        assert_eq!(out2.exit_code, 0, "stderr: {}", out2.stderr);
+
+        let lock2 = crate::lockfile::Lockfile::read(
+            &ws.join("MODULE.bazel.lock"),
+            crate::lockfile::LockfileMode::Error,
+        )
+        .unwrap();
+        let outer_entry2 = &lock2.module_extensions["//:outer.bzl%outer"]["general"];
+        assert!(
+            outer_entry2
+                .recorded_inputs
+                .iter()
+                .any(|s| s == "REPO_MAPPING:,my_dep dep_a+"),
+            "outer tag REPO_MAPPING must survive nested inner extension eval: {:?}",
+            outer_entry2.recorded_inputs
         );
     }
 }
