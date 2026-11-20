@@ -350,10 +350,14 @@ impl StartupOptions {
         if let Some(msg) = startup_range_error(def.name, val_str) {
             return Err(OptionsParsingError::new(msg));
         }
-        // `--digest_function` is a plain string for the C++ client (`StartupOptions::ProcessArg`); the server
-        // validates it with `DigestFunctionConverter`.
+        // `--digest_function`, `--bazelrc`, and `--host_jvm_args` take raw unary strings in the C++
+        // client (`StartupOptions::ProcessArg` / `GetAllUnaryOptionValues`), not comma-split lists.
         let converted = match if def.name == "digest_function" {
             Ok(OptionValue::String(val_str.to_string()))
+        } else if matches!(def.name, "bazelrc" | "host_jvm_args") {
+            Ok(OptionValue::List(vec![OptionValue::String(
+                val_str.to_string(),
+            )]))
         } else {
             convert_option(val_str, def)
         } {
@@ -460,7 +464,11 @@ impl StartupOptions {
             if def.allow_multiple {
                 existing.raw_values.push(val_str.to_string());
                 if let OptionValue::List(ref mut list) = existing.value {
-                    list.push(converted);
+                    if let OptionValue::List(items) = converted {
+                        list.extend(items);
+                    } else {
+                        list.push(converted);
+                    }
                 }
             } else if priority >= existing.priority {
                 existing.raw_values = vec![val_str.to_string()];

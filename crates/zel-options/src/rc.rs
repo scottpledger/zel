@@ -511,6 +511,19 @@ fn expand_windows_percent_vars(raw: &str) -> String {
     out
 }
 
+fn can_read_rc_file(fs: &dyn FileSystem, path: &PathFragment) -> bool {
+    let Ok(st) = fs.stat(path, true) else {
+        return false;
+    };
+    if st.is_directory {
+        return false;
+    }
+    if !st.is_special_file && std::fs::symlink_metadata(path.path_string()).is_ok() {
+        return std::fs::File::open(path.path_string()).is_ok();
+    }
+    (st.permissions & 0o444) != 0
+}
+
 /// Discovers and loads rc files in full parity with Bazel's discovery order:
 /// 1. `/etc/bazel.bazelrc` or `%ProgramData%/bazel.bazelrc` (system rc)
 /// 2. `%workspace%/.bazelrc` (workspace rc)
@@ -525,9 +538,30 @@ pub fn discover_and_load_rc_files(
     fs: &dyn FileSystem,
     build_label: &str,
 ) -> Result<BazelrcConfig, OptionsParsingError> {
+    let bazelrc_env = std::env::var("BAZELRC").ok();
+    discover_and_load_rc_files_with_env(
+        startup,
+        workspace_dir,
+        home_dir,
+        cwd,
+        fs,
+        build_label,
+        bazelrc_env.as_deref(),
+    )
+}
+
+fn discover_and_load_rc_files_with_env(
+    startup: &mut StartupOptions,
+    workspace_dir: Option<&PathFragment>,
+    home_dir: Option<&str>,
+    cwd: &PathFragment,
+    fs: &dyn FileSystem,
+    build_label: &str,
+    bazelrc_env: Option<&str>,
+) -> Result<BazelrcConfig, OptionsParsingError> {
     let mut config = BazelrcConfig::default();
     if startup.ignore_all_rc_files {
-        if !startup.bazelrc_files.is_empty() {
+        if startup.bazelrc_files.last().is_some_and(|v| !v.is_empty()) {
             eprintln!("WARNING: Value of --bazelrc is ignored, since --ignore_all_rc_files is on.");
         }
         if startup.home_rc && startup.parsed_options.contains_key("home_rc") {
@@ -543,7 +577,7 @@ pub fn discover_and_load_rc_files(
         return Ok(config);
     }
 
-    let mut potential_rc_files: Vec<(PathFragment, bool)> = Vec::new(); // (path, is_explicit)
+    let mut potential_rc_files: Vec<PathFragment> = Vec::new();
 
     // 1. System rc (unless --nosystem_rc)
     if startup.system_rc {
@@ -559,13 +593,13 @@ pub fn discover_and_load_rc_files(
             }
             _ => PathFragment::create("/etc/bazel.bazelrc"),
         };
-        potential_rc_files.push((sys_rc, false));
+        potential_rc_files.push(sys_rc);
     }
 
     // 2. Workspace rc: %workspace%/.bazelrc (unless --noworkspace_rc)
     if startup.workspace_rc {
         if let Some(ws) = workspace_dir {
-            potential_rc_files.push((ws.get_relative_str(".bazelrc"), false));
+            potential_rc_files.push(ws.get_relative_str(".bazelrc"));
         }
     }
 
@@ -573,30 +607,44 @@ pub fn discover_and_load_rc_files(
     if startup.home_rc {
         if let Some(h) = home_dir.filter(|s| !s.is_empty()) {
             let home_pf = PathFragment::create(h);
-            potential_rc_files.push((home_pf.get_relative_str(".bazelrc"), false));
+            potential_rc_files.push(home_pf.get_relative_str(".bazelrc"));
         }
     }
 
-    // 4. Env var BAZELRC (split by comma, stopped by /dev/null)
-    if let Ok(bazelrc_env) = std::env::var("BAZELRC") {
-        if !bazelrc_env.is_empty() {
-            for part in bazelrc_env.split(',') {
-                if part == "/dev/null" {
-                    break;
-                }
-                let full_pf = absolute_path_from_flag(part, cwd, home_dir);
-                potential_rc_files.push((full_pf, true));
+    // 4. Env var BAZELRC (`blaze_util::Split(GetEnv("BAZELRC"), ',')` + `GetAndValidateExistingRcFiles`):
+    // skips empty comma-delimited slots without trimming whitespace; `/dev/null` is a readable empty
+    // file and does not ignore subsequent `BAZELRC` entries.
+    if let Some(bazelrc_env) = bazelrc_env {
+        for part in bazelrc_env.split(',').filter(|part| !part.is_empty()) {
+            if part == "/dev/null" {
+                continue;
             }
+            let full_pf = absolute_path_from_flag(part, cwd, home_dir);
+            if !can_read_rc_file(fs, &full_pf) {
+                return Err(OptionsParsingError::new(format!(
+                    "Error: Unable to read .bazelrc file '{}'.",
+                    full_pf.path_string()
+                )));
+            }
+            potential_rc_files.push(full_pf);
         }
     }
 
-    // 5. Command-line provided --bazelrc (can be repeated; `/dev/null` stops further `--bazelrc`s)
+    // 5. Command-line provided --bazelrc (`GetAllUnaryOptionValues(..., "--bazelrc", "/dev/null")`
+    // + `GetAndValidateExistingRcFiles`): `/dev/null` stops collecting subsequent `--bazelrc` flags,
+    // while `--bazelrc=` resolves `""` via `AbsolutePathFromFlag` to `cwd` and fails `CanReadFile`.
     for custom_rc in &startup.bazelrc_files {
         if custom_rc == "/dev/null" {
             break;
         }
         let full_pf = absolute_path_from_flag(custom_rc, cwd, home_dir);
-        potential_rc_files.push((full_pf, true));
+        if !can_read_rc_file(fs, &full_pf) {
+            return Err(OptionsParsingError::new(format!(
+                "Error: Unable to read .bazelrc file '{}'.",
+                full_pf.path_string()
+            )));
+        }
+        potential_rc_files.push(full_pf);
     }
 
     client_log(
@@ -605,7 +653,7 @@ pub fn discover_and_load_rc_files(
             "Looking for the following rc files: {}",
             potential_rc_files
                 .iter()
-                .map(|(p, _)| p.path_string().to_string())
+                .map(|p| p.path_string().to_string())
                 .collect::<Vec<_>>()
                 .join(",")
         ),
@@ -613,14 +661,8 @@ pub fn discover_and_load_rc_files(
 
     // Deduplicate top-level candidate queue by canonical path (`DedupeBlazercPaths`) and load.
     let mut top_level_seen = HashSet::new();
-    for (rc_path, is_explicit) in potential_rc_files {
-        if !fs.exists(&rc_path, true) {
-            if is_explicit {
-                return Err(OptionsParsingError::new(format!(
-                    "Error: Unable to read .bazelrc file '{}'.",
-                    rc_path.path_string()
-                )));
-            }
+    for rc_path in potential_rc_files {
+        if !fs.stat(&rc_path, true).is_ok_and(|st| !st.is_directory) {
             continue;
         }
 
@@ -1496,5 +1538,225 @@ mod tests {
             .map(|(o, _)| o)
             .collect();
         assert_eq!(flags, vec!["--jobs=4", "--jobs=8"]);
+    }
+
+    #[test]
+    fn test_bazelrc_env_skips_empty_comma_slots_without_resolving_cwd() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let cwd = PathFragment::create("/work/cwd");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&cwd).unwrap();
+        fs.write_file(&ws.get_relative_str(".bazelrc"), b"build --jobs=2\n")
+            .unwrap();
+        fs.write_file(&cwd.get_relative_str("a.rc"), b"build --jobs=5\n")
+            .unwrap();
+        fs.write_file(&cwd.get_relative_str("b.rc"), b"build --jobs=9\n")
+            .unwrap();
+
+        let run_with_env = |env_val: &str| -> Vec<String> {
+            let mut startup = StartupOptions {
+                system_rc: false,
+                home_rc: false,
+                ..Default::default()
+            };
+            let cfg = discover_and_load_rc_files_with_env(
+                &mut startup,
+                Some(&ws),
+                None,
+                &cwd,
+                &fs,
+                "9.3.2",
+                Some(env_val),
+            )
+            .unwrap();
+            cfg.get_inherited_command_options("build")
+                .into_iter()
+                .map(|(o, _)| o)
+                .collect()
+        };
+
+        assert_eq!(run_with_env(""), vec!["--jobs=2"]);
+        assert_eq!(run_with_env(",,,"), vec!["--jobs=2"]);
+        assert_eq!(run_with_env("a.rc,"), vec!["--jobs=2", "--jobs=5"]);
+        assert_eq!(
+            run_with_env(",a.rc,,b.rc,"),
+            vec!["--jobs=2", "--jobs=5", "--jobs=9"]
+        );
+        assert_eq!(run_with_env("/dev/null,b.rc"), vec!["--jobs=2", "--jobs=9"]);
+    }
+
+    #[test]
+    fn test_bazelrc_env_preserves_whitespace_around_commas() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let cwd = PathFragment::create("/work/cwd");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&cwd).unwrap();
+        fs.write_file(&cwd.get_relative_str("a.rc"), b"build --jobs=3\n")
+            .unwrap();
+
+        // `blaze_util::Split(GetEnv("BAZELRC"), ',')` does not strip spaces around commas.
+        let mut startup = StartupOptions {
+            system_rc: false,
+            workspace_rc: false,
+            home_rc: false,
+            ..Default::default()
+        };
+        let err = discover_and_load_rc_files_with_env(
+            &mut startup,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            Some(" a.rc , b.rc "),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Error: Unable to read .bazelrc file '/work/cwd/ a.rc '."
+        );
+
+        let err_spaces = discover_and_load_rc_files_with_env(
+            &mut startup,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            Some("   "),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_spaces.message,
+            "Error: Unable to read .bazelrc file '/work/cwd/   '."
+        );
+
+        fs.write_file(&cwd.get_relative_str(" a.rc "), b"build --jobs=11\n")
+            .unwrap();
+        fs.write_file(&cwd.get_relative_str(" b.rc "), b"build --jobs=13\n")
+            .unwrap();
+        let cfg = discover_and_load_rc_files_with_env(
+            &mut startup,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            Some(" a.rc , b.rc "),
+        )
+        .unwrap();
+        let flags: Vec<String> = cfg
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(flags, vec!["--jobs=11", "--jobs=13"]);
+    }
+
+    #[test]
+    fn test_empty_bazelrc_cli_flag_and_directory_targets_rejected_cleanly() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let cwd = PathFragment::create("/work/cwd");
+        let subdir = cwd.get_relative_str("rc_dir");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&subdir).unwrap();
+        // Even if implicit `.bazelrc` is a directory, discovery skips it instead of reading it as a file.
+        fs.create_directory_and_parents(&ws.get_relative_str(".bazelrc"))
+            .unwrap();
+
+        let (mut implicit_only, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        discover_and_load_rc_files_with_env(
+            &mut implicit_only,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap();
+
+        // Explicit `--bazelrc=` resolves `""` via `AbsolutePathFromFlag` to `cwd`, which fails `CanReadFile`.
+        let (mut empty_flag, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "--bazelrc=".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(empty_flag.bazelrc_files, vec![""]);
+        let err = discover_and_load_rc_files_with_env(
+            &mut empty_flag,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Error: Unable to read .bazelrc file '/work/cwd'."
+        );
+
+        let (mut dir_flag, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "--bazelrc=rc_dir".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        let err_dir = discover_and_load_rc_files_with_env(
+            &mut dir_flag,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_dir.message,
+            "Error: Unable to read .bazelrc file '/work/cwd/rc_dir'."
+        );
+
+        // Unlike `BAZELRC`, CLI `--bazelrc` takes a single path per flag and does not split commas.
+        fs.write_file(&cwd.get_relative_str("has,comma.rc"), b"build --jobs=17\n")
+            .unwrap();
+        let (mut comma_flag, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--noworkspace_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "--bazelrc=has,comma.rc".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(comma_flag.bazelrc_files, vec!["has,comma.rc"]);
+        let cfg = discover_and_load_rc_files_with_env(
+            &mut comma_flag,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap();
+        let flags: Vec<String> = cfg
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(flags, vec!["--jobs=17"]);
     }
 }

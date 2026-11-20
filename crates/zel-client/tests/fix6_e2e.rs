@@ -293,6 +293,20 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
         "{err}"
     );
     assert!(!err.contains("[ERROR"), "{err}");
+
+    // `--bazelrc=` resolves `""` to `cwd` and fails `CanReadFile` with BAD_ARGV (2), while
+    // `BAZELRC` skips trailing/consecutive empty comma slots per `blaze_util::Split`.
+    fs::write(w.ws.join(".bazelrc"), "").unwrap();
+    fs::write(w.ws.join("extra.rc"), "common --isatty=0\n").unwrap();
+    let o = w.run(&["--bazelrc="], &["info", "release"], &[]);
+    let err = s(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("Error: Unable to read .bazelrc file '"),
+        "{err}"
+    );
+    let o = w.run(&[], &["info", "release"], &[("BAZELRC", ",extra.rc,,")]);
+    assert_eq!(o.status.code(), Some(0), "{}", s(&o.stderr));
 }
 
 #[test]
