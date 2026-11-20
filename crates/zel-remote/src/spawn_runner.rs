@@ -1639,14 +1639,12 @@ impl RemoteSpawnRunner {
             self.lazy.lock().unwrap().remove(&k);
             n += 1;
         }
-        // If `execroot/p` is a symlink on disk, follow its target within `execroot` up to 32 hops.
+        // If `execroot/p` is a symlink or NTFS junction on disk, follow its target within `execroot` up to 32 hops.
         let full = execroot.join(p);
-        if let Ok(md) = std::fs::symlink_metadata(&full) {
-            if md.file_type().is_symlink() {
-                if let Ok(target) = std::fs::read_link(&full) {
-                    if let Some(next_rel) = resolve_execroot_symlink(p, &target, execroot) {
-                        n += self.materialize_one(&next_rel, execroot, meta, hops + 1)?;
-                    }
+        if zel_vfs::is_junction_or_symlink(&full) {
+            if let Ok(target) = std::fs::read_link(&full) {
+                if let Some(next_rel) = resolve_execroot_symlink(p, &target, execroot) {
+                    n += self.materialize_one(&next_rel, execroot, meta, hops + 1)?;
                 }
             }
         }
@@ -1707,7 +1705,7 @@ impl RemoteSpawnRunner {
                 continue;
             };
             let ft = md.file_type();
-            if ft.is_symlink() {
+            if ft.is_symlink() || zel_vfs::is_junction_or_symlink(&full) {
                 let Ok(t_pb) = std::fs::read_link(&full) else {
                     continue;
                 };

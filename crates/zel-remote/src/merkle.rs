@@ -604,8 +604,14 @@ pub(crate) fn remove_existing_entry(p: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         if let Ok(md) = std::fs::symlink_metadata(p) {
+            use std::os::windows::fs::MetadataExt;
             let mut perms = md.permissions();
-            if perms.readonly() {
+            if perms.readonly()
+                && !zel_vfs::is_windows_reparse_or_symlink(
+                    md.file_attributes(),
+                    md.file_type().is_symlink(),
+                )
+            {
                 #[allow(clippy::permissions_set_readonly_false)]
                 perms.set_readonly(false);
                 let _ = std::fs::set_permissions(p, perms);
@@ -1002,7 +1008,7 @@ pub fn tree_from_local_dir_ext(
             let name = e.file_name().to_string_lossy().into_owned();
             let path = e.path();
             let ft = e.file_type()?;
-            if ft.is_symlink() {
+            if ft.is_symlink() || zel_vfs::is_junction_or_symlink(&path) {
                 let target_pb = std::fs::read_link(&path)?;
                 let target_str = normalize_read_link_target(&target_pb);
                 if is_absolute_symlink_target(&target_pb) {
