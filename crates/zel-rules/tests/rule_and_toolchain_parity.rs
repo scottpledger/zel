@@ -1694,3 +1694,98 @@ test_suite(
 >>>>>>> 1638190f (Align genrule, filegroup, Python builtins, testing, test_suite, and repo recorded inputs with Bazel 9.3.2)
     );
 }
+
+#[test]
+fn unsplit_repeatable_flags_preserve_commas_across_starlark_transitions() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r#"
+FlagsInfo = provider(fields = ["copts", "javacopts"])
+
+def _tr_impl(settings, attr):
+    return {
+        "//command_line_option:copt": settings["//command_line_option:copt"] + ["-Wl,-rpath,/opt", "-DFOO=a, b"],
+        "//command_line_option:javacopt": ["-XepOpt:Foo=a,b", "-XDbar='1, 2'"],
+    }
+
+tr = transition(
+    implementation = _tr_impl,
+    inputs = ["//command_line_option:copt"],
+    outputs = ["//command_line_option:copt", "//command_line_option:javacopt"],
+)
+
+def _leaf_impl(ctx):
+    return [FlagsInfo(
+        copts = list(ctx.fragments.cpp.copts),
+        javacopts = list(ctx.fragments.java.default_javac_flags),
+    )]
+
+leaf = rule(
+    implementation = _leaf_impl,
+    cfg = tr,
+    fragments = ["cpp", "java"],
+)
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        "load(':defs.bzl', 'leaf')\nleaf(name = 't')\n",
+    );
+
+    let lc = LoaderConfig::new(
+        fs as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root)),
+    );
+    let r = TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new());
+
+    let mut cli_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cli_cfg
+        .options
+        .insert("copt".into(), "-Wl,-rpath,/base".into());
+    cli_cfg.native.insert(
+        "copt".into(),
+        zel_analysis::NativeSetting {
+            raw: "-Wl,-rpath,/base".into(),
+            value: zel_analysis::build_options::ConfigValue::List(vec!["-Wl,-rpath,/base".into()]),
+        },
+    );
+
+    let ct = r
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &cli_cfg)
+        .unwrap();
+    let Value::ProviderInstance { fields, .. } = &ct.providers["//:defs.bzl%FlagsInfo"] else {
+        panic!("expected FlagsInfo");
+    };
+    let Value::List(copts) = &fields["copts"] else {
+        panic!("expected copts list");
+    };
+    assert_eq!(
+        copts.lock().unwrap().elements,
+        vec![
+            Value::String("-Wl,-rpath,/base".into()),
+            Value::String("-Wl,-rpath,/opt".into()),
+            Value::String("-DFOO=a, b".into()),
+        ]
+    );
+    let Value::List(javacopts) = &fields["javacopts"] else {
+        panic!("expected javacopts list");
+    };
+    let jc: Vec<String> = javacopts
+        .lock()
+        .unwrap()
+        .elements
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let tail = &jc[jc.len() - 2..];
+    assert_eq!(
+        tail,
+        &["-XepOpt:Foo=a,b".to_string(), "-XDbar=1, 2".to_string()]
+    );
+}

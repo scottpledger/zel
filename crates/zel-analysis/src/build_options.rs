@@ -101,6 +101,43 @@ pub fn find_option(name: &str) -> Option<(&'static str, &'static ConfigOption)> 
     None
 }
 
+/// Unit separator encoding multiple raw occurrences of a non-comma-separated list option in
+/// `BuildConfigurationKey::options` (preserving literal commas inside individual flags such as
+/// `--copt=-Wl,-rpath,/opt`).
+pub const MULTI_OPT_SEP: char = '\x1f';
+
+pub fn is_list_option(opt: &ConfigOption) -> bool {
+    opt.java_type.starts_with("List<") || opt.java_type.starts_with("ImmutableList<")
+}
+
+/// Whether Bazel's `@Option(converter = ...)` splits a single raw occurrence on `,`.
+pub fn is_comma_separated_option(opt: &ConfigOption) -> bool {
+    let conv = opt.converter;
+    conv.contains("CommaSeparated")
+        || conv.ends_with("LabelListConverter")
+        || conv.ends_with("LabelOrderedSetConverter")
+        || conv.ends_with("FissionOptionConverter")
+}
+
+/// Whether `BuildConfigurationKey::options` splits `name` on `,` (either its Bazel converter is
+/// comma-separated, or it is `--features`/`--host_features` whose feature names never contain
+/// commas).
+pub fn splits_commas_in_options_map(name: &str, opt: &ConfigOption) -> bool {
+    is_comma_separated_option(opt) || matches!(name, "features" | "host_features")
+}
+
+pub fn encode_unsplit_list(items: &[String]) -> String {
+    items.join("\x1f")
+}
+
+pub fn decode_unsplit_list(raw: &str) -> Vec<String> {
+    if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split(MULTI_OPT_SEP).map(str::to_string).collect()
+    }
+}
+
 /// Converts one raw option string like the option's Java converter, returning the `toString()` of
 /// the converted element(s).  `canon_label` canonicalizes a label string (`//a:b` -> `@@//a:b`).
 pub type LabelCanonicalizer<'a> = &'a dyn Fn(&str) -> Result<String, String>;

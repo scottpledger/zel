@@ -167,6 +167,27 @@ impl BuildConfigurationKey {
         }
     }
 
+    /// Returns true when `self.options[name]` was populated or mutated independently of
+    /// `self.native[name]` (e.g. by a configuration transition, platform flags, or direct
+    /// insertion into `options`).
+    pub fn has_options_override(&self, name: &str) -> bool {
+        let Some(raw) = self.options.get(name) else {
+            return false;
+        };
+        let Some(n) = self.native.get(name) else {
+            return true;
+        };
+        if n.raw != *raw {
+            return true;
+        }
+        raw.is_empty()
+            && match &n.value {
+                build_options::ConfigValue::List(vs) => !vs.is_empty(),
+                build_options::ConfigValue::Scalar(s) => !s.is_empty(),
+                build_options::ConfigValue::Null => false,
+            }
+    }
+
     /// Returns the string rendering of option `name` from `options`, `native`, or the default in
     /// `build_options_table`.
     pub fn option_str(&self, name: &str) -> Option<String> {
@@ -583,14 +604,13 @@ impl BuildConfigurationKey {
         if !self.platforms.is_empty() {
             o.set("platforms", ConfigValue::List(self.platforms.clone()));
         }
-        // Options written by transitions differ from what the command line set.
+        // Options written by transitions or direct map insertions differ from what the command line set.
         for (name, raw) in &self.options {
-            if self.native.get(name).map(|n| &n.raw) == Some(raw) {
+            if !self.has_options_override(name) {
                 continue;
             }
             if let Some((_, opt)) = find_option(name) {
-                let is_list = opt.java_type.starts_with("List<")
-                    || opt.java_type.starts_with("ImmutableList<");
+                let is_list = build_options::is_list_option(opt);
                 if opt.default == "null" && (raw == "null" || raw == NULL_VALUE) {
                     o.set(
                         name,
@@ -603,10 +623,14 @@ impl BuildConfigurationKey {
                     continue;
                 }
                 let raws: Vec<String> = if is_list {
-                    raw.split(',')
-                        .filter(|p| !p.is_empty())
-                        .map(str::to_string)
-                        .collect()
+                    if build_options::splits_commas_in_options_map(name, opt) {
+                        raw.split(',')
+                            .filter(|p| !p.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    } else {
+                        build_options::decode_unsplit_list(raw)
+                    }
                 } else {
                     vec![raw.clone()]
                 };
@@ -624,10 +648,12 @@ impl BuildConfigurationKey {
             let Some(name) = k.strip_prefix("//command_line_option:") else {
                 continue;
             };
+            if v != NULL_VALUE && self.has_options_override(name) {
+                continue;
+            }
             if let Some((_, opt)) = find_option(name) {
                 if v == NULL_VALUE {
-                    let is_list = opt.java_type.starts_with("List<")
-                        || opt.java_type.starts_with("ImmutableList<");
+                    let is_list = build_options::is_list_option(opt);
                     o.set(
                         name,
                         if is_list {

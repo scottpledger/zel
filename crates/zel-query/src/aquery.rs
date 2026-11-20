@@ -483,8 +483,12 @@ fn test_runner_key(
         Some(AttrValue::StrList(a)) => a,
         _ => Vec::new(),
     };
-    if let Some(t) = cfg.options.get("test_arg") {
-        args.extend(t.split(',').filter(|x| !x.is_empty()).map(String::from));
+    if let Some(zel_analysis::build_options::ConfigValue::List(test_args)) =
+        cfg.build_options().get("test_arg")
+    {
+        args.extend(test_args.iter().cloned());
+    } else if let Some(t) = cfg.options.get("test_arg") {
+        args.extend(zel_analysis::build_options::decode_unsplit_list(t));
     }
     let env_parts = |e: zel_util::action_env::ActionEnvironment| {
         (

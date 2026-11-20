@@ -104,7 +104,17 @@ fn actual_option_list(
         }
     }
     match cfg.options.get(canonical) {
-        Some(raw) if !raw.is_empty() => raw.split(',').map(str::to_string).collect(),
+        Some(raw) if !raw.is_empty() => {
+            let splits =
+                zel_analysis::build_options::find_option(canonical).is_none_or(|(_, opt)| {
+                    zel_analysis::build_options::splits_commas_in_options_map(canonical, opt)
+                });
+            if splits {
+                raw.split(',').map(str::to_string).collect()
+            } else {
+                zel_analysis::build_options::decode_unsplit_list(raw)
+            }
+        }
         _ => Vec::new(),
     }
 }

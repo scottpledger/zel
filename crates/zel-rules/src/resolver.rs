@@ -560,9 +560,33 @@ impl TargetResolver {
                     out.cpu = fv;
                     changed = true;
                 }
-            } else if !out.native.contains_key(fk) && !out.options.contains_key(fk) {
-                out.options.insert(fk.to_string(), fv);
-                changed = true;
+            } else if !cfg.native.contains_key(fk) && !cfg.options.contains_key(fk) {
+                let repeatable_list =
+                    zel_analysis::build_options::find_option(fk).and_then(|(_, opt)| {
+                        if opt.multiple && zel_analysis::build_options::is_list_option(opt) {
+                            Some(zel_analysis::build_options::splits_commas_in_options_map(
+                                fk, opt,
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+                if let Some(splits_commas) = repeatable_list {
+                    let sep = if splits_commas { "," } else { "\x1f" };
+                    match out.options.get_mut(fk) {
+                        Some(existing) => {
+                            existing.push_str(sep);
+                            existing.push_str(&fv);
+                        }
+                        None => {
+                            out.options.insert(fk.to_string(), fv);
+                        }
+                    }
+                    changed = true;
+                } else {
+                    out.options.insert(fk.to_string(), fv);
+                    changed = true;
+                }
             }
         }
         if changed {

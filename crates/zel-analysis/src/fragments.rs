@@ -163,16 +163,19 @@ impl<'a> Opts<'a> {
         }
     }
 
-    /// Repeatable flag list without comma-splitting (`--protocopt`, `--javacopt`, `--jvmopt`, etc.).
+    /// Repeatable flag list without comma-splitting (`--copt`, `--protocopt`, `--javacopt`,
+    /// `--jvmopt`, etc.).
     pub(crate) fn list_unsplit(&self, k: &str) -> Vec<String> {
+        if !self.cfg.is_exec && self.cfg.has_options_override(k) {
+            if let Some(v) = self.cfg.options.get(k) {
+                return crate::build_options::decode_unsplit_list(v);
+            }
+        }
         if let Some(crate::build_options::ConfigValue::List(vs)) = self.bo.get(k) {
             return vs.clone();
         }
         if let Some(v) = self.cfg.options.get(k) {
-            if v.is_empty() {
-                return Vec::new();
-            }
-            return v.split(',').map(str::to_string).collect();
+            return crate::build_options::decode_unsplit_list(v);
         }
         Vec::new()
     }
@@ -1574,6 +1577,100 @@ mod tests {
         assert!(
             objc_err.contains("Invalid compilation mode: 'bogus_mode'"),
             "{objc_err}"
+        );
+    }
+
+    #[test]
+    fn list_unsplit_preserves_commas_across_build_options_options_map_and_transitions() {
+        // 1. CLI BuildOptions + mirrored comma-joined cfg.options (as analysis_phase constructs).
+        let mut cli_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cli_cfg
+            .options
+            .insert("copt".into(), "-Wl,-rpath,/opt,-O2".into());
+        cli_cfg.native.insert(
+            "copt".into(),
+            crate::NativeSetting {
+                raw: "-Wl,-rpath,/opt,-O2".into(),
+                value: crate::build_options::ConfigValue::List(vec![
+                    "-Wl,-rpath,/opt".into(),
+                    "-O2".into(),
+                ]),
+            },
+        );
+        cli_cfg
+            .options
+            .insert("host_copt".into(), "-Wl,-rpath,/host".into());
+        cli_cfg.native.insert(
+            "host_copt".into(),
+            crate::NativeSetting {
+                raw: "-Wl,-rpath,/host".into(),
+                value: crate::build_options::ConfigValue::List(vec!["-Wl,-rpath,/host".into()]),
+            },
+        );
+        assert_eq!(
+            Opts::new(&cli_cfg).list_unsplit("copt"),
+            vec!["-Wl,-rpath,/opt".to_string(), "-O2".to_string()]
+        );
+
+        // Exec configuration uses host_copt + -g0 rather than target cfg.options["copt"].
+        let exec_cfg = cli_cfg.to_exec();
+        let expected_exec = if cfg!(windows) {
+            vec!["-Wl,-rpath,/host".to_string()]
+        } else {
+            vec!["-Wl,-rpath,/host".to_string(), "-g0".to_string()]
+        };
+        assert_eq!(Opts::new(&exec_cfg).list_unsplit("copt"), expected_exec);
+
+        // 2. Direct cfg.options string map without BuildOptions / cfg.native.
+        let mut map_only = BuildConfigurationKey::target("k8", "fastbuild");
+        map_only
+            .options
+            .insert("copt".into(), "-Wl,-rpath,/opt".into());
+        map_only
+            .options
+            .insert("custom_unsplit".into(), "-Wl,-rpath,/custom".into());
+        assert_eq!(
+            Opts::new(&map_only).list_unsplit("copt"),
+            vec!["-Wl,-rpath,/opt".to_string()]
+        );
+        assert_eq!(
+            Opts::new(&map_only).list_unsplit("custom_unsplit"),
+            vec!["-Wl,-rpath,/custom".to_string()]
+        );
+
+        // 3. Direct cfg.options override on top of an existing BuildOptions / cfg.native entry.
+        let mut overridden = cli_cfg.clone();
+        overridden
+            .options
+            .insert("copt".into(), "-Wl,-rpath,/override".into());
+        assert_eq!(
+            Opts::new(&overridden).list_unsplit("copt"),
+            vec!["-Wl,-rpath,/override".to_string()]
+        );
+
+        // 4. Starlark transition mutating //command_line_option:copt and javacopt with commas.
+        let mut transitioned = cli_cfg.clone();
+        crate::transition::set_setting(
+            &mut transitioned,
+            "//command_line_option:copt",
+            &mk_list(vec![sv("-Wl,-rpath,/trans"), sv("-DFOO=a, b"), sv("-O3")]),
+        )
+        .unwrap();
+        assert_eq!(
+            Opts::new(&transitioned).list_unsplit("copt"),
+            vec![
+                "-Wl,-rpath,/trans".to_string(),
+                "-DFOO=a, b".to_string(),
+                "-O3".to_string(),
+            ]
+        );
+        assert_eq!(
+            transitioned.build_options().get("copt"),
+            Some(&crate::build_options::ConfigValue::List(vec![
+                "-Wl,-rpath,/trans".to_string(),
+                "-DFOO=a, b".to_string(),
+                "-O3".to_string(),
+            ]))
         );
     }
 }

@@ -22,18 +22,17 @@ use zel_starlark::{BigInt, EvalContext, Value};
 
 const CLO: &str = "//command_line_option:";
 
-fn to_value(v: &str, list: bool) -> Value {
-    if list {
-        Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-            zel_starlark::StarlarkList::new(
-                v.split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        )))
-    } else {
-        Value::String(v.to_string())
+fn to_list_value(items: Vec<String>) -> Value {
+    Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+        zel_starlark::StarlarkList::new(items.into_iter().map(Value::String).collect()),
+    )))
+}
+
+fn env_var_raw(var: &zel_util::action_env::EnvVar) -> String {
+    match var {
+        zel_util::action_env::EnvVar::Set(n, v) => format!("{n}={v}"),
+        zel_util::action_env::EnvVar::Inherit(n) => n.clone(),
+        zel_util::action_env::EnvVar::Unset(n) => format!("={n}"),
     }
 }
 
@@ -66,20 +65,43 @@ pub fn setting_value(cfg: &BuildConfigurationKey, key: &str) -> Value {
                         .collect(),
                 ),
             ))),
-            other => match cfg.options.get(other) {
-                Some(v) => to_value(v, is_list_option(other)),
-                None => match cfg.build_options().get(other) {
-                    Some(crate::build_options::ConfigValue::List(l)) => {
-                        Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                            zel_starlark::StarlarkList::new(
-                                l.iter().map(|s| Value::String(s.clone())).collect(),
-                            ),
-                        )))
+            "action_env" | "host_action_env" | "test_env" if !cfg.has_options_override(name) => {
+                let vars = match name {
+                    "action_env" => &cfg.env.action_env,
+                    "host_action_env" => &cfg.env.host_action_env,
+                    _ => &cfg.env.test_env,
+                };
+                to_list_value(vars.iter().map(env_var_raw).collect())
+            }
+            other if is_list_option(other) => {
+                if cfg.has_options_override(other) {
+                    let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
+                    let splits_commas =
+                        crate::build_options::find_option(other).is_some_and(|(_, opt)| {
+                            crate::build_options::splits_commas_in_options_map(other, opt)
+                        });
+                    let items = if splits_commas {
+                        raw.split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    } else {
+                        crate::build_options::decode_unsplit_list(raw)
+                    };
+                    to_list_value(items)
+                } else {
+                    match cfg.build_options().get(other) {
+                        Some(crate::build_options::ConfigValue::List(l)) => {
+                            to_list_value(l.clone())
+                        }
+                        _ => to_list_value(Vec::new()),
                     }
+                }
+            }
+            other => match cfg.options.get(other) {
+                Some(v) => Value::String(v.clone()),
+                None => match cfg.build_options().get(other) {
                     Some(crate::build_options::ConfigValue::Scalar(s)) => Value::String(s.clone()),
-                    _ if is_list_option(other) => Value::List(std::sync::Arc::new(
-                        std::sync::Mutex::new(zel_starlark::StarlarkList::new(vec![])),
-                    )),
                     _ => Value::String(String::new()),
                 },
             },
@@ -151,29 +173,30 @@ fn sync_env_config(cfg: &mut BuildConfigurationKey, name: &str, value: &Value) {
 
 /// Native options holding lists (`List.toString` rendering in the `ST-<hash>` input).
 fn is_list_option(name: &str) -> bool {
-    matches!(
-        name,
-        "platforms"
-            | "define"
-            | "copt"
-            | "cxxopt"
-            | "conlyopt"
-            | "linkopt"
-            | "ltoopt"
-            | "features"
-            | "host_features"
-            | "host_copt"
-            | "host_cxxopt"
-            | "host_conlyopt"
-            | "host_linkopt"
-            | "extra_toolchains"
-            | "extra_execution_platforms"
-            | "action_env"
-            | "host_action_env"
-            | "test_env"
-            | "test_arg"
-            | "javacopt"
-    )
+    if let Some((_, opt)) = crate::build_options::find_option(name) {
+        return crate::build_options::is_list_option(opt);
+    }
+    matches!(name, "ltoopt")
+}
+
+fn stringify_list_items(v: &Value) -> Result<Vec<String>, String> {
+    match v {
+        Value::None => Ok(Vec::new()),
+        Value::Set(s) => s.lock().unwrap().elements.iter().map(stringify).collect(),
+        Value::List(_) | Value::Tuple(_) => zel_starlark::eval::builtins::value_to_sequence(v)
+            .map_err(|e| e.0)?
+            .iter()
+            .map(stringify)
+            .collect(),
+        other => {
+            let item = stringify(other)?;
+            Ok(if item.is_empty() {
+                Vec::new()
+            } else {
+                vec![item]
+            })
+        }
+    }
 }
 
 /// Java `toString` rendering of a build-setting value, as hashed by
@@ -245,7 +268,17 @@ pub fn set_setting(
                 }
             }
             other => {
-                cfg.options.insert(other.to_string(), s.clone());
+                let stored = match crate::build_options::find_option(other) {
+                    Some((_, opt))
+                        if crate::build_options::is_list_option(opt)
+                            && !crate::build_options::splits_commas_in_options_map(other, opt) =>
+                    {
+                        let items = stringify_list_items(value)?;
+                        crate::build_options::encode_unsplit_list(&items)
+                    }
+                    _ => s.clone(),
+                };
+                cfg.options.insert(other.to_string(), stored);
                 sync_env_config(cfg, other, value);
             }
         }
