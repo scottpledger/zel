@@ -764,6 +764,34 @@ fn resolve_helper_path(raw: &str, workspace: Option<&Path>) -> PathBuf {
     PathBuf::from(raw)
 }
 
+fn is_etxtbsy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        // ETXTBSY == 26 on Linux, macOS, and BSDs: raised transiently when a concurrent
+        // thread forks while a newly-written executable's writable fd is closing.
+        err.raw_os_error() == Some(26)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Ok(val) => return Ok(val),
+            Err(e) if is_etxtbsy(&e) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis((attempt as u64 * 2).min(20)));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn invoke_helper_process(
     path: &Path,
     uri: &str,
@@ -774,13 +802,16 @@ fn invoke_helper_process(
     let exec_path = PathBuf::from(path.to_string_lossy().replace('/', "\\"));
     #[cfg(not(windows))]
     let exec_path = path;
-    let mut cmd = Command::new(exec_path);
-    cmd.arg("get")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env_remove("RUN_UNDER_RUNFILES");
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = retry_etxtbsy(|| {
+        Command::new(exec_path)
+            .arg("get")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env_remove("RUN_UNDER_RUNFILES")
+            .spawn()
+    })
+    .map_err(|e| {
         CredentialError::Helper(format!(
             "Failed to get credentials for '{uri}' from helper '{display}': {e}"
         ))
@@ -2324,5 +2355,71 @@ mod tests {
         );
         assert!(parse_rfc3339("2026-01-10T12:00:0éZ").is_err());
         assert!(parse_rfc3339("2026-01-10T12:00:00+日0").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_retries_transient_etxtbsy_and_surfaces_persistent_busy() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut transient = 0u32;
+        assert_eq!(
+            retry_etxtbsy(|| {
+                transient += 1;
+                if transient < 3 {
+                    Err(std::io::Error::from_raw_os_error(26))
+                } else {
+                    Ok("ready")
+                }
+            })
+            .unwrap(),
+            "ready"
+        );
+        assert_eq!(transient, 3);
+
+        let mut persistent = 0u32;
+        let err = retry_etxtbsy::<()>(|| {
+            persistent += 1;
+            Err(std::io::Error::from_raw_os_error(26))
+        })
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(26));
+        assert_eq!(persistent, 21);
+
+        let dir = std::env::temp_dir().join(format!("zel-remote-etxtbsy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper_bin = dir.join("busy_helper.sh");
+        std::fs::write(
+            &helper_bin,
+            "#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer BUSY_OK\"]}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let write_fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&helper_bin)
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            drop(write_fd);
+        });
+
+        let provider = CredentialHelperProvider::from_specs(
+            &[format!("example.com={}", helper_bin.display())],
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
+        let hdrs = provider
+            .get_credentials("https://example.com:443/cas")
+            .unwrap();
+        releaser.join().unwrap();
+        assert_eq!(
+            hdrs,
+            vec![("authorization".to_string(), "Bearer BUSY_OK".to_string())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

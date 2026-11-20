@@ -2706,7 +2706,7 @@ pub fn run_process(
             });
         }
     }
-    let mut child = match cmd.spawn() {
+    let mut child = match crate::netrc::retry_etxtbsy(|| cmd.spawn()) {
         Ok(c) => c,
         Err(e) => {
             return Ok((

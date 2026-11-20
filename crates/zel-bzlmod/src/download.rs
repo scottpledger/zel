@@ -1410,7 +1410,7 @@ impl Downloader {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
         }
         cmd.arg(url);
-        let out = cmd.output().map_err(|e| {
+        let out = crate::netrc::retry_etxtbsy(|| cmd.output()).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 fe(
                     format!(

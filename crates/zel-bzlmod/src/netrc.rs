@@ -291,6 +291,36 @@ fn find_matching_credential_helper<'a>(
     default_helper
 }
 
+fn is_etxtbsy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        // ETXTBSY == 26 on Linux, macOS, and BSDs: raised transiently when a concurrent
+        // thread forks while a newly-written executable's writable fd is closing.
+        err.raw_os_error() == Some(26)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+pub(crate) fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u32;
+    loop {
+        match op() {
+            Ok(val) => return Ok(val),
+            Err(e) if is_etxtbsy(&e) && attempt < 20 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(
+                    (attempt as u64 * 2).min(20),
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn run_credential_helper(
     helper: &Path,
     url: &str,
@@ -302,16 +332,19 @@ fn run_credential_helper(
     let exec_helper = PathBuf::from(helper.to_string_lossy().replace('/', "\\"));
     #[cfg(not(windows))]
     let exec_helper = helper;
-    let mut cmd = Command::new(exec_helper);
-    cmd.arg("get")
-        .env_remove("RUN_UNDER_RUNFILES")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if !client_env.is_empty() {
-        cmd.envs(client_env);
-    }
-    let mut child = cmd.spawn().map_err(|e| {
+    let mut child = retry_etxtbsy(|| {
+        let mut cmd = Command::new(exec_helper);
+        cmd.arg("get")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !client_env.is_empty() {
+            cmd.envs(client_env);
+        }
+        cmd.env_remove("RUN_UNDER_RUNFILES");
+        cmd.spawn()
+    })
+    .map_err(|e| {
         format!(
             "Failed to invoke credential helper {}: {e}",
             helper.display()
@@ -784,5 +817,80 @@ default login defuser password defpass
                 .as_deref(),
             Some("utf8user")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retry_etxtbsy_retries_transient_busy_surfaces_persistent_and_skips_other_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // 1. Transient ETXTBSY (errno 26) succeeds once the busy fd closes.
+        let mut calls = 0u32;
+        let val = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 4 {
+                Err(std::io::Error::from_raw_os_error(26))
+            } else {
+                Ok(42)
+            }
+        })
+        .unwrap();
+        assert_eq!(val, 42);
+        assert_eq!(calls, 4);
+
+        // 2. Non-ETXTBSY errors (e.g. ENOENT) fail immediately without retrying.
+        let mut enoent_calls = 0u32;
+        let err = retry_etxtbsy::<()>(|| {
+            enoent_calls += 1;
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "missing"))
+        })
+        .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(enoent_calls, 1);
+
+        // 3. Persistent ETXTBSY surfaces the underlying os error 26 after bounded retries.
+        let mut persistent_calls = 0u32;
+        let err = retry_etxtbsy::<()>(|| {
+            persistent_calls += 1;
+            Err(std::io::Error::from_raw_os_error(26))
+        })
+        .unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(26));
+        assert_eq!(persistent_calls, 21);
+
+        // 4. Real open-write-fd race on an executable credential helper script.
+        let dir = std::env::temp_dir().join(format!("zel-netrc-etxtbsy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("helper_busy.sh");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer RETRIED\"]}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let write_fd = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&helper)
+            .unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(write_fd);
+        });
+
+        let hdrs = resolve_credential_helper_headers(
+            "https://example.com/archive.tar.gz",
+            &[("example.com".to_string(), helper)],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        releaser.join().unwrap();
+        assert_eq!(
+            hdrs,
+            vec![("Authorization".to_string(), "Bearer RETRIED".to_string())]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
