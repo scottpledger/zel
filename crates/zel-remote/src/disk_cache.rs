@@ -411,7 +411,7 @@ pub fn write_atomic_output(dest: &Path, data: &[u8], executable: bool) -> io::Re
         f.write_all(data)?;
         drop(f);
         set_executable(&tmp, executable);
-        let _ = std::fs::remove_file(dest);
+        let _ = crate::merkle::remove_existing_entry(dest);
         std::fs::rename(&tmp, dest)
     })();
     if res.is_err() {

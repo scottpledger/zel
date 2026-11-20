@@ -1452,7 +1452,7 @@ impl RemoteSpawnRunner {
             write_atomic_output(&execroot.join(rel), bytes, *executable)?;
         }
         for rel in &staged.unmaterialized_files {
-            let _ = std::fs::remove_file(execroot.join(rel));
+            let _ = crate::merkle::remove_existing_entry(&execroot.join(rel));
         }
         for t in &staged.trees {
             let base = execroot.join(&t.rel_dir);
@@ -1618,7 +1618,7 @@ impl RemoteSpawnRunner {
                     continue;
                 };
                 let t_str = t_pb.to_string_lossy().into_owned();
-                if t_pb.is_absolute() {
+                if crate::merkle::is_absolute_symlink_target(&t_pb) {
                     match std::fs::metadata(&full) {
                         Ok(t_md) if t_md.is_dir() => {
                             match tree_from_local_dir_ext(&full, f, allow_abs, &mut blobs) {
@@ -2366,7 +2366,7 @@ fn write_atomic_output(dest: &Path, data: &[u8], executable: bool) -> io::Result
     let tmp = parent.join(format!(".zel-dl-{fname}-{}-{n}.tmp", std::process::id()));
     std::fs::write(&tmp, data)?;
     set_executable(&tmp, executable);
-    let _ = std::fs::remove_file(dest);
+    let _ = crate::merkle::remove_existing_entry(dest);
     if let Err(e) = std::fs::rename(&tmp, dest) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
@@ -2378,12 +2378,28 @@ fn make_symlink(link: &Path, target: &str) -> io::Result<()> {
     if let Some(p) = link.parent() {
         std::fs::create_dir_all(p)?;
     }
-    let _ = std::fs::remove_file(link);
+    let _ = crate::merkle::remove_existing_entry(link);
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let resolved = {
+            let tp = Path::new(target);
+            if tp.is_absolute() {
+                tp.to_path_buf()
+            } else {
+                link.parent().unwrap_or_else(|| Path::new(".")).join(tp)
+            }
+        };
+        if resolved.is_dir() {
+            std::os::windows::fs::symlink_dir(target, link)
+        } else {
+            std::os::windows::fs::symlink_file(target, link)
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = target;
         Err(io::Error::new(
@@ -2448,7 +2464,7 @@ mod expand_dir_cycle_tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("a.txt"), b"a").unwrap();
 
-        // Relative symlink cycle (`sub/rel_up -> ..`) must fail without recursing infinitely.
+        // 1. Relative symlink cycle (`sub/rel_up -> ..`) must fail without recursing infinitely.
         let rel_loop = root.join("sub/rel_up");
         make_dir_symlink(Path::new(".."), &rel_loop).unwrap();
         let mut ancestors = crate::merkle::AncestorDirs::for_root(&root).unwrap();
@@ -2463,15 +2479,35 @@ mod expand_dir_cycle_tests {
         )
         .expect_err("relative directory symlink cycle must return Err");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        std::fs::remove_file(&rel_loop).unwrap();
+        crate::merkle::remove_existing_entry(&rel_loop).unwrap();
 
-        // Sibling symlinks to the same external directory (DAG diamond) must succeed.
+        // 2. Absolute symlink cycle (`sub/abs_up -> abs_root`) must fail without recursing infinitely.
+        let abs_root = std::fs::canonicalize(&root).unwrap();
+        let abs_loop = root.join("sub/abs_up");
+        make_dir_symlink(&abs_root, &abs_loop).unwrap();
+        let mut ancestors = crate::merkle::AncestorDirs::for_root(&root).unwrap();
+        let mut out = Vec::new();
+        let err = expand_dir(
+            &root,
+            "tree_in",
+            &mut out,
+            &HashMap::new(),
+            None,
+            &mut ancestors,
+        )
+        .expect_err("absolute directory symlink cycle must return Err");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        crate::merkle::remove_existing_entry(&abs_loop).unwrap();
+
+        // 3. Sibling symlinks to the same external directory (DAG diamond) must succeed.
         let shared = base.join("shared");
         std::fs::create_dir_all(&shared).unwrap();
         std::fs::write(shared.join("v.txt"), b"val").unwrap();
         let abs_shared = std::fs::canonicalize(&shared).unwrap();
-        make_dir_symlink(&abs_shared, &root.join("s1")).unwrap();
-        make_dir_symlink(&abs_shared, &root.join("s2")).unwrap();
+        let s1 = root.join("s1");
+        let s2 = root.join("s2");
+        make_dir_symlink(&abs_shared, &s1).unwrap();
+        make_dir_symlink(&abs_shared, &s2).unwrap();
 
         let mut ancestors = crate::merkle::AncestorDirs::for_root(&root).unwrap();
         let mut out = Vec::new();
@@ -2487,6 +2523,8 @@ mod expand_dir_cycle_tests {
         assert!(out.iter().any(|i| i.path == "tree_in/s1/v.txt"));
         assert!(out.iter().any(|i| i.path == "tree_in/s2/v.txt"));
 
+        crate::merkle::remove_existing_entry(&s1).unwrap();
+        crate::merkle::remove_existing_entry(&s2).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -387,6 +387,56 @@ pub fn tree_from_local_dir(
     tree_from_local_dir_ext(dir, digest_fn, false, blobs)
 }
 
+/// Removes an existing file, file symlink, or directory symlink/junction at `p`
+/// without recursing into target directories. On Windows, directory symlinks
+/// and NTFS junctions require `remove_dir` rather than `remove_file`.
+pub(crate) fn remove_existing_entry(p: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        if let Ok(md) = std::fs::symlink_metadata(p) {
+            let mut perms = md.permissions();
+            if perms.readonly() {
+                #[allow(clippy::permissions_set_readonly_false)]
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(p, perms);
+            }
+        }
+        std::fs::remove_dir(p).or_else(|_| std::fs::remove_file(p))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(p)
+    }
+}
+
+pub(crate) fn is_absolute_symlink_target(target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        target.is_absolute() || target.to_string_lossy().starts_with(r"\??\")
+    }
+    #[cfg(not(windows))]
+    {
+        target.is_absolute()
+    }
+}
+
+#[cfg(any(not(unix), test))]
+fn normalize_windows_canonical_path(raw: &str) -> String {
+    let mut s = raw.replace('/', r"\");
+    if let Some(unc) = s
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| s.strip_prefix(r"\\?\unc\"))
+    {
+        s = format!(r"\\{unc}");
+    } else if let Some(rest) = s.strip_prefix(r"\\?\").or_else(|| s.strip_prefix(r"\??\")) {
+        s = rest.to_string();
+    }
+    while s.len() > 3 && s.ends_with('\\') && !s.ends_with(r":\") {
+        s.pop();
+    }
+    s.to_lowercase()
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct DirIdentity {
@@ -396,7 +446,7 @@ pub(crate) struct DirIdentity {
 
 #[cfg(not(unix))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct DirIdentity(PathBuf);
+pub(crate) struct DirIdentity(String);
 
 pub(crate) fn dir_identity(path: &Path) -> io::Result<DirIdentity> {
     #[cfg(unix)]
@@ -410,7 +460,10 @@ pub(crate) fn dir_identity(path: &Path) -> io::Result<DirIdentity> {
     }
     #[cfg(not(unix))]
     {
-        Ok(DirIdentity(std::fs::canonicalize(path)?))
+        let canon = std::fs::canonicalize(path)?;
+        Ok(DirIdentity(normalize_windows_canonical_path(
+            &canon.to_string_lossy(),
+        )))
     }
 }
 
@@ -484,7 +537,7 @@ pub fn tree_from_local_dir_ext(
             if ft.is_symlink() {
                 let target_pb = std::fs::read_link(&path)?;
                 let target_str = target_pb.to_string_lossy().into_owned();
-                if target_pb.is_absolute() {
+                if is_absolute_symlink_target(&target_pb) {
                     match std::fs::metadata(&path) {
                         Ok(target_md) if target_md.is_dir() => {
                             let guard_id = ancestors.enter(&path)?;
@@ -735,7 +788,7 @@ mod tests {
         let err = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, true, &mut blobs)
             .expect_err("symlink pointing to tree root must fail without stack overflow");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        std::fs::remove_file(&self_link).unwrap();
+        remove_existing_entry(&self_link).unwrap();
 
         // 2. Absolute symlink pointing to an ancestor above the output tree root.
         let anc_link = out_root.join("nested").join("ancestor_loop");
@@ -744,7 +797,7 @@ mod tests {
         let err = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, true, &mut blobs)
             .expect_err("symlink pointing to ancestor directory must fail without stack overflow");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
-        std::fs::remove_file(&anc_link).unwrap();
+        remove_existing_entry(&anc_link).unwrap();
 
         // 3. Mutual cycle between two external directories (`ext_a -> ext_b -> ext_a`).
         let ext_a = base.join("ext_a");
@@ -753,14 +806,21 @@ mod tests {
         std::fs::create_dir_all(&ext_b).unwrap();
         let abs_ext_a = std::fs::canonicalize(&ext_a).unwrap();
         let abs_ext_b = std::fs::canonicalize(&ext_b).unwrap();
-        make_dir_symlink(&abs_ext_b, &ext_a.join("to_b")).unwrap();
-        make_dir_symlink(&abs_ext_a, &ext_b.join("to_a")).unwrap();
-        make_dir_symlink(&abs_ext_a, &out_root.join("ext_entry")).unwrap();
+        let ext_a_to_b = ext_a.join("to_b");
+        let ext_b_to_a = ext_b.join("to_a");
+        let ext_entry = out_root.join("ext_entry");
+        make_dir_symlink(&abs_ext_b, &ext_a_to_b).unwrap();
+        make_dir_symlink(&abs_ext_a, &ext_b_to_a).unwrap();
+        make_dir_symlink(&abs_ext_a, &ext_entry).unwrap();
         let mut blobs = BTreeMap::new();
         let err = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, true, &mut blobs)
             .expect_err("mutual external directory symlink cycle must fail");
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
 
+        // Unlink cyclic directory symlinks explicitly before recursive temp cleanup.
+        remove_existing_entry(&ext_entry).unwrap();
+        remove_existing_entry(&ext_a_to_b).unwrap();
+        remove_existing_entry(&ext_b_to_a).unwrap();
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -776,8 +836,10 @@ mod tests {
         std::fs::create_dir_all(&out_root).unwrap();
 
         let abs_shared = std::fs::canonicalize(&shared).unwrap();
-        make_dir_symlink(&abs_shared, &out_root.join("first")).unwrap();
-        make_dir_symlink(&abs_shared, &out_root.join("second")).unwrap();
+        let first_link = out_root.join("first");
+        let second_link = out_root.join("second");
+        make_dir_symlink(&abs_shared, &first_link).unwrap();
+        make_dir_symlink(&abs_shared, &second_link).unwrap();
 
         let mut blobs = BTreeMap::new();
         let tree = tree_from_local_dir_ext(&out_root, DigestFn::Sha256, false, &mut blobs)
@@ -798,6 +860,25 @@ mod tests {
             .iter()
             .any(|e| matches!(e, TreeEntry::File { path, .. } if path == "second/inner/deep.txt")));
 
+        remove_existing_entry(&first_link).unwrap();
+        remove_existing_entry(&second_link).unwrap();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn windows_canonical_path_normalization_unifies_verbatim_nt_and_casing() {
+        assert_eq!(
+            normalize_windows_canonical_path(r"\\?\C:\Users\Runner\Out\"),
+            normalize_windows_canonical_path(r"c:/users/runner/out")
+        );
+        assert_eq!(
+            normalize_windows_canonical_path(r"\??\C:\Users\Runner\Out"),
+            r"c:\users\runner\out"
+        );
+        assert_eq!(normalize_windows_canonical_path(r"\\?\C:\"), r"c:\");
+        assert_eq!(
+            normalize_windows_canonical_path(r"\\?\UNC\Server\Share\Dir\"),
+            r"\\server\share\dir"
+        );
     }
 }
