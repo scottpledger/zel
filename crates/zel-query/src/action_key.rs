@@ -444,13 +444,22 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
             fp.add_string(&translator.key);
         }
         ActionKind::MapDirectory {
+            input_directories,
+            output_directories,
             expanded_mnemonic,
             expander,
-            ..
         } => {
             fp.add_string(&a.mnemonic)
                 .add_string(expanded_mnemonic)
-                .add_string(&expander.0.key_fingerprint());
+                .add_string(&expander.0.key_fingerprint())
+                .add_int(input_directories.len() as i32);
+            for (k, dir) in input_directories {
+                fp.add_string(k).add_string(dir.exec_path.path_string());
+            }
+            fp.add_int(output_directories.len() as i32);
+            for (k, dir) in output_directories {
+                fp.add_string(k).add_string(dir.exec_path.path_string());
+            }
         }
     }
     // `SymlinkAction`, `SolibSymlinkAction` and `RunfilesTreeAction` are platform agnostic: they

@@ -1556,3 +1556,494 @@ inspector_test(name = "inspect_wrapped", target_under_test = ":wrapped")
         );
     }
 }
+
+#[test]
+fn unused_inputs_list_prunes_dependencies_and_validates_end_to_end() {
+    let w = Ws::new("unused-inputs-list-e2e");
+    w.write("MODULE.bazel", "module(name = \"w\")\n");
+
+    // Cross-platform helper binary compiled via `rustc` so this test runs on Linux, macOS, and
+    // Windows without `/bin/sh`.
+    let exe_suffix = std::env::consts::EXE_SUFFIX;
+    let cat_unused_name = format!("cat_unused{exe_suffix}");
+    let run_log = w.root.join("cat_unused_runs.log");
+    let cat_unused_src = w.root.join("cat_unused.rs");
+    std::fs::write(
+        &cat_unused_src,
+        r#"
+use std::io::Write;
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let run_log = &args[1];
+    let out_path = &args[2];
+    let unused_path = &args[3];
+    let inputs = &args[4..];
+
+    let mut log_f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_log)
+        .unwrap();
+    writeln!(log_f, "run").unwrap();
+
+    let mut used_parts = Vec::new();
+    let mut unused_lines = String::new();
+    let mut skip_unused_file = false;
+
+    for inp in inputs {
+        let content = std::fs::read_to_string(inp).unwrap();
+        let trimmed = content.trim();
+        if trimmed == "skipUnusedFile" {
+            skip_unused_file = true;
+        } else if trimmed == "invalidUnused" {
+            unused_lines.push_str(inp);
+            unused_lines.push_str("_invalid\n");
+        } else if trimmed == "unused" {
+            unused_lines.push_str(inp);
+            unused_lines.push('\n');
+        } else {
+            used_parts.push(trimmed.to_string());
+        }
+    }
+
+    std::fs::write(out_path, used_parts.join(" ")).unwrap();
+    if !skip_unused_file {
+        std::fs::write(unused_path, unused_lines).unwrap();
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::create_dir_all(w.ws.join("pkg")).unwrap();
+    let status = std::process::Command::new("rustc")
+        .arg(&cat_unused_src)
+        .arg("-o")
+        .arg(w.ws.join("pkg").join(&cat_unused_name))
+        .status()
+        .expect("rustc must be available");
+    assert!(status.success(), "compiling cat_unused helper failed");
+
+    let run_log_starlark = run_log.to_string_lossy().replace('\\', "/");
+    w.write(
+        "pkg/pruning.bzl",
+        &format!(
+            r#"
+def _build_impl(ctx):
+    inputs = ctx.files.inputs
+    output = ctx.actions.declare_file(ctx.label.name + ".out")
+    unused_file = ctx.actions.declare_file(ctx.label.name + ".unused")
+    args = ctx.actions.args()
+    args.add("{run_log_starlark}")
+    args.add(output)
+    args.add(unused_file)
+    args.add_all(inputs)
+    ctx.actions.run(
+        inputs = inputs,
+        outputs = [output, unused_file],
+        arguments = [args],
+        executable = ctx.executable.filler,
+        unused_inputs_list = unused_file,
+        execution_requirements = {{"no-sandbox": "1", "local": "1"}},
+    )
+    return DefaultInfo(files = depset([output]))
+
+build_rule = rule(
+    attrs = {{
+        "inputs": attr.label_list(allow_files = True),
+        "filler": attr.label(cfg = "exec", executable = True, allow_files = True),
+    }},
+    implementation = _build_impl,
+)
+"#
+        ),
+    );
+    w.write(
+        "pkg/BUILD",
+        &format!(
+            r#"
+load(":pruning.bzl", "build_rule")
+exports_files(["{cat_unused_name}"])
+build_rule(
+    name = "output",
+    inputs = ["a.input", "b.input", "c.input"],
+    filler = ":{cat_unused_name}",
+)
+"#
+        ),
+    );
+    w.write("pkg/a.input", "contentA\n");
+    w.write("pkg/b.input", "contentB\n");
+    w.write("pkg/c.input", "contentC\n");
+
+    let run_count = || -> usize {
+        std::fs::read_to_string(&run_log)
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+
+    // 1. Initial build: all three inputs used.
+    let (code, _, err, _) = w.run(&["build", "//pkg:output"]);
+    assert_eq!(code, 0, "initial build failed: {err}");
+    let out_file = w.bin_dir().join("pkg").join("output.out");
+    let unused_file = w.bin_dir().join("pkg").join("output.unused");
+    assert_eq!(
+        std::fs::read_to_string(&out_file).unwrap(),
+        "contentA contentB contentC"
+    );
+    assert_eq!(std::fs::read_to_string(&unused_file).unwrap(), "");
+    assert_eq!(run_count(), 1);
+
+    // 2. Mark `b.input` as unused: action re-runs and records `pkg/b.input` in `output.unused`.
+    w.write("pkg/b.input", "unused\n");
+    let (code, _, err, _) = w.run(&["build", "//pkg:output"]);
+    assert_eq!(code, 0, "prune build failed: {err}");
+    assert_eq!(
+        std::fs::read_to_string(&out_file).unwrap(),
+        "contentA contentC"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&unused_file).unwrap(),
+        "pkg/b.input\n"
+    );
+    assert_eq!(run_count(), 2);
+
+    // 3. Modify pruned `b.input`: action cache must HIT without re-running the spawn!
+    w.write("pkg/b.input", "newContentB\n");
+    let (code, _, err, _) = w.run(&["build", "//pkg:output"]);
+    assert_eq!(
+        code, 0,
+        "cached build after editing unused input failed: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&out_file).unwrap(),
+        "contentA contentC"
+    );
+    assert_eq!(
+        run_count(),
+        2,
+        "editing an input listed in unused_inputs_list must hit the action cache"
+    );
+
+    // 4. `aquery` `--include_pruned_inputs` (default) vs `--noinclude_pruned_inputs`.
+    let (aq_code, aq_with, aq_err, _) = w.run(&["aquery", "//pkg:output"]);
+    assert_eq!(aq_code, 0, "aquery default failed: {aq_err}");
+    let inputs_line_with = aq_with
+        .lines()
+        .find(|l| l.trim_start().starts_with("Inputs:"))
+        .expect("Inputs: line in default aquery");
+    assert!(
+        inputs_line_with.contains("pkg/b.input"),
+        "default aquery Inputs: should include pruned input: {inputs_line_with}"
+    );
+    assert!(
+        aq_with.contains("internal-inline-outputs: "),
+        "ExecutionInfo should carry internal-inline-outputs for unused_inputs_list: {aq_with}"
+    );
+    let (aq_code2, aq_without, aq_err2, _) =
+        w.run(&["aquery", "--noinclude_pruned_inputs", "//pkg:output"]);
+    assert_eq!(
+        aq_code2, 0,
+        "aquery --noinclude_pruned_inputs failed: {aq_err2}"
+    );
+    let inputs_line_without = aq_without
+        .lines()
+        .find(|l| l.trim_start().starts_with("Inputs:"))
+        .expect("Inputs: line in --noinclude_pruned_inputs aquery");
+    assert!(
+        inputs_line_without.contains("pkg/a.input") && inputs_line_without.contains("pkg/c.input"),
+        "aquery --noinclude_pruned_inputs Inputs: should keep used inputs: {inputs_line_without}"
+    );
+    assert!(
+        !inputs_line_without.contains("pkg/b.input"),
+        "aquery --noinclude_pruned_inputs Inputs: should omit pruned input: {inputs_line_without}"
+    );
+    let (aq_code3, aq_filter, aq_err3, _) = w.run(&[
+        "aquery",
+        "--noinclude_pruned_inputs",
+        "inputs('.*b.input', //pkg:output)",
+    ]);
+    assert_eq!(
+        aq_code3, 0,
+        "aquery inputs() with --noinclude_pruned_inputs failed: {aq_err3}"
+    );
+    assert!(
+        !aq_filter.contains("pkg/output.out"),
+        "aquery inputs('.*b.input', ...) with --noinclude_pruned_inputs must not match pruned action: {aq_filter}"
+    );
+
+    // 5. Modify used `c.input`: action cache misses and re-runs with ALL original inputs
+    // (`StarlarkAction.discoverInputs`), picking up `newContentB` from `b.input`.
+    w.write("pkg/c.input", "unused\n");
+    let (code, _, err, _) = w.run(&["build", "//pkg:output"]);
+    assert_eq!(code, 0, "rebuild after used input change failed: {err}");
+    assert_eq!(
+        std::fs::read_to_string(&out_file).unwrap(),
+        "contentA newContentB"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&unused_file).unwrap(),
+        "pkg/c.input\n"
+    );
+    assert_eq!(run_count(), 3);
+
+    // 6. Unknown paths in `unused_inputs_list` are ignored without failing (`test_invalid_unused`).
+    w.write("pkg/a.input", "invalidUnused\n");
+    let (code, _, err, _) = w.run(&["build", "//pkg:output"]);
+    assert_eq!(code, 0, "invalid unused entry should be ignored: {err}");
+    assert_eq!(run_count(), 4);
+
+    // 7. Missing `unused_inputs_list` file after exit 0 fails with Bazel's diagnostic
+    // (`StarlarkAction.EnhancedStarlarkAction.afterExecute`).
+    w.write("pkg/a.input", "skipUnusedFile\n");
+    let (fail_code, _, fail_err, _) = w.run(&["build", "//pkg:output"]);
+    assert_ne!(
+        fail_code, 0,
+        "missing unused_inputs_list output file must fail the action"
+    );
+    assert!(
+        fail_err.contains("Action did not create expected output file listing unused inputs:"),
+        "expected Bazel unused_inputs_list diagnostic, got: {fail_err}"
+    );
+}
+
+#[test]
+fn map_directory_cache_invalidates_on_expander_body_and_dict_key_changes() {
+    let w = Ws::new("map-dir-cache-key-e2e");
+    w.write("MODULE.bazel", "module(name = \"w\")\n");
+
+    let exe_suffix = std::env::consts::EXE_SUFFIX;
+    let make_trees_name = format!("make_trees{exe_suffix}");
+    let copy_tag_name = format!("copy_tag{exe_suffix}");
+
+    let make_trees_src = w.root.join("make_trees.rs");
+    std::fs::write(
+        &make_trees_src,
+        r#"
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let dir_a = std::path::Path::new(&args[1]);
+    let dir_b = std::path::Path::new(&args[2]);
+    std::fs::create_dir_all(dir_a).unwrap();
+    std::fs::create_dir_all(dir_b).unwrap();
+    std::fs::write(dir_a.join("item.txt"), "FROM_A").unwrap();
+    std::fs::write(dir_b.join("item.txt"), "FROM_B").unwrap();
+}
+"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new("rustc")
+        .arg(&make_trees_src)
+        .arg("-o")
+        .arg(w.ws.join(&make_trees_name))
+        .status()
+        .expect("rustc must be available");
+    assert!(status.success(), "compiling make_trees helper failed");
+
+    let copy_tag_src = w.root.join("copy_tag.rs");
+    std::fs::write(
+        &copy_tag_src,
+        r#"
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let in_file = &args[1];
+    let out_file = &args[2];
+    let tag = &args[3];
+    let body = std::fs::read_to_string(in_file).unwrap();
+    std::fs::write(out_file, format!("{tag}:{body}")).unwrap();
+}
+"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new("rustc")
+        .arg(&copy_tag_src)
+        .arg("-o")
+        .arg(w.ws.join(&copy_tag_name))
+        .status()
+        .expect("rustc must be available");
+    assert!(status.success(), "compiling copy_tag helper failed");
+
+    let write_defs = |helper_prefix: &str,
+                      inline_tag: &str,
+                      in_dict_expr: &str,
+                      out_dict_expr: &str| {
+        format!(
+            r#"HELPER_PREFIX = "{helper_prefix}"
+
+def _expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    src = input_directories["chosen"]
+    dst = output_directories["primary"]
+    other = output_directories["secondary"]
+    tool = tools["copier"]
+    for child in src.children:
+        out = template_ctx.declare_file(child.tree_relative_path, directory = dst)
+        args = template_ctx.args()
+        args.add(child)
+        args.add(out)
+        args.add(HELPER_PREFIX + ":{inline_tag}")
+        template_ctx.run(
+            outputs = [out],
+            inputs = [child],
+            executable = tool.executable,
+            tools = [tool],
+            arguments = [args],
+        )
+    marker = template_ctx.declare_file("unused.txt", directory = other)
+    m_args = template_ctx.args()
+    m_args.add(src.children[0])
+    m_args.add(marker)
+    m_args.add("SECONDARY")
+    template_ctx.run(
+        outputs = [marker],
+        inputs = [src.children[0]],
+        executable = tool.executable,
+        tools = [tool],
+        arguments = [m_args],
+    )
+
+def _rule_impl(ctx):
+    dir_a = ctx.actions.declare_directory(ctx.label.name + "_in_a")
+    dir_b = ctx.actions.declare_directory(ctx.label.name + "_in_b")
+    mk_args = ctx.actions.args()
+    mk_args.add(dir_a.path)
+    mk_args.add(dir_b.path)
+    ctx.actions.run(
+        outputs = [dir_a, dir_b],
+        executable = ctx.executable.make_trees,
+        arguments = [mk_args],
+    )
+    out_x = ctx.actions.declare_directory(ctx.label.name + "_out_x")
+    out_y = ctx.actions.declare_directory(ctx.label.name + "_out_y")
+    ctx.actions.map_directory(
+        input_directories = {in_dict_expr},
+        output_directories = {out_dict_expr},
+        tools = {{"copier": ctx.attr.copy_tag.files_to_run}},
+        implementation = _expand,
+    )
+    return [DefaultInfo(files = depset([out_x, out_y]))]
+
+mapped_dirs = rule(
+    implementation = _rule_impl,
+    attrs = {{
+        "make_trees": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
+        "copy_tag": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
+    }},
+)
+"#
+        )
+    };
+
+    w.write(
+        "defs.bzl",
+        &write_defs(
+            "H1",
+            "BODY1",
+            r#"{"chosen": dir_a, "ignored": dir_b}"#,
+            r#"{"primary": out_x, "secondary": out_y}"#,
+        ),
+    );
+    w.write(
+        "BUILD",
+        &format!(
+            r#"
+load(":defs.bzl", "mapped_dirs")
+exports_files(["{make_trees_name}", "{copy_tag_name}"])
+mapped_dirs(
+    name = "t",
+    make_trees = ":{make_trees_name}",
+    copy_tag = ":{copy_tag_name}",
+)
+"#
+        ),
+    );
+
+    let out_x = w.bin_dir().join("t_out_x");
+    let out_y = w.bin_dir().join("t_out_y");
+
+    // 1. Initial build.
+    let (code, _, err, _) = w.run(&["build", "//:t"]);
+    assert_eq!(code, 0, "initial map_directory build failed: {err}");
+    assert_eq!(
+        std::fs::read_to_string(out_x.join("item.txt")).unwrap(),
+        "H1:BODY1:FROM_A"
+    );
+
+    // 2. Edit `_expand` function body in place (same function name & exact same line/col!).
+    w.write(
+        "defs.bzl",
+        &write_defs(
+            "H1",
+            "BODY2",
+            r#"{"chosen": dir_a, "ignored": dir_b}"#,
+            r#"{"primary": out_x, "secondary": out_y}"#,
+        ),
+    );
+    let (code, _, err, _) = w.run(&["build", "//:t"]);
+    assert_eq!(code, 0, "rebuild after _expand body edit failed: {err}");
+    assert_eq!(
+        std::fs::read_to_string(out_x.join("item.txt")).unwrap(),
+        "H1:BODY2:FROM_A"
+    );
+
+    // 3. Edit module-level constant `HELPER_PREFIX` in `defs.bzl` without touching `_expand` body.
+    w.write(
+        "defs.bzl",
+        &write_defs(
+            "H2",
+            "BODY2",
+            r#"{"chosen": dir_a, "ignored": dir_b}"#,
+            r#"{"primary": out_x, "secondary": out_y}"#,
+        ),
+    );
+    let (code, _, err, _) = w.run(&["build", "//:t"]);
+    assert_eq!(code, 0, "rebuild after module global edit failed: {err}");
+    assert_eq!(
+        std::fs::read_to_string(out_x.join("item.txt")).unwrap(),
+        "H2:BODY2:FROM_A"
+    );
+
+    // 4. Swap `input_directories` dict keys onto the exact same `[dir_a, dir_b]` input trees!
+    w.write(
+        "defs.bzl",
+        &write_defs(
+            "H2",
+            "BODY2",
+            r#"{"chosen": dir_b, "ignored": dir_a}"#,
+            r#"{"primary": out_x, "secondary": out_y}"#,
+        ),
+    );
+    let (code, _, err, _) = w.run(&["build", "//:t"]);
+    assert_eq!(
+        code, 0,
+        "rebuild after input_directories key swap failed: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out_x.join("item.txt")).unwrap(),
+        "H2:BODY2:FROM_B"
+    );
+
+    // 5. Swap `output_directories` dict keys onto the exact same `[out_x, out_y]` output trees!
+    w.write(
+        "defs.bzl",
+        &write_defs(
+            "H2",
+            "BODY2",
+            r#"{"chosen": dir_b, "ignored": dir_a}"#,
+            r#"{"primary": out_y, "secondary": out_x}"#,
+        ),
+    );
+    let (code, _, err, _) = w.run(&["build", "//:t"]);
+    assert_eq!(
+        code, 0,
+        "rebuild after output_directories key swap failed: {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out_y.join("item.txt")).unwrap(),
+        "H2:BODY2:FROM_B"
+    );
+    assert!(
+        !out_x.join("item.txt").exists(),
+        "stale item.txt in former primary output directory out_x must be cleaned on rebuild"
+    );
+}

@@ -390,6 +390,7 @@ mod tests {
             outputs,
             execution_info: BTreeMap::new(),
             tools: Vec::new(),
+            unused_inputs_list: None,
             java_compile: None,
         }
     }

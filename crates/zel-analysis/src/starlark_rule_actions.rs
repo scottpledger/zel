@@ -1319,15 +1319,10 @@ fn run_action(
         Some(v) => files_in(v, "inputs")?,
         None => Vec::new(),
     };
+    let mut unused_inputs_list: Option<Artifact> = None;
     if !shell {
         if let Some(u) = get("unused_inputs_list") {
-            let ua = want_file(u, func, "unused_inputs_list")?;
-            if ua.is_source {
-                return err("param 'unused_inputs_list' may not be a source file");
-            }
-            if ua.is_tree_artifact {
-                return err("param 'unused_inputs_list' may not be a declared directory");
-            }
+            unused_inputs_list = Some(want_file(u, func, "unused_inputs_list")?);
         }
     }
     let mut shadowed_env: BTreeMap<String, String> = BTreeMap::new();
@@ -1618,6 +1613,12 @@ fn run_action(
     if let Some(s) = &stdout {
         all_outputs.push(s.clone());
     }
+    if let Some(ref ua) = unused_inputs_list {
+        exec_req.insert(
+            "internal-inline-outputs".to_string(),
+            ua.exec_path.path_string().to_string(),
+        );
+    }
     let mut a = Action::new(
         st.label.clone(),
         &mnemonic,
@@ -1629,6 +1630,7 @@ fn run_action(
     a.inputs = inputs;
     a.tools = dedup(tool_files);
     a.outputs = all_outputs;
+    a.unused_inputs_list = unused_inputs_list;
     a.resource_set = resource_set;
     a.use_default_shell_env = get("use_default_shell_env").map(|v| v.is_truthy()).unwrap_or(false);
     a.exec_group = exec_group;
@@ -1668,6 +1670,199 @@ fn add_files_to_run_inputs(fields: &BTreeMap<String, Value>, out: &mut Vec<Artif
         out.extend(r.artifacts.iter().cloned());
         out.extend(r.symlinks.values().cloned());
         out.extend(r.root_symlinks.values().cloned());
+    }
+}
+
+fn fingerprint_starlark_value(
+    fp: &mut zel_util::Fingerprint,
+    val: &Value,
+    visited_fns: &mut std::collections::HashSet<usize>,
+    visited_mods: &mut std::collections::HashSet<usize>,
+) {
+    if let Some(art) = artifact_of(val) {
+        fp.add_str("Artifact")
+            .add_str(art.exec_path.path_string())
+            .add_bool(art.is_source)
+            .add_bool(art.is_tree_artifact)
+            .add_bool(art.is_unresolved_symlink);
+        return;
+    }
+    if let Some(rf) = runfiles_of(val) {
+        fp.add_str("Runfiles")
+            .add_u64(rf.artifacts.len() as u64);
+        for a in &rf.artifacts {
+            fp.add_str(a.exec_path.path_string());
+        }
+        let syms = rf.ordered_symlinks();
+        fp.add_u64(syms.len() as u64);
+        for (k, a) in syms {
+            fp.add_str(&k).add_str(a.exec_path.path_string());
+        }
+        let rsyms = rf.ordered_root_symlinks();
+        fp.add_u64(rsyms.len() as u64);
+        for (k, a) in rsyms {
+            fp.add_str(&k).add_str(a.exec_path.path_string());
+        }
+        return;
+    }
+    match val {
+        Value::None => {
+            fp.add_str("None");
+        }
+        Value::Bool(b) => {
+            fp.add_str("Bool").add_bool(*b);
+        }
+        Value::Int(i) => {
+            fp.add_str("Int").add_str(&i.to_string());
+        }
+        Value::Float(f) => {
+            fp.add_str("Float").add_u64(f.to_bits());
+        }
+        Value::String(s) => {
+            fp.add_str("String").add_str(s);
+        }
+        Value::Label(l) => {
+            fp.add_str("Label").add_str(&l.unambiguous_canonical_form());
+        }
+        Value::Range(_) => {
+            fp.add_str("Range").add_str(&val.repr());
+        }
+        Value::SelectorList(_) => {
+            fp.add_str("SelectorList").add_str(&val.repr());
+        }
+        Value::List(l) => {
+            let elems = l.lock().unwrap().elements.clone();
+            fp.add_str("List").add_u64(elems.len() as u64);
+            for e in &elems {
+                fingerprint_starlark_value(fp, e, visited_fns, visited_mods);
+            }
+        }
+        Value::Tuple(elems) => {
+            fp.add_str("Tuple").add_u64(elems.len() as u64);
+            for e in elems {
+                fingerprint_starlark_value(fp, e, visited_fns, visited_mods);
+            }
+        }
+        Value::Dict(d) => {
+            let items = d.lock().unwrap().items();
+            fp.add_str("Dict").add_u64(items.len() as u64);
+            for (k, v) in &items {
+                fingerprint_starlark_value(fp, k, visited_fns, visited_mods);
+                fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+            }
+        }
+        Value::Set(s) => {
+            let mut reprs: Vec<String> = s
+                .lock()
+                .unwrap()
+                .elements
+                .iter()
+                .map(Value::repr)
+                .collect();
+            reprs.sort();
+            fp.add_str("Set").add_u64(reprs.len() as u64);
+            for r in &reprs {
+                fp.add_str(r);
+            }
+        }
+        Value::Depset(d) => {
+            let items = d.to_list();
+            fp.add_str("Depset").add_u64(items.len() as u64);
+            for item in &items {
+                fingerprint_starlark_value(fp, item, visited_fns, visited_mods);
+            }
+        }
+        Value::Struct(s) => {
+            fp.add_str("Struct")
+                .add_str(s.opaque_class.as_deref().unwrap_or(""))
+                .add_u64(s.fields.len() as u64);
+            for (k, v) in &s.fields {
+                fp.add_str(k);
+                fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+            }
+        }
+        Value::Provider { name } => {
+            fp.add_str("Provider").add_str(name);
+        }
+        Value::ProviderInstance {
+            provider_name,
+            fields,
+        } => {
+            fp.add_str("ProviderInstance")
+                .add_str(provider_name)
+                .add_u64(fields.len() as u64);
+            for (k, v) in fields {
+                fp.add_str(k);
+                fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+            }
+        }
+        Value::RuleCallable {
+            rule_class,
+            executable,
+            test,
+        } => {
+            fp.add_str("RuleCallable")
+                .add_str(rule_class)
+                .add_bool(*executable)
+                .add_bool(*test);
+        }
+        Value::BuiltinFunction(name) => {
+            fp.add_str("BuiltinFunction").add_str(name);
+        }
+        Value::UserFunction(u) => {
+            let ptr = Arc::as_ptr(u) as usize;
+            if !visited_fns.insert(ptr) {
+                fp.add_str("UserFunctionRef")
+                    .add_str(&u.name)
+                    .add_str(&u.location.to_string());
+                return;
+            }
+            fp.add_str("UserFunction")
+                .add_str(&u.name)
+                .add_str(&u.location.to_string())
+                .add_str(u.repr_override.as_deref().unwrap_or(""))
+                .add_str(&format!("{:?}", u.params))
+                .add_str(&format!("{:?}", u.body));
+            fp.add_u64(u.closure.scopes.len() as u64);
+            for scope in &u.closure.scopes {
+                let vars: Vec<(String, Value)> = scope
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                fp.add_u64(vars.len() as u64);
+                for (k, v) in &vars {
+                    fp.add_str(k);
+                    fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+                }
+            }
+            if let Some(m) = &u.module {
+                let mptr = Arc::as_ptr(m) as usize;
+                let mlabel = m.label_string.lock().unwrap().clone().unwrap_or_default();
+                fp.add_str(&mlabel);
+                if visited_mods.insert(mptr) {
+                    let globals: Vec<(String, Value)> = m
+                        .globals
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    fp.add_u64(globals.len() as u64);
+                    for (k, v) in &globals {
+                        fp.add_str(k);
+                        fingerprint_starlark_value(fp, v, visited_fns, visited_mods);
+                    }
+                }
+            }
+        }
+        Value::Host(k, id) => {
+            fp.add_str("Host").add_str(k);
+            if k == "path" || k == "dotted_version" || k == "obj" {
+                fp.add_str(id);
+            }
+        }
     }
 }
 
@@ -1985,7 +2180,7 @@ fn map_directory_action(
         return err("actions.map_directory() requires at least one output.");
     }
 
-    let (imp_name, imp_loc) = match &imp {
+    match &imp {
         Value::UserFunction(u) => {
             if !u.closure.scopes.is_empty() || u.name == "<lambda>" {
                 return err(format!(
@@ -1993,7 +2188,6 @@ fn map_directory_action(
                     u.location
                 ));
             }
-            (u.name.clone(), u.location.to_string())
         }
         other => {
             return err(format!(
@@ -2001,7 +2195,7 @@ fn map_directory_action(
                 type_name(other)
             ));
         }
-    };
+    }
 
     let mut all_inputs: Vec<Artifact> = Vec::new();
     let mut tool_files: Vec<Artifact> = Vec::new();
@@ -2223,15 +2417,32 @@ fn map_directory_action(
     }
 
     let mut fp = zel_util::Fingerprint::new();
-    fp.add_str(&imp_name).add_str(&imp_loc).add_str(&expanded_mnemonic);
+    let mut visited_fns = std::collections::HashSet::new();
+    let mut visited_mods = std::collections::HashSet::new();
+    fingerprint_starlark_value(&mut fp, &imp, &mut visited_fns, &mut visited_mods);
+    fp.add_str(&expanded_mnemonic);
+    fp.add_u64(input_directories.len() as u64);
+    for (k, a) in &input_directories {
+        fp.add_str(k).add_str(a.exec_path.path_string());
+    }
+    fp.add_u64(output_directories.len() as u64);
+    for (k, a) in &output_directories {
+        fp.add_str(k).add_str(a.exec_path.path_string());
+    }
+    fp.add_u64(additional_params.len() as u64);
     for (k, v) in &additional_params {
-        fp.add_str(&k.repr()).add_str(&v.repr());
+        fp.add_str(&k.repr());
+        fingerprint_starlark_value(&mut fp, v, &mut visited_fns, &mut visited_mods);
     }
+    fp.add_u64(additional_inputs.len() as u64);
     for (k, v) in &additional_inputs {
-        fp.add_str(&k.repr()).add_str(&v.repr());
+        fp.add_str(&k.repr());
+        fingerprint_starlark_value(&mut fp, v, &mut visited_fns, &mut visited_mods);
     }
+    fp.add_u64(tools.len() as u64);
     for (k, v) in &tools {
-        fp.add_str(&k.repr()).add_str(&v.repr());
+        fp.add_str(&k.repr());
+        fingerprint_starlark_value(&mut fp, v, &mut visited_fns, &mut visited_mods);
     }
     let fingerprint = fp.hex_digest_and_reset();
 

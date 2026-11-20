@@ -48,6 +48,8 @@ pub struct PostOpts {
     pub include_param_files: bool,
     pub include_file_write_contents: bool,
     pub include_pruned_inputs: bool,
+    /// When `!include_pruned_inputs`, maps primary-output exec path -> cached used input exec paths.
+    pub cached_used_inputs: BTreeMap<String, std::collections::BTreeSet<String>>,
     pub skyframe_state: bool,
     pub prune_unused_actions: bool,
     pub output_groups: Vec<String>,
@@ -79,6 +81,7 @@ impl Default for PostOpts {
             include_param_files: false,
             include_file_write_contents: false,
             include_pruned_inputs: true,
+            cached_used_inputs: BTreeMap::new(),
             skyframe_state: false,
             prune_unused_actions: false,
             output_groups: Vec::new(),

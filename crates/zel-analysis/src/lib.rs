@@ -1475,6 +1475,8 @@ pub enum ActionAnalysisMetadata {
         execution_info: BTreeMap<String, String>,
         /// Tool inputs of the spawn (`Action.getTools` / `Spawn.getToolFiles`).
         tools: Vec<Artifact>,
+        /// Optional output file listing unused input exec paths (`StarlarkAction.unusedInputsList`).
+        unused_inputs_list: Option<Artifact>,
         /// Reduced-classpath data of a `JavaCompileAction` (`--experimental_java_classpath=bazel`).
         java_compile: Option<Box<JavaCompileSpec>>,
     },
@@ -1581,6 +1583,7 @@ impl ActionAnalysisMetadata {
                 unset_env,
                 inputs,
                 outputs,
+                unused_inputs_list,
                 ..
             } => {
                 fp.add_strings(argv);
@@ -1596,6 +1599,10 @@ impl ActionAnalysisMetadata {
                 }
                 for out in outputs {
                     fp.add_str(out.exec_path.path_string());
+                }
+                if let Some(u) = unused_inputs_list {
+                    fp.add_str("unused_inputs_list")
+                        .add_str(u.exec_path.path_string());
                 }
             }
             Self::FileWriteAction {
@@ -1663,6 +1670,18 @@ impl ActionAnalysisMetadata {
             Self::MapDirectoryAction(spec) => {
                 fp.add_str(&spec.expanded_mnemonic)
                     .add_str(&spec.expander.key_fingerprint());
+                fp.add_u64(spec.input_directories.len() as u64);
+                for (k, dir) in &spec.input_directories {
+                    fp.add_str(k).add_str(dir.exec_path.path_string());
+                }
+                fp.add_u64(spec.output_directories.len() as u64);
+                for (k, dir) in &spec.output_directories {
+                    fp.add_str(k).add_str(dir.exec_path.path_string());
+                }
+                fp.add_u64(spec.execution_info.len() as u64);
+                for (k, v) in &spec.execution_info {
+                    fp.add_str(k).add_str(v);
+                }
                 for (k, v) in &spec.env {
                     fp.add_str(k).add_str(v);
                 }
@@ -1671,9 +1690,15 @@ impl ActionAnalysisMetadata {
                         .add_strings(spec.inherited_env.iter());
                     fp.add_str("unset").add_strings(spec.unset_env.iter());
                 }
+                fp.add_u64(spec.inputs.len() as u64);
                 for inp in &spec.inputs {
                     fp.add_str(inp.exec_path.path_string());
                 }
+                fp.add_u64(spec.tools.len() as u64);
+                for tool in &spec.tools {
+                    fp.add_str(tool.exec_path.path_string());
+                }
+                fp.add_u64(spec.outputs.len() as u64);
                 for out in &spec.outputs {
                     fp.add_str(out.exec_path.path_string());
                 }

@@ -290,9 +290,29 @@ pub enum SymlinkTargetType {
     Other,
 }
 
+/// Opaque per-`Action::new` identity token mirroring Java reference identity
+/// (`previousAction == action` in `MapBasedActionGraph.registerAction`) across `Clone` without
+/// disturbing structural `PartialEq` on `Action`.
+#[derive(Debug, Clone, Copy, Eq)]
+struct ActionInstanceId(u64);
+
+impl PartialEq for ActionInstanceId {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl ActionInstanceId {
+    fn next() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// A registered action (`ctx.actions.*`). All the common fields live on the struct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Action {
+    instance_id: ActionInstanceId,
     pub owner: Label,
     /// Rule class of the owner (`ActionOwner.getTargetKind`).
     pub owner_kind: String,
@@ -327,6 +347,8 @@ pub struct Action {
     pub is_pseudo: bool,
     /// Runfiles-tree inputs (`input_manifests`): executable -> runfiles manifest artifact.
     pub input_manifests: Vec<Artifact>,
+    /// File written by a Starlark `ctx.actions.run` action listing unused inputs (`StarlarkAction.unusedInputsList`).
+    pub unused_inputs_list: Option<Artifact>,
     /// Set for `JavaCompileAction`s that run with a reduced classpath.
     pub java_compile: Option<crate::JavaCompileSpec>,
     /// Inputs of `Action.computeKey` that are not otherwise part of this model (nested sets).
@@ -512,6 +534,7 @@ impl Action {
     /// Starts an action with defaults for everything except `owner`, `mnemonic`, and `kind`.
     pub fn new(owner: Label, mnemonic: &str, kind: ActionKind) -> Self {
         Self {
+            instance_id: ActionInstanceId::next(),
             owner,
             owner_kind: String::new(),
             owner_config: String::new(),
@@ -532,6 +555,7 @@ impl Action {
             use_exec_root_for_source: false,
             is_pseudo: false,
             input_manifests: Vec::new(),
+            unused_inputs_list: None,
             java_compile: None,
             key_info: None,
             kind,
@@ -570,9 +594,15 @@ impl Action {
         self.inputs.first()
     }
 
-    /// Whether this action may be shared (`AbstractAction.isShareable`).
+    /// Whether `self` and `other` originate from the same `Action::new` registration
+    /// (`previousAction == action` in `MapBasedActionGraph.registerAction`).
+    pub fn same_instance(&self, other: &Action) -> bool {
+        self.instance_id.0 == other.instance_id.0
+    }
+
+    /// Whether this action may be shared (`AbstractAction.isShareable` / `StarlarkAction.EnhancedStarlarkAction.isShareable`).
     pub fn is_shareable(&self) -> bool {
-        true
+        self.unused_inputs_list.is_none()
     }
 
     /// Whether two such actions generating the same output may coexist
@@ -643,6 +673,10 @@ impl Action {
                 }
                 for (k, v) in &self.exec_properties {
                     fp.add_str(k).add_str(v);
+                }
+                if let Some(u) = &self.unused_inputs_list {
+                    fp.add_str("unused_inputs_list")
+                        .add_str(u.exec_path.path_string());
                 }
             }
             ActionKind::FileWrite {
@@ -728,9 +762,11 @@ impl Action {
                 fp.add_str("StarlarkMapActionTemplate")
                     .add_str(expanded_mnemonic)
                     .add_str(&expander.0.key_fingerprint());
+                fp.add_u64(input_directories.len() as u64);
                 for (k, a) in input_directories {
                     fp.add_str(k).add_str(a.exec_path.path_string());
                 }
+                fp.add_u64(output_directories.len() as u64);
                 for (k, a) in output_directories {
                     fp.add_str(k).add_str(a.exec_path.path_string());
                 }
@@ -1143,6 +1179,7 @@ impl Action {
                     outputs: self.outputs.clone(),
                     execution_info,
                     tools: self.tools.clone(),
+                    unused_inputs_list: self.unused_inputs_list.clone(),
                     java_compile: java_compile.map(Box::new),
                 });
             }
@@ -1355,7 +1392,7 @@ impl ActionGraph {
             }
             let p = out.exec_path.path_string().to_string();
             if let Some(prev) = self.generating.get(&p) {
-                if prev.can_be_shared(action) {
+                if prev.same_instance(action) || prev.can_be_shared(action) {
                     continue;
                 }
                 return Err(ActionConflict {
@@ -2245,5 +2282,134 @@ mod tests {
                 "bazel-out/k8-fastbuild/bin/a/tree_pos/first.txt=bazel-out/k8-fastbuild/bin/a/tree_pos/second.txt",
             ]
         );
+    }
+
+    #[test]
+    fn unused_inputs_list_marks_action_unshareable_and_affects_keys() {
+        let make = |unused: Option<Artifact>| {
+            let mut act = Action::new(
+                Label::parse_canonical("//a:b").unwrap(),
+                "Spawn",
+                ActionKind::Spawn {
+                    executable: "tool".to_string(),
+                    arguments: Vec::new(),
+                    shell_command: None,
+                },
+            );
+            act.outputs.push(art("a/out"));
+            act.outputs.push(art("a/out.unused"));
+            act.unused_inputs_list = unused;
+            act
+        };
+        let plain = make(None);
+        let with_unused_a = make(Some(art("a/out.unused")));
+        let mut with_unused_b = make(Some(art("a/out.unused")));
+        with_unused_b.owner = Label::parse_canonical("//a:c").unwrap();
+
+        assert!(plain.is_shareable());
+        assert!(!with_unused_a.is_shareable());
+        assert!(!with_unused_a.can_be_shared(&with_unused_b));
+        assert_ne!(plain.key(), with_unused_a.key());
+        assert_ne!(
+            plain.lower()[0].action_key(),
+            with_unused_a.lower()[0].action_key()
+        );
+
+        // Re-registering a clone of the same unshareable action is idempotent
+        // (`MapBasedActionGraph.registerAction`: `previousAction == action`), while registering a
+        // distinct unshareable action for the same output conflicts (`!Actions.canBeShared`).
+        let mut g = ActionGraph::new();
+        g.register(&with_unused_a).unwrap();
+        g.register(&with_unused_a.clone()).unwrap();
+        assert!(g.register(&with_unused_b).is_err());
+        let with_unused_same_owner = make(Some(art("a/out.unused")));
+        assert!(g.register(&with_unused_same_owner).is_err());
+    }
+
+    #[test]
+    fn map_directory_action_key_includes_input_and_output_dict_keys() {
+        use crate::{MapDirectoryExpander, MapDirectorySpec};
+        use std::sync::Arc;
+
+        #[derive(Debug)]
+        struct FixedExpander;
+        impl MapDirectoryExpander for FixedExpander {
+            fn key_fingerprint(&self) -> String {
+                "fixed-fp".to_string()
+            }
+            fn expand(
+                &self,
+                _discovered_children: &BTreeMap<String, Vec<(String, Artifact)>>,
+            ) -> Result<Vec<ActionAnalysisMetadata>, String> {
+                Ok(Vec::new())
+            }
+        }
+
+        let dir_a = art("pkg/in_a");
+        let dir_b = art("pkg/in_b");
+        let out_a = art("pkg/out_a");
+        let out_b = art("pkg/out_b");
+
+        let make_md = |in_dirs: Vec<(String, Artifact)>, out_dirs: Vec<(String, Artifact)>| {
+            ActionAnalysisMetadata::MapDirectoryAction(Box::new(MapDirectorySpec {
+                owner: Label::parse_canonical("//pkg:t").unwrap(),
+                input_directories: in_dirs,
+                output_directories: out_dirs,
+                inputs: vec![dir_a.clone(), dir_b.clone()],
+                outputs: vec![out_a.clone(), out_b.clone()],
+                tools: Vec::new(),
+                env: BTreeMap::new(),
+                inherited_env: std::collections::BTreeSet::new(),
+                unset_env: std::collections::BTreeSet::new(),
+                execution_info: BTreeMap::new(),
+                expanded_mnemonic: "Mapped".to_string(),
+                expander: Arc::new(FixedExpander),
+            }))
+        };
+
+        let base = make_md(
+            vec![
+                ("left".into(), dir_a.clone()),
+                ("right".into(), dir_b.clone()),
+            ],
+            vec![
+                ("primary".into(), out_a.clone()),
+                ("secondary".into(), out_b.clone()),
+            ],
+        );
+        let swapped_inputs = make_md(
+            vec![
+                ("left".into(), dir_b.clone()),
+                ("right".into(), dir_a.clone()),
+            ],
+            vec![
+                ("primary".into(), out_a.clone()),
+                ("secondary".into(), out_b.clone()),
+            ],
+        );
+        let renamed_input_key = make_md(
+            vec![
+                ("lhs".into(), dir_a.clone()),
+                ("right".into(), dir_b.clone()),
+            ],
+            vec![
+                ("primary".into(), out_a.clone()),
+                ("secondary".into(), out_b.clone()),
+            ],
+        );
+        let swapped_outputs = make_md(
+            vec![
+                ("left".into(), dir_a.clone()),
+                ("right".into(), dir_b.clone()),
+            ],
+            vec![
+                ("primary".into(), out_b.clone()),
+                ("secondary".into(), out_a.clone()),
+            ],
+        );
+
+        assert_ne!(base.action_key(), swapped_inputs.action_key());
+        assert_ne!(base.action_key(), renamed_input_key.action_key());
+        assert_ne!(base.action_key(), swapped_outputs.action_key());
     }
 }

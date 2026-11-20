@@ -1809,6 +1809,7 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             inherited_env,
             unset_env,
             execution_info,
+            unused_inputs_list,
             ..
         } => {
             p.kind = "spawn".into();
@@ -1817,6 +1818,12 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             p.inherited_env = inherited_env.iter().cloned().collect();
             p.unset_env = unset_env.iter().cloned().collect();
             p.execution_info = execution_info.clone();
+            if let Some(u) = unused_inputs_list {
+                let s = u.exec_path.path_string();
+                p.payload.extend_from_slice(b"unused_inputs_list\0");
+                p.payload.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                p.payload.extend_from_slice(s.as_bytes());
+            }
         }
         ActionAnalysisMetadata::FileWriteAction {
             content,
@@ -1875,12 +1882,34 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             p.payload.extend_from_slice(translator.key.as_bytes());
         }
         ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+            fn push_str(buf: &mut Vec<u8>, s: &str) {
+                buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
             p.kind = "map_directory".into();
             p.env = spec.env.clone();
             p.inherited_env = spec.inherited_env.iter().cloned().collect();
+            p.unset_env = spec.unset_env.iter().cloned().collect();
             p.execution_info = spec.execution_info.clone();
+            push_str(&mut p.payload, &spec.expanded_mnemonic);
+            push_str(&mut p.payload, &spec.expander.key_fingerprint());
             p.payload
-                .extend_from_slice(spec.expander.key_fingerprint().as_bytes());
+                .extend_from_slice(&(spec.input_directories.len() as u64).to_le_bytes());
+            for (k, dir) in &spec.input_directories {
+                push_str(&mut p.payload, k);
+                push_str(&mut p.payload, dir.exec_path.path_string());
+            }
+            p.payload
+                .extend_from_slice(&(spec.output_directories.len() as u64).to_le_bytes());
+            for (k, dir) in &spec.output_directories {
+                push_str(&mut p.payload, k);
+                push_str(&mut p.payload, dir.exec_path.path_string());
+            }
+            p.payload
+                .extend_from_slice(&(spec.tools.len() as u64).to_le_bytes());
+            for tool in &spec.tools {
+                push_str(&mut p.payload, tool.exec_path.path_string());
+            }
         }
     }
     p
@@ -2047,9 +2076,21 @@ pub fn execute_action_with(
             lookup_hybrid()
         }
     };
+    let has_unused_inputs_list = matches!(
+        action,
+        ActionAnalysisMetadata::SpawnAction {
+            unused_inputs_list: Some(_),
+            ..
+        }
+    );
     let md_digest_with = |discovered: &[String], check_ttl: bool| -> String {
         let mut all: Vec<(String, Option<String>)> = Vec::new();
-        for p in declared_inputs.iter().chain(discovered.iter()) {
+        let base_inputs: &[String] = if has_unused_inputs_list {
+            &[]
+        } else {
+            &declared_inputs
+        };
+        for p in base_inputs.iter().chain(discovered.iter()) {
             all.push((p.clone(), input_digest_with(p, check_ttl)));
         }
         all.extend(tool_rf_entries.iter().cloned());
@@ -2248,6 +2289,8 @@ pub fn execute_action_with(
             (p.clone(), input_digest_with(p, false))
         })
         .collect();
+    let mut pruned_unused_inputs: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     match action {
         ActionAnalysisMetadata::FileWriteAction {
@@ -2620,6 +2663,7 @@ pub fn execute_action_with(
             outputs: spawn_outputs,
             execution_info,
             tools,
+            unused_inputs_list,
             java_compile,
         } => {
             for so in spawn_outputs {
@@ -3060,6 +3104,21 @@ pub fn execute_action_with(
                         return Ok(fail(msgs, 1, res.stdout, res.stderr, runner));
                     }
                     SpawnStatus::MissingOutputs => {
+                        if let Some(unused_art) = unused_inputs_list {
+                            let unused_abs = execroot.get_relative(&unused_art.exec_path);
+                            if !fs.exists(&unused_abs, true) {
+                                return Ok(fail(
+                                    vec![format!(
+                                        "ERROR: {loc}: {progress} failed: Action did not create expected output file listing unused inputs: {}",
+                                        unused_art.exec_path
+                                    )],
+                                    1,
+                                    res.stdout,
+                                    res.stderr,
+                                    runner,
+                                ));
+                            }
+                        }
                         let mut msgs: Vec<String> = res
                         .missing
                         .iter()
@@ -3274,6 +3333,48 @@ pub fn execute_action_with(
                     }
                 }
                 break;
+            }
+            if let Some(unused_art) = unused_inputs_list {
+                let unused_abs = execroot.get_relative(&unused_art.exec_path);
+                if !fs.exists(&unused_abs, true) {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: {progress} failed: Action did not create expected output file listing unused inputs: {}",
+                            unused_art.exec_path
+                        )],
+                        1,
+                        outcome.stdout.clone(),
+                        outcome.stderr.clone(),
+                        outcome.runner.clone(),
+                    ));
+                }
+                match fs.read_file(&unused_abs) {
+                    Ok(bytes) => {
+                        for raw_line in bytes.split(|&b| b == b'\n') {
+                            let line = String::from_utf8_lossy(raw_line);
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            pruned_unused_inputs.insert(trimmed.to_string());
+                            #[cfg(windows)]
+                            if trimmed.contains('\\') {
+                                pruned_unused_inputs.insert(trimmed.replace('\\', "/"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(fail(
+                            vec![format!(
+                                "ERROR: {loc}: {progress} failed: Unused inputs read failure: {e}"
+                            )],
+                            1,
+                            outcome.stdout.clone(),
+                            outcome.stderr.clone(),
+                            outcome.runner.clone(),
+                        ));
+                    }
+                }
             }
         }
         ActionAnalysisMetadata::MapDirectoryAction(spec) => {
@@ -3547,10 +3648,20 @@ pub fn execute_action_with(
     // the metadata digest over declared + discovered inputs (from `.d` depfiles and `/showIncludes`).
     if let Some(primary) = outputs.first() {
         let mut discovered: Vec<String> = Vec::new();
-        if let ActionAnalysisMetadata::SpawnAction { .. } = action {
+        if let ActionAnalysisMetadata::SpawnAction {
+            unused_inputs_list, ..
+        } = action
+        {
+            if unused_inputs_list.is_some() {
+                for p in &declared_inputs {
+                    if !pruned_unused_inputs.contains(p) {
+                        discovered.push(p.clone());
+                    }
+                }
+            }
             for hdr in &show_includes_headers {
                 if let Some(rel) = normalize_discovered_header(hdr, execroot.path_string()) {
-                    if !declared_inputs.contains(&rel) {
+                    if !declared_inputs.contains(&rel) && !pruned_unused_inputs.contains(&rel) {
                         discovered.push(rel);
                     }
                 }
@@ -3562,7 +3673,9 @@ pub fn execute_action_with(
                             if let Some(rel) =
                                 normalize_discovered_header(&dep, execroot.path_string())
                             {
-                                if !declared_inputs.contains(&rel) {
+                                if !declared_inputs.contains(&rel)
+                                    && !pruned_unused_inputs.contains(&rel)
+                                {
                                     discovered.push(rel);
                                 }
                             }
@@ -4055,6 +4168,7 @@ mod tests {
             outputs: vec![out_art.clone()],
             execution_info: BTreeMap::new(),
             tools: vec![tool_art],
+            unused_inputs_list: None,
             java_compile: None,
         };
 
@@ -4372,6 +4486,7 @@ mod tests {
                         outputs: vec![out_art],
                         execution_info: BTreeMap::new(),
                         tools: Vec::new(),
+                        unused_inputs_list: None,
                         java_compile: None,
                     });
                 }
