@@ -721,7 +721,8 @@ pub(crate) fn run_build_actions(
     let mut fatal: Option<i32> = None;
     let (jobs, runtime, quit_workers) = match exec_config(parsed)
         .map_err(RuntimeError::Config)
-        .and_then(|cfg| {
+        .and_then(|mut cfg| {
+            cfg.remote.workspace = Some(PathBuf::from(workspace_dir.path_string()));
             let quit = cfg.worker.quit_after_build;
             let jobs = cfg.jobs;
             build_runtime(cfg, execroot, client_env).map(|rt| (jobs, rt, quit))

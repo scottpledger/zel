@@ -249,8 +249,13 @@ fn run_credential_helper(
 ) -> Result<Vec<(String, String)>, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut cmd = Command::new(helper);
+    #[cfg(windows)]
+    let exec_helper = PathBuf::from(helper.to_string_lossy().replace('/', "\\"));
+    #[cfg(not(windows))]
+    let exec_helper = helper;
+    let mut cmd = Command::new(exec_helper);
     cmd.arg("get")
+        .env_remove("RUN_UNDER_RUNFILES")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

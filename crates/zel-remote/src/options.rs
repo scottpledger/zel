@@ -203,6 +203,7 @@ pub struct RemoteOptions {
     pub download_regex: Vec<String>,
     pub credential_helper: Option<String>,
     pub credential_helpers: Vec<String>,
+    pub workspace: Option<std::path::PathBuf>,
 }
 
 impl Default for RemoteOptions {
@@ -233,6 +234,7 @@ impl Default for RemoteOptions {
             download_regex: vec![],
             credential_helper: None,
             credential_helpers: vec![],
+            workspace: None,
         }
     }
 }
@@ -467,12 +469,17 @@ Provide a token explicitly with --remote_header=Authorization=Bearer <token> or 
         let mut headers = self.headers.clone();
         headers.extend(extra.iter().cloned());
         if !self.credential_helpers.is_empty() {
-            headers.extend(crate::credentials::run_credential_helpers(
+            headers.extend(crate::credentials::run_credential_helpers_in_workspace(
                 &self.credential_helpers,
                 endpoint,
+                self.workspace.as_deref(),
             )?);
         } else if let Some(h) = &self.credential_helper {
-            headers.extend(crate::credentials::run_credential_helper(h, endpoint)?);
+            headers.extend(crate::credentials::run_credential_helpers_in_workspace(
+                std::slice::from_ref(h),
+                endpoint,
+                self.workspace.as_deref(),
+            )?);
         }
         Ok(Arc::new(Channel::new(
             connector,

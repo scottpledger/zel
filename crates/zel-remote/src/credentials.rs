@@ -375,6 +375,66 @@ fn extract_uri_host(uri: &str) -> &str {
     }
 }
 
+/// Normalizes a path string to Bazel `PathFragment` forward-slash form
+/// (`WindowsOsPathPolicy.java:132-186`): converts `\` to `/`, uppercases a Windows drive letter,
+/// collapses repeated slashes, drops `.` segments, and trims trailing `/` except on `/` or `X:/`.
+fn normalize_bazel_path_str(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let has_drive = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || matches!(bytes[2], b'/' | b'\\'));
+    let is_abs_slash = !has_drive && matches!(bytes.first(), Some(b'/' | b'\\'));
+    let after_prefix = if has_drive { &raw[2..] } else { raw };
+    let segs: Vec<&str> = after_prefix
+        .split(['/', '\\'])
+        .filter(|s| !s.is_empty() && *s != ".")
+        .collect();
+    if has_drive {
+        let drive = (bytes[0] as char).to_ascii_uppercase();
+        if segs.is_empty() {
+            format!("{drive}:/")
+        } else {
+            format!("{drive}:/{}", segs.join("/"))
+        }
+    } else if is_abs_slash {
+        if segs.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{}", segs.join("/"))
+        }
+    } else {
+        segs.join("/")
+    }
+}
+
+/// Expands `%workspace%` in a `--credential_helper` path following Bazel's
+/// `CommandLinePathFactory.create` (`CommandLinePathFactory.java:49, 86-105`) and `PathFragment`
+/// normalization (`WindowsOsPathPolicy.java:132-186`).
+pub fn expand_credential_helper_path(raw: &str, workspace: Option<&std::path::Path>) -> String {
+    if let Some(ws) = workspace {
+        let ws_norm = normalize_bazel_path_str(&ws.to_string_lossy());
+        if raw == "%workspace%" {
+            return ws_norm;
+        }
+        if let Some(rest) = raw
+            .strip_prefix("%workspace%")
+            .filter(|r| r.starts_with(['/', '\\']))
+        {
+            let segs: Vec<&str> = rest
+                .split(['/', '\\'])
+                .filter(|s| !s.is_empty() && *s != ".")
+                .collect();
+            if segs.is_empty() {
+                return ws_norm;
+            }
+            let base = ws_norm.trim_end_matches('/');
+            return format!("{base}/{}", segs.join("/"));
+        }
+    }
+    raw.to_string()
+}
+
 /// Resolves `--credential_helper=[scope=]path` entries following Bazel's `CredentialHelperProvider`:
 /// exact host match > longest matching `*.domain` wildcard (matching both `domain` and subdomains
 /// of `domain`) > unscoped default helper; later registrations override earlier ones of equal scope.
@@ -398,16 +458,7 @@ impl CredentialHelperProvider {
     }
 
     pub fn add(&mut self, spec: &str, workspace: Option<&std::path::Path>) {
-        let expand = |raw: &str| -> String {
-            if let Some(ws) = workspace {
-                if let Some(rest) = raw.strip_prefix("%workspace%/") {
-                    return ws.join(rest).display().to_string();
-                } else if raw == "%workspace%" {
-                    return ws.display().to_string();
-                }
-            }
-            raw.to_string()
-        };
+        let expand = |raw: &str| expand_credential_helper_path(raw, workspace);
         match spec.split_once('=') {
             Some((scope, path)) if !scope.is_empty() => {
                 let expanded = expand(path);
@@ -476,7 +527,11 @@ pub fn invoke_credential_helper_process(
     cwd: Option<&std::path::Path>,
     client_env: Option<&BTreeMap<String, String>>,
 ) -> Result<GetCredentialsResponse, String> {
-    let mut cmd = Command::new(path);
+    #[cfg(windows)]
+    let exec_path = path.replace('/', "\\");
+    #[cfg(not(windows))]
+    let exec_path = path;
+    let mut cmd = Command::new(exec_path);
     cmd.arg("get")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -531,11 +586,21 @@ pub fn run_credential_helper(spec: &str, uri: &str) -> Result<Vec<Header>, Strin
 
 /// Resolves the best matching helper from `specs` and returns its HTTP/2 headers for `uri`.
 pub fn run_credential_helpers(specs: &[String], uri: &str) -> Result<Vec<Header>, String> {
-    let provider = CredentialHelperProvider::from_specs(specs, None);
+    run_credential_helpers_in_workspace(specs, uri, None)
+}
+
+/// Resolves the best matching helper from `specs` (expanding `%workspace%` against `workspace`)
+/// and returns its HTTP/2 headers for `uri`.
+pub fn run_credential_helpers_in_workspace(
+    specs: &[String],
+    uri: &str,
+    workspace: Option<&std::path::Path>,
+) -> Result<Vec<Header>, String> {
+    let provider = CredentialHelperProvider::from_specs(specs, workspace);
     let Some(path) = provider.helper_for_uri(uri) else {
         return Ok(vec![]);
     };
-    let resp = invoke_credential_helper_process(path, uri, None, None)?;
+    let resp = invoke_credential_helper_process(path, uri, workspace, None)?;
     let mut headers = Vec::new();
     for (k, vals) in resp.headers {
         if !vals.is_empty() {
@@ -659,6 +724,44 @@ mod tests {
         assert_eq!(
             provider.helper_for_uri("https://unrelated.io/x"),
             Some("/my/ws/tools/default")
+        );
+
+        // Windows drive-letter workspace (`C:\my\ws` / `c:\my\ws\`) + both `/` and `\` `%workspace%`
+        // specs and repeated slashes normalize cleanly to Bazel `PathFragment` forward-slash form.
+        let win_ws = std::path::Path::new(r"c:\my\ws\");
+        let win_provider = CredentialHelperProvider::from_specs(
+            &[
+                r"%workspace%\tools\default.bat".to_string(),
+                "*.example.com=%workspace%//tools//./wild.exe".to_string(),
+                "exact.example.com=%workspace%".to_string(),
+            ],
+            Some(win_ws),
+        );
+        assert_eq!(
+            win_provider.helper_for_uri("https://exact.example.com/x"),
+            Some("C:/my/ws")
+        );
+        assert_eq!(
+            win_provider.helper_for_uri("https://sub.example.com/x"),
+            Some("C:/my/ws/tools/wild.exe")
+        );
+        assert_eq!(
+            win_provider.helper_for_uri("https://unrelated.io/x"),
+            Some("C:/my/ws/tools/default.bat")
+        );
+        assert_eq!(
+            expand_credential_helper_path(
+                r"%workspace%\tools\wild.exe",
+                Some(std::path::Path::new(r"C:\"))
+            ),
+            "C:/tools/wild.exe"
+        );
+        assert_eq!(
+            expand_credential_helper_path(
+                "%workspace%//tools/wild",
+                Some(std::path::Path::new("/"))
+            ),
+            "/tools/wild"
         );
     }
 }
