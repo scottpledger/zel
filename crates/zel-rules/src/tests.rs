@@ -6984,3 +6984,113 @@ consumer(name = "c", dep = ":h")
         "list(1)[Target:@@//:l1]|list(0)[]|Target(@@//:l1:fastbuild:l1)"
     );
 }
+
+#[test]
+fn registered_toolchain_bzl_error_preserves_traceback_and_skips_when_unused() {
+    let ws = Ws::new(&[
+        (
+            "types/BUILD",
+            "toolchain_type(name = \"good_type\", visibility = [\"//visibility:public\"])\n",
+        ),
+        (
+            "good_tc/defs.bzl",
+            "def _impl(ctx):\n    return [platform_common.ToolchainInfo(val = \"ok\")]\ngood_tc = rule(implementation = _impl)\n",
+        ),
+        (
+            "good_tc/BUILD",
+            "load(\":defs.bzl\", \"good_tc\")\ngood_tc(name = \"impl\")\ntoolchain(name = \"tc\", toolchain = \":impl\", toolchain_type = \"//types:good_type\")\n",
+        ),
+        (
+            "bad_tc/defs.bzl",
+            "def _impl(ctx):\n    pass\n\nresolved_toolchain = rule(\n    implementation = _impl,\n    toolchains = [\"//types:good_type\"],\n    incompatible_use_toolchain_transition = True,\n)\n",
+        ),
+        (
+            "bad_tc/BUILD",
+            "load(\":defs.bzl\", \"resolved_toolchain\")\nresolved_toolchain(name = \"resolved\")\n",
+        ),
+        (
+            "user/defs.bzl",
+            r#"
+def _needs_good(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ctx.toolchains["//types:good_type"].val)
+    return [DefaultInfo(files = depset([out]))]
+
+needs_good = rule(implementation = _needs_good, toolchains = ["//types:good_type"])
+
+def _no_tc(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "none")
+    return [DefaultInfo(files = depset([out]))]
+
+no_tc = rule(implementation = _no_tc)
+"#,
+        ),
+        (
+            "user/BUILD",
+            "load(\":defs.bzl\", \"needs_good\", \"no_tc\")\nneeds_good(name = \"use_good\")\nno_tc(name = \"use_none\")\n",
+        ),
+    ]);
+
+    let make_acfg = || {
+        let mut acfg = AnalysisConfig::new();
+        acfg.toolchain_patterns = vec!["//good_tc:all".to_string(), "//bad_tc:all".to_string()];
+        acfg
+    };
+
+    // Target requiring no toolchains succeeds even when a broken toolchain is registered.
+    let (r_ok, cfg_ok) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        make_acfg(),
+    );
+    assert!(r_ok
+        .analyze(&Label::parse_canonical("//user:use_none").unwrap(), &cfg_ok)
+        .is_ok());
+
+    // Target requiring a toolchain validates registered toolchains and preserves the Starlark
+    // traceback for `rule() got unexpected keyword argument 'incompatible_use_toolchain_transition'`.
+    let (r_bad, cfg_bad) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        make_acfg(),
+    );
+    let err = r_bad
+        .analyze(
+            &Label::parse_canonical("//user:use_good").unwrap(),
+            &cfg_bad,
+        )
+        .unwrap_err();
+    assert!(
+        err.contains("Traceback (most recent call last):"),
+        "expected Starlark traceback, got:\n{err}"
+    );
+    assert!(
+        err.contains(
+            "Error in rule: rule() got unexpected keyword argument 'incompatible_use_toolchain_transition'"
+        ),
+        "expected rule() kwarg error, got:\n{err}"
+    );
+    assert!(
+        err.contains(
+            "invalid registered toolchain '//bad_tc:all': error loading package 'bad_tc': initialization of module 'bad_tc/defs.bzl' failed"
+        ),
+        "expected invalid registered toolchain summary, got:\n{err}"
+    );
+
+    // `analysis_failure` renders each line cleanly without double `ERROR: ERROR:` prefixes.
+    let rep = crate::failure::analysis_failure(
+        &err,
+        &Label::parse_canonical("//user:use_good").unwrap(),
+        &cfg_bad.short_hash(),
+        &|_| Some("/ws/user/BUILD:2:11".to_string()),
+    );
+    let rendered = rep.events.join("\n");
+    assert!(!rendered.contains("ERROR: ERROR:"), "{rendered}");
+    assert!(
+        rendered.contains("ERROR: Traceback (most recent call last):"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("ERROR: invalid registered toolchain '//bad_tc:all'"),
+        "{rendered}"
+    );
+}

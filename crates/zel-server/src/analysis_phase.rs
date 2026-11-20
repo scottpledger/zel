@@ -784,13 +784,24 @@ impl BlazeRuntime {
                         .map(|l| format!("{l}: "))
                         .unwrap_or_default();
                     let l = r.label.canonical_form();
-                    writeln_bytes(
-                        stderr,
-                        &format!(
-                            "ERROR: {loc}While resolving toolchains for target {l} ({}): {e}",
-                            key.short_hash()
-                        ),
-                    );
+                    if let Some((prefix, last)) = e.rsplit_once("\nERROR: ") {
+                        writeln_bytes(stderr, prefix);
+                        writeln_bytes(
+                            stderr,
+                            &format!(
+                                "ERROR: {loc}While resolving toolchains for target {l} ({}): {last}",
+                                key.short_hash()
+                            ),
+                        );
+                    } else {
+                        writeln_bytes(
+                            stderr,
+                            &format!(
+                                "ERROR: {loc}While resolving toolchains for target {l} ({}): {e}",
+                                key.short_hash()
+                            ),
+                        );
+                    }
                     writeln_bytes(
                         stderr,
                         &format!("ERROR: Analysis of target '{l}' failed; build aborted"),
