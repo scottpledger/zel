@@ -1004,6 +1004,10 @@ impl ParsedCommandOptions {
                         "Expected value after {arg}"
                     )));
                 }
+                if lenient && def.name == "config" && args[i + 1].starts_with('-') {
+                    i += 1;
+                    continue;
+                }
                 (args[i + 1].clone(), 2)
             };
             let command_line_form = if consumed == 2 {
@@ -2182,5 +2186,33 @@ mod tests {
             p.get_str("bes_results_url"),
             Some("https://app.buildbuddy.io/invocation/")
         );
+    }
+
+    #[test]
+    fn test_best_effort_bare_config_preserves_following_flag() {
+        let with_rc: Vec<String> = vec![
+            "--rc_source=/ws/.bazelrc",
+            "--default_override=0:build:ci=--jobs=4",
+            "--config",
+            "--bes_backend=grpc://127.0.0.1:1985",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(ParsedCommandOptions::parse_for_command("build", &with_rc).is_err());
+        let p = ParsedCommandOptions::parse_for_command_best_effort("build", &with_rc);
+        assert_eq!(p.get_str("bes_backend"), Some("grpc://127.0.0.1:1985"));
+
+        let without_rc: Vec<String> = vec![
+            "--config",
+            "--bes_backend=grpc://127.0.0.1:1985",
+            "--totally_unknown_flag",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert!(ParsedCommandOptions::parse_for_command("build", &without_rc).is_err());
+        let p = ParsedCommandOptions::parse_for_command_best_effort("build", &without_rc);
+        assert_eq!(p.get_str("bes_backend"), Some("grpc://127.0.0.1:1985"));
     }
 }

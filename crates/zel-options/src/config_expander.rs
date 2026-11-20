@@ -376,9 +376,14 @@ fn expand_configs_recursive(
         };
 
         if let Some((cfg, consumed)) = config_name {
+            let skip_on_lenient_err = if consumed == 2 && cfg.starts_with('-') {
+                1
+            } else {
+                consumed
+            };
             if config_ancestor_set.contains(&cfg) {
                 if lenient {
-                    i += consumed;
+                    i += skip_on_lenient_err;
                     continue;
                 }
                 return Err(OptionsParsingError::new(format!(
@@ -386,8 +391,6 @@ fn expand_configs_recursive(
                     config_ancestor_set.join(", ")
                 )));
             }
-
-            *config_counts.entry(cfg.clone()).or_default() += 1;
 
             let cfg_opts = match collect_config_definition(
                 rc_config,
@@ -398,11 +401,13 @@ fn expand_configs_recursive(
             ) {
                 Ok(opts) => opts,
                 Err(_) if lenient => {
-                    i += consumed;
+                    i += skip_on_lenient_err;
                     continue;
                 }
                 Err(e) => return Err(e),
             };
+
+            *config_counts.entry(cfg.clone()).or_default() += 1;
 
             config_ancestor_set.push(cfg);
             if config_ancestor_set.len() > longest_chain.len() {
@@ -492,5 +497,27 @@ mod tests {
         assert!(err
             .message
             .contains("Config expansion has a cycle: config value foo expands to itself"));
+    }
+
+    #[test]
+    fn test_lenient_bare_config_preserves_following_flag() {
+        let mut config = BazelrcConfig::default();
+        config.sections.insert(
+            "build:ci".to_string(),
+            vec![("--jobs=4".to_string(), "rc".to_string())],
+        );
+
+        let cli = vec![
+            "--config".to_string(),
+            "--bes_backend=grpc://127.0.0.1:1985".to_string(),
+        ];
+        assert_eq!(
+            expand_cli_configs_only_best_effort(&config, "build", &cli),
+            vec!["--bes_backend=grpc://127.0.0.1:1985"]
+        );
+        assert_eq!(
+            expand_command_args_best_effort(&config, "build", &cli),
+            vec!["--bes_backend=grpc://127.0.0.1:1985"]
+        );
     }
 }

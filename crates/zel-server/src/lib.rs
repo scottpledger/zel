@@ -233,6 +233,32 @@ pub struct BlazeRuntime {
     pub(crate) eval_memo: Mutex<(String, std::collections::HashSet<String>, bool)>,
 }
 
+fn command_uses_external_repos(command: &str) -> bool {
+    matches!(
+        command,
+        "build" | "test" | "coverage" | "run" | "query" | "cquery" | "aquery"
+    )
+}
+
+fn command_checks_downloader_config(command: &str) -> bool {
+    matches!(
+        command,
+        "aquery"
+            | "build"
+            | "config"
+            | "coverage"
+            | "cquery"
+            | "fetch"
+            | "info"
+            | "mod"
+            | "print_action"
+            | "query"
+            | "run"
+            | "test"
+            | "vendor"
+    )
+}
+
 impl BlazeRuntime {
     pub fn new(dirs: BlazeDirectories, fs: Arc<dyn FileSystem>, server_pid: u32) -> Self {
         // The `genquery` rule evaluates its query with the query engine.
@@ -517,10 +543,7 @@ impl BlazeRuntime {
         };
 
         // External repositories (Bzlmod) are resolved lazily for commands that load packages.
-        let uses_external_repos = matches!(
-            command,
-            "build" | "test" | "coverage" | "run" | "query" | "cquery" | "aquery"
-        );
+        let uses_external_repos = command_uses_external_repos(command);
         // The Bazel server runs one build-family command at a time (this runtime's resolver slot
         // is per command).
         let _command_guard = uses_external_repos
@@ -553,33 +576,18 @@ impl BlazeRuntime {
             } else {
                 None
             };
-        let downloader_config_error: Option<String> = if !defer_early_checks_to_observer
-            && matches!(
-                command,
-                "aquery"
-                    | "build"
-                    | "config"
-                    | "coverage"
-                    | "cquery"
-                    | "fetch"
-                    | "info"
-                    | "mod"
-                    | "print_action"
-                    | "query"
-                    | "run"
-                    | "test"
-                    | "vendor"
-            ) {
-            zel_bzlmod::session::check_downloader_config_with_env(
-                command,
-                cmd_args,
-                std::path::Path::new(self.dirs.workspace_dir.path_string()),
-                &client_env,
-            )
-            .err()
-        } else {
-            None
-        };
+        let downloader_config_error: Option<String> =
+            if !defer_early_checks_to_observer && command_checks_downloader_config(command) {
+                zel_bzlmod::session::check_downloader_config_with_env(
+                    command,
+                    cmd_args,
+                    std::path::Path::new(self.dirs.workspace_dir.path_string()),
+                    &client_env,
+                )
+                .err()
+            } else {
+                None
+            };
         if downloader_config_error.is_none()
             && module_resolution_failure.is_none()
             && not_in_workspace.is_none()
@@ -846,19 +854,23 @@ impl BlazeRuntime {
         args: &[String],
         stderr: &mut Vec<u8>,
     ) -> Option<ExitCode> {
-        let client_env = self.client_env();
-        if let Err(err) = zel_bzlmod::session::check_downloader_config_with_env(
-            command,
-            args,
-            std::path::Path::new(self.dirs.workspace_dir.path_string()),
-            &client_env,
-        ) {
-            crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
-            writeln_bytes(stderr, &format!("ERROR: {err}"));
-            return Some(ExitCode::COMMAND_LINE_ERROR);
+        if command_checks_downloader_config(command) {
+            let client_env = self.client_env();
+            if let Err(err) = zel_bzlmod::session::check_downloader_config_with_env(
+                command,
+                args,
+                std::path::Path::new(self.dirs.workspace_dir.path_string()),
+                &client_env,
+            ) {
+                crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
+                writeln_bytes(stderr, &format!("ERROR: {err}"));
+                return Some(ExitCode::COMMAND_LINE_ERROR);
+            }
         }
-        if let Err(code) = self.repo_resolver.open_now() {
-            return Some(self.format_module_resolution_failure(command, code, stderr));
+        if command_uses_external_repos(command) {
+            if let Err(code) = self.repo_resolver.open_now() {
+                return Some(self.format_module_resolution_failure(command, code, stderr));
+            }
         }
         None
     }

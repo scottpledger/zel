@@ -3282,4 +3282,56 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn mobile_install_skips_early_repo_and_downloader_checks() {
+        let root = std::env::temp_dir().join(format!(
+            "zel-mobile-install-no-early-checks-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("p")).unwrap();
+        // Deliberately invalid MODULE.bazel so `open_now()` fails if called.
+        std::fs::write(ws.join("MODULE.bazel"), "def broken(\n").unwrap();
+        std::fs::write(
+            ws.join("p/mi.bzl"),
+            "def _impl(target, ctx):\n    return []\nMIASPECT = aspect(implementation = _impl)\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("p/BUILD"),
+            "exports_files([\"mi.bzl\"])\nfilegroup(name = \"app\", srcs = [])\n",
+        )
+        .unwrap();
+
+        let rt = runtime(&root, &ws);
+
+        // First run `build` to install the broken MODULE.bazel into `rt.repo_resolver` so any
+        // accidental `open_now()` call from a subsequent `mobile-install` would fail.
+        let (build_code, build_err, _) = run(&rt, &["build", "//p:app"]);
+        assert_eq!(build_code, 48, "{build_err}");
+
+        // `mobile-install` is neither in `uses_external_repos` nor in the downloader config check
+        // command set, so neither `--downloader_config=does_not_exist.cfg` nor the broken
+        // MODULE.bazel should fail it.
+        let (mi_code, mi_err, _) = run(
+            &rt,
+            &[
+                "mobile-install",
+                "--downloader_config=does_not_exist.cfg",
+                "--mobile_install_aspect=//p:mi.bzl",
+                "--mobile_install_supported_rules=filegroup",
+                "--nobuild",
+                "//p:app",
+            ],
+        );
+        assert_eq!(mi_code, 0, "{mi_err}");
+        assert!(
+            !mi_err.contains("downloader") && !mi_err.contains("main repository mapping"),
+            "mobile-install should not run downloader or repo checks: {mi_err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
