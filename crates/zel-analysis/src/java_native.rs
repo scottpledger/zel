@@ -873,7 +873,7 @@ fn java_register_compile(
         arguments.push(CommandLineArgs { args: rest.to_vec(), param_file: None });
     }
     arguments.push(CommandLineArgs { args: flag_line, param_file: Some(param_info()) });
-    let classpath_arg_index = arguments.iter().filter(|a| a.param_file.is_some()).count();
+    let classpath_arg_index = arguments.len();
     if !classpath.is_empty() || mode != "OFF" {
         let mut cpl = JCmd::default();
         cpl.exec_paths("--classpath", &classpath);
@@ -1536,4 +1536,176 @@ fn java_gen_jar_action(
     a.use_default_shell_env = true;
     st.register(a)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod java_compile_lowering_tests {
+    use super::*;
+    use crate::ActionAnalysisMetadata;
+
+    struct NoopResolver;
+
+    impl DepResolver for NoopResolver {
+        fn configured_target(
+            &self,
+            _label: &Label,
+            _cfg: &BuildConfigurationKey,
+        ) -> Result<Arc<ConfiguredTarget>, String> {
+            Err("unexpected dependency lookup".into())
+        }
+    }
+
+    fn test_ctx_state(label: &Label) -> Arc<CtxState> {
+        let rule = RuleInstance {
+            label: label.clone(),
+            rule_class: "java_library".into(),
+            attrs: BTreeMap::new(),
+            srcs: Vec::new(),
+            deps: Vec::new(),
+            outs: Vec::new(),
+            tools: Vec::new(),
+            data: Vec::new(),
+            visibility: Vec::new(),
+            cmd: None,
+            executable: false,
+            testonly: false,
+            extra: Default::default(),
+        };
+        let empty_struct = Value::Struct(Arc::new(StructValue::new(BTreeMap::new())));
+        Arc::new(CtxState {
+            rule,
+            label: label.clone(),
+            cfg: BuildConfigurationKey::default(),
+            inputs: AnalysisInputs::new(Arc::new(NoopResolver)),
+            pkg_dir: PathFragment::create("pkg"),
+            output_to_genfiles: false,
+            exec_groups: BTreeSet::new(),
+            deps: BTreeMap::new(),
+            attr_struct: empty_struct.clone(),
+            file_struct: empty_struct.clone(),
+            files_struct: empty_struct.clone(),
+            executable_struct: empty_struct.clone(),
+            outputs_struct: empty_struct,
+            predeclared: Vec::new(),
+            default_executable: None,
+            default_executable_accessed: Mutex::new(false),
+            actions: Mutex::new(Vec::new()),
+            graph: Mutex::new(ActionGraph::new()),
+            declared_trees: Mutex::new(BTreeSet::new()),
+            declared_files: Mutex::new(BTreeSet::new()),
+            declared_artifacts: Mutex::new(Vec::new()),
+            rule_errors: Mutex::new(Vec::new()),
+            make_vars: BTreeMap::new(),
+            frozen: Mutex::new(false),
+            rule_struct: None,
+            aspect_ids: Vec::new(),
+            aspect_fragments: Vec::new(),
+            aspect_toolchains_declared: Vec::new(),
+            base_toolchains: BTreeMap::new(),
+            base_exec_groups: BTreeSet::new(),
+            base_exec_group_toolchains: BTreeMap::new(),
+            base_exec_group_platforms: BTreeMap::new(),
+            split_attr: Value::None,
+            in_subrule: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn java_register_compile_classpath_arg_index_accounts_for_leading_jvm_args() {
+        let label = Label::parse_canonical("//pkg:lib").unwrap();
+        let st = test_ctx_state(&label);
+        let out_jar = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/liblib.jar"),
+            label.clone(),
+        );
+        let jdeps = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/liblib.jdeps"),
+            label.clone(),
+        );
+        let dep_jar = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/libdep.jar"),
+            label.clone(),
+        );
+        let dep_jdeps = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/libdep.jdeps"),
+            label.clone(),
+        );
+        let src = Artifact::source(PathFragment::create("pkg/A.java"), label);
+
+        java_register_compile(
+            &st,
+            "Javac",
+            &[
+                "external/jdk/bin/java".into(),
+                "-Xms64m".into(),
+                "-jar".into(),
+                "JavaBuilder.jar".into(),
+            ],
+            vec![
+                "--output".into(),
+                out_jar.exec_path.path_string().to_string(),
+                "--sources".into(),
+                src.exec_path.path_string().to_string(),
+            ],
+            vec![dep_jar.clone()],
+            vec![dep_jar],
+            vec![dep_jdeps],
+            Vec::new(),
+            vec![src],
+            Vec::new(),
+            vec![out_jar.clone(), jdeps.clone()],
+            Some(jdeps),
+            "BAZEL",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "Building pkg/liblib.jar".into(),
+        )
+        .unwrap();
+
+        let actions = st.actions.lock().unwrap();
+        assert_eq!(actions.len(), 1);
+        let lowered = actions[0].lower();
+        assert_eq!(lowered.len(), 2, "{lowered:?}");
+
+        let flags_params = format!("{}-0.params", out_jar.exec_path.path_string());
+        let cp_params = format!("{}-1.params", out_jar.exec_path.path_string());
+
+        match &lowered[0] {
+            ActionAnalysisMetadata::FileWriteAction {
+                output, content, ..
+            } => {
+                assert_eq!(output.exec_path.path_string(), flags_params);
+                let text = std::str::from_utf8(content).unwrap();
+                assert!(text.contains("--output\n"), "{text}");
+                assert!(text.contains("--sources\n"), "{text}");
+            }
+            other => panic!("expected FileWriteAction for flags params, got {other:?}"),
+        }
+
+        match &lowered[1] {
+            ActionAnalysisMetadata::SpawnAction {
+                argv, java_compile, ..
+            } => {
+                assert_eq!(
+                    argv,
+                    &vec![
+                        "external/jdk/bin/java".to_string(),
+                        "-Xms64m".to_string(),
+                        "-jar".to_string(),
+                        "JavaBuilder.jar".to_string(),
+                        format!("@{flags_params}"),
+                        format!("@{cp_params}"),
+                    ]
+                );
+                let jc = java_compile.as_ref().expect("expected JavaCompileSpec");
+                assert_eq!(jc.classpath_arg_index, 2);
+                assert_eq!(jc.classpath_params_path, cp_params);
+            }
+            other => panic!("expected SpawnAction, got {other:?}"),
+        }
+    }
 }

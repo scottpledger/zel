@@ -531,7 +531,7 @@ fn fragment_value(st: &CtxState, name: &str) -> Result<Value, StarlarkError> {
     }
     match name {
         "coverage" => Ok(mk_struct(vec![("collect_code_coverage", Value::Bool(coverage_enabled(&st.cfg)))])),
-        other => match crate::fragments::fragment_checked(other, &st.cfg) {
+        other => match crate::fragments::fragment(other, &st.cfg) {
             Ok(Some(v)) => Ok(v),
             Ok(None) => err(format!("unknown configuration fragment '{other}'")),
             Err(e) => err(e),

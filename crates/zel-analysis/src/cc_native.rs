@@ -638,6 +638,18 @@ fn cc_create_compile_action_template(st: &Arc<CtxState>, pos: &[Value], kw: &BTr
     let argv = cc_filtered_compile_argv(&fc, &action_name, &vars, copts_filter)?;
     let exec_reqs = cc_build_exec_reqs(&fc, &action_name, cc_kw(pos, kw, 100, "execution_requirements"));
     let env = cc_build_compile_env(&fc, &action_name, &vars, &exec_reqs)?;
+    let param_file = if fc.is_enabled("compiler_param_file") {
+        Some(crate::action::ParamFileInfo {
+            flag_format: "@%s".to_string(),
+            format: ParamFileFormat::GccQuoted,
+            use_always: true,
+            leading_args: 0,
+            flag_groups: Vec::new(),
+            explicit_path: Some(format!("{}.params", output_tree.exec_path.path_string())),
+        })
+    } else {
+        None
+    };
     let mut outputs = vec![output_tree];
     if let Some(dotd_tree) = cc_kw(pos, kw, 100, "dotd_tree_artifact")
         .or_else(|| cc_kw(pos, kw, 100, "dotd_file"))
@@ -672,7 +684,7 @@ fn cc_create_compile_action_template(st: &Arc<CtxState>, pos: &[Value], kw: &BTr
         cc_default_compile_mnemonic(&action_name),
         ActionKind::Spawn {
             executable: tool,
-            arguments: vec![CommandLineArgs { args: argv, param_file: None }],
+            arguments: vec![CommandLineArgs { args: argv, param_file }],
             shell_command: None,
         },
     );
@@ -711,18 +723,6 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
     let argv = fc.command_line(action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
     let exec_reqs = cc_build_exec_reqs(&fc, action_name, None);
     let env = cc_build_compile_env(&fc, action_name, &vars, &exec_reqs)?;
-    let param_file = if fc.is_enabled("compiler_param_file") {
-        Some(crate::action::ParamFileInfo {
-            flag_format: "@%s".to_string(),
-            format: ParamFileFormat::GccQuoted,
-            use_always: true,
-            leading_args: 0,
-            flag_groups: Vec::new(),
-            explicit_path: Some(format!("{}.params", object_file.exec_path.path_string())),
-        })
-    } else {
-        None
-    };
     let mut outputs = vec![object_file.clone()];
     if let Some(dwo) = cc_kw(pos, kw, 100, "dwo_file").and_then(artifact_of) {
         outputs.push(dwo);
@@ -745,7 +745,7 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
         "CcLtoBackendCompile",
         ActionKind::Spawn {
             executable: tool,
-            arguments: vec![CommandLineArgs { args: argv, param_file }],
+            arguments: vec![CommandLineArgs { args: argv, param_file: None }],
             shell_command: None,
         },
     );
@@ -1495,6 +1495,334 @@ mod cc_native_tests {
                 .contains("Cannot expand variable 'linker_param_file': expected string"),
             "{}",
             seq_err.0
+        );
+    }
+
+    struct EmptyDepResolver;
+
+    impl DepResolver for EmptyDepResolver {
+        fn configured_target(
+            &self,
+            _label: &Label,
+            _cfg: &BuildConfigurationKey,
+        ) -> Result<Arc<ConfiguredTarget>, String> {
+            Err("unexpected dependency lookup".into())
+        }
+    }
+
+    fn cc_test_ctx_state(label: &Label) -> Arc<CtxState> {
+        let rule = RuleInstance {
+            label: label.clone(),
+            rule_class: "cc_library".into(),
+            attrs: BTreeMap::new(),
+            srcs: Vec::new(),
+            deps: Vec::new(),
+            outs: Vec::new(),
+            tools: Vec::new(),
+            data: Vec::new(),
+            visibility: Vec::new(),
+            cmd: None,
+            executable: false,
+            testonly: false,
+            extra: Default::default(),
+        };
+        let empty_struct = Value::Struct(Arc::new(StructValue::new(BTreeMap::new())));
+        Arc::new(CtxState {
+            rule,
+            label: label.clone(),
+            cfg: BuildConfigurationKey::default(),
+            inputs: AnalysisInputs::new(Arc::new(EmptyDepResolver)),
+            pkg_dir: PathFragment::create("pkg"),
+            output_to_genfiles: false,
+            exec_groups: BTreeSet::new(),
+            deps: BTreeMap::new(),
+            attr_struct: empty_struct.clone(),
+            file_struct: empty_struct.clone(),
+            files_struct: empty_struct.clone(),
+            executable_struct: empty_struct.clone(),
+            outputs_struct: empty_struct,
+            predeclared: Vec::new(),
+            default_executable: None,
+            default_executable_accessed: Mutex::new(false),
+            actions: Mutex::new(Vec::new()),
+            graph: Mutex::new(ActionGraph::new()),
+            declared_trees: Mutex::new(BTreeSet::new()),
+            declared_files: Mutex::new(BTreeSet::new()),
+            declared_artifacts: Mutex::new(Vec::new()),
+            rule_errors: Mutex::new(Vec::new()),
+            make_vars: BTreeMap::new(),
+            frozen: Mutex::new(false),
+            rule_struct: None,
+            aspect_ids: Vec::new(),
+            aspect_fragments: Vec::new(),
+            aspect_toolchains_declared: Vec::new(),
+            base_toolchains: BTreeMap::new(),
+            base_exec_groups: BTreeSet::new(),
+            base_exec_group_toolchains: BTreeMap::new(),
+            base_exec_group_platforms: BTreeMap::new(),
+            split_attr: Value::None,
+            in_subrule: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn compile_action_template_honors_compiler_param_file_and_lto_backends_stay_inline() {
+        let label = Label::parse_canonical("//pkg:tree_cc").unwrap();
+        let tool = test_struct(vec![("path", Value::String("/usr/bin/gcc".into()))]);
+        let compile_ac = test_struct(vec![
+            ("action_name", Value::String("c++-compile".into())),
+            ("enabled", Value::Bool(true)),
+            ("tools", mk_list(vec![tool.clone()])),
+        ]);
+        let lto_ac = test_struct(vec![
+            ("action_name", Value::String("lto-backend".into())),
+            ("enabled", Value::Bool(true)),
+            ("tools", mk_list(vec![tool])),
+        ]);
+        let compile_fg = test_struct(vec![(
+            "flags",
+            mk_list(vec![Value::String("-O2".into()), Value::String("-Wall".into())]),
+        )]);
+        let compile_fs = test_struct(vec![
+            (
+                "actions",
+                mk_list(vec![
+                    Value::String("c++-compile".into()),
+                    Value::String("lto-backend".into()),
+                ]),
+            ),
+            ("flag_groups", mk_list(vec![compile_fg])),
+        ]);
+        let flags_feat = test_struct(vec![
+            ("name", Value::String("compile_flags".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![compile_fs])),
+        ]);
+        let pf_feat = test_struct(vec![
+            ("name", Value::String("compiler_param_file".into())),
+            ("enabled", Value::Bool(false)),
+        ]);
+
+        let tf = Arc::new(
+            ToolchainFeatures::new(
+                &[flags_feat, pf_feat],
+                &[compile_ac, lto_ac],
+                &[],
+                "",
+                &|_| None,
+            )
+            .unwrap(),
+        );
+        let mut with_pf = tf.default_features_and_action_configs();
+        with_pf.push("compiler_param_file".into());
+        let fc_pf = cc_features::register(
+            cc_features::KIND_FEATURE_CONFIGURATION,
+            tf.configure(&with_pf).unwrap(),
+        );
+        let fc_no_pf = cc_features::register(
+            cc_features::KIND_FEATURE_CONFIGURATION,
+            tf.configure(&tf.default_features_and_action_configs()).unwrap(),
+        );
+        let vars = cc_features::make_variables(None, BTreeMap::new());
+
+        let mut src_tree = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/gen_srcs"),
+            label.clone(),
+        );
+        src_tree.is_tree_artifact = true;
+        let mut out_tree_pf = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/gen_objs_pf"),
+            label.clone(),
+        );
+        out_tree_pf.is_tree_artifact = true;
+        let mut out_tree_inline = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/gen_objs_inline"),
+            label.clone(),
+        );
+        out_tree_inline.is_tree_artifact = true;
+        let mut lto_out_tree = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/lto_objs"),
+            label.clone(),
+        );
+        lto_out_tree.is_tree_artifact = true;
+
+        // 1. `CppCompileActionTemplate` with `compiler_param_file` enabled emits `<output>.params`.
+        let st = cc_test_ctx_state(&label);
+        cc_create_compile_action_template(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc_pf.clone()),
+                ("compile_build_variables".to_string(), vars.clone()),
+                ("source".to_string(), file_value(&src_tree)),
+                ("output_files".to_string(), file_value(&out_tree_pf)),
+                ("action_name".to_string(), Value::String("c++-compile".into())),
+            ]),
+        )
+        .unwrap();
+
+        // 2. `CppCompileActionTemplate` without `compiler_param_file` keeps flags inline.
+        cc_create_compile_action_template(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc_no_pf),
+                ("compile_build_variables".to_string(), vars.clone()),
+                ("source".to_string(), file_value(&src_tree)),
+                ("output_files".to_string(), file_value(&out_tree_inline)),
+                ("action_name".to_string(), Value::String("c++-compile".into())),
+            ]),
+        )
+        .unwrap();
+
+        // 3. `LtoBackendArtifacts.getLtoBackendCommandLine` in Bazel 9.3.2 never uses `compiler_param_file`.
+        let bc_file = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/a.bc"),
+            label.clone(),
+        );
+        let obj_file = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/a.o"),
+            label.clone(),
+        );
+        cc_create_lto_backend_action(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc_pf.clone()),
+                ("build_variables".to_string(), vars.clone()),
+                ("bitcode_file".to_string(), file_value(&bc_file)),
+                ("object_file".to_string(), file_value(&obj_file)),
+            ]),
+        )
+        .unwrap();
+
+        let mut bc_tree = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/bc_tree"),
+            label.clone(),
+        );
+        bc_tree.is_tree_artifact = true;
+        cc_create_lto_backend_action_template(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc_pf),
+                ("build_variables".to_string(), vars),
+                ("bitcode_file".to_string(), file_value(&bc_tree)),
+                ("object_file".to_string(), file_value(&lto_out_tree)),
+            ]),
+        )
+        .unwrap();
+
+        let actions = st.actions.lock().unwrap();
+        assert_eq!(actions.len(), 4);
+
+        match &actions[0].kind {
+            ActionKind::Spawn { arguments, .. } => {
+                let pf = arguments[0].param_file.as_ref().expect("expected param_file");
+                assert_eq!(pf.format, ParamFileFormat::GccQuoted);
+                assert!(pf.use_always);
+                assert_eq!(
+                    pf.explicit_path.as_deref(),
+                    Some("bazel-out/k8-fastbuild/bin/pkg/gen_objs_pf.params")
+                );
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+        match &actions[1].kind {
+            ActionKind::Spawn { arguments, .. } => {
+                assert!(arguments[0].param_file.is_none());
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+        match &actions[2].kind {
+            ActionKind::Spawn { arguments, .. } => {
+                assert!(arguments[0].param_file.is_none());
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+        match &actions[3].kind {
+            ActionKind::Spawn { arguments, .. } => {
+                assert!(arguments[0].param_file.is_none());
+            }
+            other => panic!("expected Spawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn declared_rule_fragments_surface_validation_errors_during_analysis() {
+        let mut ectx = EvalContext::default();
+        ectx.eval_str("def _impl(ctx):\n    return []\n").unwrap();
+        let impl_fn = ectx.globals.get("_impl").cloned().unwrap();
+        let spec = Arc::new(StarlarkRuleSpec {
+            implementation: impl_fn,
+            kwargs: BTreeMap::from([(
+                "fragments".to_string(),
+                mk_list(vec![Value::String("cpp".into())]),
+            )]),
+            defined_in: "//pkg:defs.bzl".into(),
+            definition_digest: String::new(),
+            definition_stack: Vec::new(),
+            initializers: Vec::new(),
+            build_setting_flag: false,
+        });
+        let rc = Arc::new(zel_packages::RuleClass {
+            name: "my_cpp_rule".into(),
+            attrs: BTreeMap::new(),
+            attr_order: Vec::new(),
+            implicit: BTreeMap::new(),
+            is_test: false,
+            is_executable: false,
+            open: false,
+            implicit_outputs: Vec::new(),
+            outputs_fn: None,
+            is_starlark: true,
+            build_setting: false,
+            build_setting_is_flag: false,
+            starlark: Some(spec),
+        });
+        let label = Label::parse_canonical("//pkg:t").unwrap();
+        let rule = RuleInstance {
+            label,
+            rule_class: "my_cpp_rule".into(),
+            attrs: BTreeMap::new(),
+            srcs: Vec::new(),
+            deps: Vec::new(),
+            outs: Vec::new(),
+            tools: Vec::new(),
+            data: Vec::new(),
+            visibility: Vec::new(),
+            cmd: None,
+            executable: false,
+            testonly: false,
+            extra: zel_packages::RuleExtra {
+                rule_class: Some(rc),
+                ..Default::default()
+            },
+        };
+        let mut bad_cfg = BuildConfigurationKey::default();
+        bad_cfg.native.insert(
+            "fdo_instrument".into(),
+            crate::NativeSetting {
+                raw: "prof".into(),
+                value: crate::build_options::ConfigValue::Scalar("prof".into()),
+            },
+        );
+        let err = analyze_starlark_rule(
+            &rule,
+            &bad_cfg,
+            AnalysisInputs::new(Arc::new(EmptyDepResolver)),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Cannot instrument FDO without --copt=-Wno-error"),
+            "{err}"
         );
     }
 }

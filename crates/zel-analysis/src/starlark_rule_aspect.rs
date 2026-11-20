@@ -391,6 +391,9 @@ fn apply_aspect_path(
             in_subrule: std::sync::atomic::AtomicBool::new(false),
         });
 
+        crate::fragments::validate_declared_fragments(&declared_fragments(&st), &st.cfg)
+            .map_err(wrap)?;
+
         // 4. Run the implementation: `impl(target, ctx)`.
         let mut ectx = EvalContext::new(pkg_dir.clone(), None);
         ectx.semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;

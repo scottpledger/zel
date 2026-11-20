@@ -356,14 +356,6 @@ pub fn attempt_inputs(
     out
 }
 
-fn push_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(((v as u8) & 0x7f) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
 fn strip_cfg_segment(p: &str) -> Option<String> {
     let rest = p.strip_prefix("bazel-out/")?;
     let (_, after_cfg) = rest.split_once('/')?;

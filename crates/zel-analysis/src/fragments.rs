@@ -386,9 +386,23 @@ pub fn direct_dependencies_violation_msg(label: &Label) -> String {
     )
 }
 
-/// The Starlark value of fragment `name` in `cfg`; `None` for unknown fragments.
-pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Option<Value> {
-    fragment_checked(name, cfg).ok().flatten()
+/// The Starlark value of fragment `name` in `cfg`; `Ok(None)` for unknown fragments,
+/// or `Err` when the configuration options for `name` are invalid.
+pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Result<Option<Value>, String> {
+    fragment_checked(name, cfg)
+}
+
+/// Validates all configuration fragments declared by a rule or aspect (`fragments = [...]`).
+pub fn validate_declared_fragments(
+    fragments: &[String],
+    cfg: &BuildConfigurationKey,
+) -> Result<(), String> {
+    for name in fragments {
+        if name != "coverage" {
+            fragment_checked(name, cfg)?;
+        }
+    }
+    Ok(())
 }
 
 /// Parses Bazel's `--grte_top` (`LibcTopLabelConverter`): `"default"` or `""` -> `None`,
@@ -1521,6 +1535,45 @@ mod tests {
         assert_eq!(
             struct_field(&py_no, "build_python_zip"),
             &Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn fragment_helper_and_declared_fragments_surface_validation_errors() {
+        let ok_cfg = BuildConfigurationKey::default();
+        assert!(fragment("unknown_fragment", &ok_cfg).unwrap().is_none());
+        assert!(fragment("cpp", &ok_cfg).unwrap().is_some());
+
+        let mut bad_fdo = BuildConfigurationKey::default();
+        set_scalar(&mut bad_fdo, "fdo_instrument", "prof_a");
+        set_scalar(&mut bad_fdo, "cs_fdo_instrument", "prof_b");
+        let fdo_err = fragment("cpp", &bad_fdo).unwrap_err();
+        assert!(
+            fdo_err.contains("Cannot instrument both regular and CS FDO"),
+            "{fdo_err}"
+        );
+        assert_eq!(
+            validate_declared_fragments(&["coverage".into(), "cpp".into()], &bad_fdo).unwrap_err(),
+            fdo_err
+        );
+
+        let mut bad_apple = BuildConfigurationKey::default();
+        set_scalar(&mut bad_apple, "apple_platform_type", "catalyst");
+        bad_apple.native.insert(
+            "catalyst_cpus".into(),
+            crate::NativeSetting {
+                raw: "arm64".into(),
+                value: crate::build_options::ConfigValue::List(vec!["arm64".into()]),
+            },
+        );
+        let apple_err = fragment("apple", &bad_apple).unwrap_err();
+        assert!(apple_err.contains("catalyst_arm64"), "{apple_err}");
+
+        let bad_objc = BuildConfigurationKey::target("darwin_arm64", "bogus_mode");
+        let objc_err = fragment("objc", &bad_objc).unwrap_err();
+        assert!(
+            objc_err.contains("Invalid compilation mode: 'bogus_mode'"),
+            "{objc_err}"
         );
     }
 }
