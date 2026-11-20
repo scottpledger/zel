@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn test_tidy_removes_invalid_use_repo() {
         use crate::commands::run_bzlmod_command;
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
 
         let temp = std::env::temp_dir().join(format!("tidy_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);

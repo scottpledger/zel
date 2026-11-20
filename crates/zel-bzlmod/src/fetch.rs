@@ -624,7 +624,11 @@ impl Rt {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                     cache
                         .move_to_cache(dir, &marker, &fp)
-                        .map_err(|e| format!("java.io.IOException: {e}"))?;
+                        .map_err(|e| {
+                            format!(
+                                "java.io.IOException: error moving repo {canonical} into the repo contents cache: {e}"
+                            )
+                        })?;
                 }
             }
         }
@@ -915,6 +919,7 @@ impl Rt {
             _ => false,
         };
         if let Ok(ret) = &r {
+            crate::ctx::CTX_CACHE_HITS.with(|h| h.borrow_mut().clear());
             self.report_reproducible_form(
                 canonical,
                 &def.name,
@@ -1325,7 +1330,14 @@ impl Rt {
             }
         };
         // Build the `modules` list.
+        struct RecordTagMappingsGuard;
+        impl Drop for RecordTagMappingsGuard {
+            fn drop(&mut self) {
+                crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = None);
+            }
+        }
         crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = Some(vec![]));
+        let _tag_mappings_guard = RecordTagMappingsGuard;
         let mut modules = vec![];
         let mut root_has_non_dev = false;
         let mut ordered: Vec<(&ModuleKey, &ExtensionUsage)> = usages.to_vec();
@@ -1666,7 +1678,8 @@ impl Rt {
                 static_mappings.push(e);
             }
         }
-        for e in crate::rt::LOAD_LABEL_MAPPINGS.lock().unwrap().iter() {
+        let recorded_load_mappings = self.state.lock().unwrap().load_label_mappings.clone();
+        for e in &recorded_load_mappings {
             if e.0 == repo && !static_mappings.contains(e) {
                 static_mappings.push(e.clone());
             }

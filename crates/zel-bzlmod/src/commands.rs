@@ -409,11 +409,12 @@ mod tests {
         ob: PathBuf,
         reg: String,
         base: PathBuf,
+        _hermetic: crate::resolve::HermeticBazelToolsGuard,
     }
 
     fn fixture(name: &str, root: &str) -> Fx {
         // No network in unit tests: bazel_tools' real extension repos (downloads) are dropped.
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir(name);
         let reg_dir = base.join("registry");
         let mk = |n: &str, v: &str, deps: &str, files: &[(&str, &str)]| {
@@ -469,6 +470,7 @@ mod tests {
             ob: base.join("ob"),
             reg: crate::file_url_for_path(&reg_dir),
             base,
+            _hermetic: hermetic,
         }
     }
 
@@ -739,7 +741,7 @@ mod tests {
 
     #[test]
     fn archive_and_git_overrides_and_rctx_download() {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("cmd5");
         // archive-overridden module `arch`
         let src = base.join("arch-src");
@@ -851,7 +853,7 @@ mod tests {
 
     #[test]
     fn extension_facts_and_facts_version_reach_lockfile() {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("facts_test");
         let ws = base.join("ws");
         let ob = base.join("ob");
@@ -896,7 +898,7 @@ my_ext = use_extension("//:ext.bzl", "ext")
 
     #[test]
     fn repo_contents_cache_caching_and_gc() {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("rcc_test");
         let ws = base.join("ws");
         let ob = base.join("ob");
@@ -975,7 +977,7 @@ my_ext = use_extension("//:ext.bzl", "ext")
 
     #[test]
     fn test_download_block_false() {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("dl_block_false");
         let ws = base.join("ws");
         let ob = base.join("ob");
@@ -1026,7 +1028,7 @@ r(name = "my_dl")
 
     #[test]
     fn test_git_override_options_e2e() {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("git_opts_e2e");
         let ws = base.join("ws");
         let ob = base.join("ob");
@@ -1120,7 +1122,7 @@ git_override(
 
     #[test]
     fn test_fetch_targets_closure_e2e() {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("fetch_closure");
         let ws = base.join("ws");
         let ob = base.join("ob");

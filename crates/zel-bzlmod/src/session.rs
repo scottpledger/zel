@@ -664,6 +664,35 @@ fn check_repo_contents_cache_location(
 
 static OUTPUT_USER_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
+thread_local! {
+    static SCOPED_OUTPUT_USER_ROOT: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+    static SCOPED_INSTALL_BASE: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard restoring the calling thread's `output_user_root` override on drop.
+pub struct OutputUserRootGuard {
+    prev: Option<Option<PathBuf>>,
+}
+
+impl Drop for OutputUserRootGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        SCOPED_OUTPUT_USER_ROOT.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Overrides `output_user_root` for the current thread until the returned guard is dropped.
+/// Passing `None` forces fallback to `output_base.parent()` on this thread regardless of any
+/// process-wide `set_output_user_root` value.
+pub fn scoped_output_user_root(p: Option<&Path>) -> OutputUserRootGuard {
+    let next = Some(p.map(Path::to_path_buf));
+    let prev =
+        SCOPED_OUTPUT_USER_ROOT.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next));
+    OutputUserRootGuard { prev }
+}
+
 /// Records the server's `output_user_root`, below which the default repository cache
 /// (`<output_user_root>/cache/repos/v1`, `BlazeWorkspace.getCacheDir`) lives.
 pub fn set_output_user_root(p: &Path) {
@@ -672,23 +701,46 @@ pub fn set_output_user_root(p: &Path) {
 
 static INSTALL_BASE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
+/// RAII guard restoring the calling thread's `install_base` override on drop.
+pub struct InstallBaseGuard {
+    prev: Option<Option<PathBuf>>,
+}
+
+impl Drop for InstallBaseGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        SCOPED_INSTALL_BASE.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Overrides `install_base` for the current thread until the returned guard is dropped.
+pub fn scoped_install_base(p: Option<&Path>) -> InstallBaseGuard {
+    let next = Some(p.map(Path::to_path_buf));
+    let prev = SCOPED_INSTALL_BASE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next));
+    InstallBaseGuard { prev }
+}
+
 /// Records the server's install base (`@bazel_tools` is reported at `<install_base>/embedded_tools`).
 pub fn set_install_base(p: &Path) {
     *INSTALL_BASE.lock().unwrap() = Some(p.to_path_buf());
 }
 
 pub fn install_base() -> Option<PathBuf> {
+    if let Some(scoped) = SCOPED_INSTALL_BASE.with(|slot| slot.borrow().clone()) {
+        return scoped;
+    }
     INSTALL_BASE.lock().unwrap().clone()
 }
 
 /// The default repository cache: `<output_user_root>/cache/repos/v1`, falling back to the parent
 /// of the output base (the default `output_user_root` layout) before the server registered one.
 pub fn default_repository_cache(output_base: &Path) -> PathBuf {
-    let root = OUTPUT_USER_ROOT
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_else(|| output_base.parent().unwrap_or(output_base).to_path_buf());
+    let configured = match SCOPED_OUTPUT_USER_ROOT.with(|slot| slot.borrow().clone()) {
+        Some(scoped) => scoped,
+        None => OUTPUT_USER_ROOT.lock().unwrap().clone(),
+    };
+    let root =
+        configured.unwrap_or_else(|| output_base.parent().unwrap_or(output_base).to_path_buf());
     root.join("cache").join("repos").join("v1")
 }
 

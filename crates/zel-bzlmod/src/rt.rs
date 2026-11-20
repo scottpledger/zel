@@ -180,6 +180,10 @@ pub(crate) struct RtState {
     pub bzl_loads_cache: HashMap<String, Vec<String>>,
     pub rule_meta_cache: HashMap<(String, String), (bool, bool, Vec<String>)>,
     pub force_configure: bool,
+    /// `Label()` apparent-name lookups recorded while `.bzl` files load in this runtime.
+    pub load_label_mappings: Vec<(String, String, String)>,
+    /// In-flight background downloads (`block = False`) owned by this runtime.
+    pub(crate) pending_downloads: Vec<Option<crate::ctx::PendingDownload>>,
     /// Package loader used for `.bzl` files that do not define repository rules / extensions
     /// (rule definitions such as rules_cc, which need the full rule-building builtins).
     pub loader: Option<Arc<zel_packages::PackageLoader>>,
@@ -1345,10 +1349,10 @@ impl Rt {
                         .collect();
                     if active.is_empty() {
                         if let Some(r) = &resolved_canon {
-                            let mut g = LOAD_LABEL_MAPPINGS.lock().unwrap();
+                            let mut st = self.state.lock().unwrap();
                             let e = (repo.clone(), apparent.to_string(), r.clone());
-                            if !g.contains(&e) {
-                                g.push(e);
+                            if !st.load_label_mappings.contains(&e) {
+                                st.load_label_mappings.push(e);
                             }
                         }
                     }
@@ -1911,10 +1915,6 @@ pub fn path_value(p: &Path) -> Value {
     let formatted = p.display().to_string();
     Value::Host("path".into(), formatted)
 }
-
-/// `Label()` apparent-name lookups made while a `.bzl` file loads (no extension running):
-/// `(source repo, apparent name, canonical name)` — the `.bzl`'s recorded repo mapping entries.
-pub static LOAD_LABEL_MAPPINGS: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
 
 thread_local! {
     /// Set while the tag attributes of a module extension are built: label values resolved through a

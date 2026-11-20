@@ -58,30 +58,28 @@ pub struct PendingDownload {
     pub canonical: String,
 }
 
-static PENDING_DOWNLOADS: Mutex<Vec<Option<PendingDownload>>> = Mutex::new(Vec::new());
-
-fn register_pending_download(pd: PendingDownload) -> usize {
-    let mut list = PENDING_DOWNLOADS.lock().unwrap();
-    list.push(Some(pd));
-    list.len() - 1
+fn register_pending_download(rt: &Arc<Rt>, pd: PendingDownload) -> usize {
+    let mut st = rt.state.lock().unwrap();
+    st.pending_downloads.push(Some(pd));
+    st.pending_downloads.len() - 1
 }
 
-fn take_pending_download(id_str: &str) -> Result<PendingDownload, StarlarkError> {
+fn take_pending_download(rt: &Arc<Rt>, id_str: &str) -> Result<PendingDownload, StarlarkError> {
     let tok = id_str.split('|').next().unwrap_or(id_str);
     let idx: usize = tok
         .parse()
         .map_err(|_| StarlarkError("invalid pending_download id".into()))?;
-    let mut list = PENDING_DOWNLOADS.lock().unwrap();
-    if idx >= list.len() || list[idx].is_none() {
+    let mut st = rt.state.lock().unwrap();
+    if idx >= st.pending_downloads.len() || st.pending_downloads[idx].is_none() {
         return Err(StarlarkError(
             "pending_download has already completed or is invalid".into(),
         ));
     }
-    Ok(list[idx].take().unwrap())
+    Ok(st.pending_downloads[idx].take().unwrap())
 }
 
 fn wait_pending_download(rt: &Arc<Rt>, id_str: &str) -> Result<Value, StarlarkError> {
-    let mut pd = take_pending_download(id_str)?;
+    let mut pd = take_pending_download(rt, id_str)?;
     let Some(rx) = pd.receiver.take() else {
         return err("pending_download has no receiver");
     };
@@ -2160,10 +2158,13 @@ fn dispatch_object_inner(
                     };
                     let _ = tx.send(r);
                 });
-                let token = register_pending_download(PendingDownload {
-                    receiver: Some(rx),
-                    ..pd
-                });
+                let token = register_pending_download(
+                    rt,
+                    PendingDownload {
+                        receiver: Some(rx),
+                        ..pd
+                    },
+                );
                 return Ok(Value::Host(
                     "pending_download".into(),
                     format!("{}|{}", token, target.display()),

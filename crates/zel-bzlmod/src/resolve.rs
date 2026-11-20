@@ -86,6 +86,38 @@ thread_local! {
     pub(crate) static HERMETIC_BAZEL_TOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
+pub(crate) struct StrictBazelToolsGuard(bool);
+
+#[cfg(test)]
+impl Drop for StrictBazelToolsGuard {
+    fn drop(&mut self) {
+        STRICT_BAZEL_TOOLS.with(|h| h.set(self.0));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_strict_bazel_tools() -> StrictBazelToolsGuard {
+    let prev = STRICT_BAZEL_TOOLS.with(|h| h.replace(true));
+    StrictBazelToolsGuard(prev)
+}
+
+#[cfg(test)]
+pub(crate) struct HermeticBazelToolsGuard(bool);
+
+#[cfg(test)]
+impl Drop for HermeticBazelToolsGuard {
+    fn drop(&mut self) {
+        HERMETIC_BAZEL_TOOLS.with(|h| h.set(self.0));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_hermetic_bazel_tools() -> HermeticBazelToolsGuard {
+    let prev = HERMETIC_BAZEL_TOOLS.with(|h| h.replace(true));
+    HermeticBazelToolsGuard(prev)
+}
+
 #[derive(Clone)]
 pub struct ResolveOptions {
     pub workspace_root: PathBuf,

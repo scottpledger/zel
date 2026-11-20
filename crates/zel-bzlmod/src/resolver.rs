@@ -412,7 +412,12 @@ mod tests {
         let loader = PackageLoader::new(LoaderConfig::new(fs, resolver.clone()));
         let pkg = loader
             .load_package(&PackageIdentifier::create_in_main_repo("").unwrap())
-            .unwrap_or_else(|e| panic!("{e:?}"));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{e:?}; resolver errors: {:?}",
+                    resolver.errors.lock().unwrap()
+                )
+            });
         assert!(!pkg.contains_errors, "{:?}", pkg.events);
         assert!(pkg.targets.contains_key("made"));
         let g = pkg.rules().find(|r| r.label.name() == "g").unwrap();
@@ -426,9 +431,137 @@ mod tests {
                 )
                 .unwrap(),
             )
-            .unwrap_or_else(|e| panic!("{e:?}"));
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{e:?}; resolver errors: {:?}",
+                    resolver.errors.lock().unwrap()
+                )
+            });
         assert!(ext_pkg.targets.contains_key("lib"));
         assert!(resolver.errors.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn concurrent_scoped_output_user_root_does_not_leak_into_external_package_load() {
+        let base = tmpdir("resolver_isolated_user_root");
+        let src = base.join("a-src");
+        write(
+            &src,
+            "a-1.0/MODULE.bazel",
+            "module(name='a', version='1.0')\n",
+        );
+        write(
+            &src,
+            "a-1.0/BUILD.bazel",
+            "filegroup(name = 'lib', srcs = ['x.txt'], visibility = ['//visibility:public'])\n",
+        );
+        write(&src, "a-1.0/x.txt", "x");
+        write(
+            &src,
+            "a-1.0/defs.bzl",
+            "def mk(name):\n    native.filegroup(name = name, srcs = [])\n",
+        );
+        let tgz = base.join("a.tar.gz");
+        assert!(std::process::Command::new("tar")
+            .args([
+                "czf",
+                tgz.to_str().unwrap(),
+                "-C",
+                src.to_str().unwrap(),
+                "a-1.0"
+            ])
+            .status()
+            .unwrap()
+            .success());
+        let integrity = format!(
+            "sha256-{}",
+            base64_encode(&sha256(&std::fs::read(&tgz).unwrap()))
+        );
+        let reg = base.join("registry");
+        add_module(
+            &reg,
+            "a",
+            "1.0",
+            "module(name='a', version='1.0')\n",
+            &format!(
+                r#"{{"url":"{}","integrity":"{integrity}","strip_prefix":"a-1.0"}}"#,
+                crate::file_url_for_path(&tgz)
+            ),
+        );
+
+        let barrier = Arc::new(std::sync::Barrier::new(5));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handles = Vec::new();
+
+        for _ in 0..4 {
+            let barrier = Arc::clone(&barrier);
+            let done = Arc::clone(&done);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    let _guard = crate::session::scoped_output_user_root(Some(
+                        std::path::Path::new("/the/user/root"),
+                    ));
+                    assert_eq!(
+                        crate::session::default_repository_cache(std::path::Path::new(
+                            "/x/ob/hash"
+                        )),
+                        std::path::PathBuf::from("/the/user/root/cache/repos/v1")
+                    );
+                    std::thread::yield_now();
+                }
+            }));
+        }
+
+        barrier.wait();
+        for iter in 0..4 {
+            let ws = base.join(format!("ws-{iter}"));
+            let ob = base.join(format!("ob-{iter}"));
+            write(
+                &ws,
+                "MODULE.bazel",
+                "module(name='root')\nbazel_dep(name='a', version='1.0', repo_name='my_a')\n",
+            );
+            write(
+                &ws,
+                "BUILD.bazel",
+                "load('@my_a//:defs.bzl', 'mk')\nmk(name = 'made')\nfilegroup(name = 'g', srcs = ['@my_a//:lib'])\n",
+            );
+            let parsed = zel_options::ParsedCommandOptions::parse_for_command(
+                "build",
+                &[format!("--registry={}", crate::file_url_for_path(&reg))],
+            )
+            .unwrap();
+            let cfg =
+                BzlmodConfig::from_parsed(&parsed, &ws, &ob, std::env::vars().collect()).unwrap();
+            assert_eq!(
+                cfg.repository_cache.as_deref(),
+                Some(base.join("cache/repos/v1").as_path())
+            );
+            assert_eq!(
+                cfg.repo_contents_cache.as_deref(),
+                Some(base.join("cache/repos/v1/contents").as_path())
+            );
+            let session = Session::open(cfg).unwrap_or_else(|e| panic!("{}", e.message));
+            let resolver = Arc::new(BzlmodRepoResolver::new(session.rt.clone()));
+            let fs = Arc::new(LocalFileSystem::new(DigestHashFunction::Sha256));
+            let loader = PackageLoader::new(LoaderConfig::new(fs, resolver.clone()));
+            let pkg = loader
+                .load_package(&PackageIdentifier::create_in_main_repo("").unwrap())
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{e:?}; resolver errors: {:?}",
+                        resolver.errors.lock().unwrap()
+                    )
+                });
+            assert!(!pkg.contains_errors, "{:?}", pkg.events);
+            assert!(pkg.targets.contains_key("made"));
+            assert!(resolver.errors.lock().unwrap().is_empty());
+        }
+        done.store(true, std::sync::atomic::Ordering::Release);
+        for h in handles {
+            h.join().unwrap();
+        }
     }
 
     #[test]
