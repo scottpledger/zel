@@ -1068,6 +1068,15 @@ pub fn connect_or_start(
     spec: &ServerSpec<'_>,
     err: &mut dyn Write,
 ) -> Result<RunningServer, (i32, String)> {
+    Ok(connect_or_start_for_command(spec, false, err)?
+        .expect("non-shutdown command must connect or start server"))
+}
+
+pub fn connect_or_start_for_command(
+    spec: &ServerSpec<'_>,
+    is_shutdown: bool,
+    err: &mut dyn Write,
+) -> Result<Option<RunningServer>, (i32, String)> {
     let server_dir = spec.server_dir();
     let new_args = spec.server_args();
     let mut connected = find_running_server_with_timeout(&server_dir, spec.connect_timeout());
@@ -1104,6 +1113,9 @@ pub fn connect_or_start(
                 spec.startup.block_for_lock,
                 spec.connect_timeout(),
             );
+            if is_shutdown {
+                return Ok(None);
+            }
         } else {
             connected = Some(srv);
         }
@@ -1123,13 +1135,13 @@ pub fn connect_or_start(
     }
     if let Some(mut srv) = connected {
         srv.restart_reason = restart_reason;
-        return Ok(srv);
+        return Ok(Some(srv));
     }
     let mut srv = start_server(spec, &new_args, err)?;
     srv.restart_reason = restart_reason;
     let mut tmp = None;
     let _ = ensure_correct_running_version(spec, &mut tmp)?;
-    Ok(srv)
+    Ok(Some(srv))
 }
 
 fn random_cookie() -> String {
@@ -1524,13 +1536,18 @@ pub fn run_command(
     }
 }
 
-/// After a `shutdown`-style command wait up to `kPostShutdownGracePeriodSeconds` (60 s) for the server to exit.
+/// After a `shutdown`-style command wait up to `kPostShutdownGracePeriodSeconds` (60 s) for the server to exit,
+/// escalating to `SIGKILL` if it fails to terminate gracefully (`blaze.cc` `AwaitServerProcessTermination`).
 pub fn await_server_exit(server_dir: &Path, pid: i32) {
-    wait_for_exit(
+    if !wait_for_exit(
         pid,
         server_dir,
         Duration::from_secs(POST_SHUTDOWN_GRACE_SECS),
-    );
+    ) {
+        sys::send_process_group_signal(pid, sys::SIGKILL);
+        wait_for_exit(pid, server_dir, Duration::from_secs(POST_KILL_GRACE_SECS));
+        remove_status_files(server_dir);
+    }
 }
 
 /// Environment passed to the server in `RunRequest` is the daemon's own; we only need this to

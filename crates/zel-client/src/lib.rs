@@ -1285,13 +1285,16 @@ fn run_with_daemon<O: Write, E: Write>(
         install_md5: &install_md5,
     };
     let debug = startup_flag(startup, "client_debug", false);
-    let server = match daemon_client::connect_or_start(&spec, stderr_writer) {
-        Ok(s) => s,
-        Err((code, msg)) => {
-            let _ = writeln!(stderr_writer, "FATAL: {msg}");
-            return code;
-        }
-    };
+    let is_shutdown = run_req.arg.first().is_some_and(|a| a == b"shutdown");
+    let server =
+        match daemon_client::connect_or_start_for_command(&spec, is_shutdown, stderr_writer) {
+            Ok(Some(s)) => s,
+            Ok(None) => return 0,
+            Err((code, msg)) => {
+                let _ = writeln!(stderr_writer, "FATAL: {msg}");
+                return code;
+            }
+        };
     if run_req.arg.len() >= 2 {
         run_req.arg.insert(
             1,

@@ -203,6 +203,31 @@ fn changed_startup_options_restart_the_server() {
     let new_pid = e.pid().unwrap();
     assert_ne!(new_pid, pid);
     assert!(wait_dead(pid, 10));
+
+    // `shutdown` with differing startup options kills the running server immediately without
+    // spawning a throwaway daemon or stalling on `POST_SHUTDOWN_GRACE_SECS`.
+    let shut_start = Instant::now();
+    let shut = e.run(&[], &["shutdown"]);
+    assert_eq!(shut.status.code(), Some(0), "{}", s(&shut.stderr));
+    assert!(
+        shut_start.elapsed() < Duration::from_secs(15),
+        "shutdown with mismatched startup options stalled for {:?}",
+        shut_start.elapsed()
+    );
+    assert!(wait_dead(new_pid, 10));
+    assert!(e.pid().is_none());
+
+    // Cold `clean --expunge` starts a daemon as a child of the client and terminates it in the
+    // same client invocation (`termination_expected = true`); `await_server_exit` must reap the
+    // exited child immediately instead of stalling on a `<defunct>` zombie.
+    let expunge_start = Instant::now();
+    let expunge = e.run(&[], &["clean", "--expunge"]);
+    assert_eq!(expunge.status.code(), Some(0), "{}", s(&expunge.stderr));
+    assert!(
+        expunge_start.elapsed() < Duration::from_secs(15),
+        "cold clean --expunge stalled on daemon child zombie for {:?}",
+        expunge_start.elapsed()
+    );
 }
 
 #[test]
@@ -469,6 +494,28 @@ fn update_terminal_size_rpc_validates_cookie_and_returns_response_cookie() {
 }
 
 #[cfg(unix)]
+fn local_registry() -> PathBuf {
+    static REG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    REG.get_or_init(|| {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let dir =
+            std::env::temp_dir().join(format!("zel-daemon-e2e-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let st = Command::new("python3")
+            .arg(repo_root.join("scripts/make_vendored_registry.py"))
+            .arg(&dir)
+            .status()
+            .expect("python3 is required to build the local test registry");
+        assert!(st.success(), "make_vendored_registry.py failed");
+        dir
+    })
+    .clone()
+}
+
+#[cfg(unix)]
 #[test]
 fn sigwinch_forwards_terminal_size_to_running_daemon_command() {
     use std::net::TcpListener;
@@ -543,11 +590,13 @@ fn sigwinch_forwards_terminal_size_to_running_daemon_command() {
         response_cookie: resp_cookie,
     };
 
+    let registry_arg = format!("--registry=file://{}", local_registry().display()).into_bytes();
     let info_run = info.clone();
     let client_thread = std::thread::spawn(move || {
         let req = RunRequest {
             arg: vec![
                 b"build".to_vec(),
+                registry_arg,
                 b"--noenable_bzlmod".to_vec(),
                 b"--spawn_strategy=local".to_vec(),
                 b"--terminal_columns=61".to_vec(),
@@ -570,8 +619,18 @@ fn sigwinch_forwards_terminal_size_to_running_daemon_command() {
         (outcome, out, err)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + Duration::from_secs(60);
     while !started_marker.exists() {
+        if client_thread.is_finished() {
+            let (outcome, out, err) = client_thread.join().unwrap();
+            panic!(
+                "build exited before genrule action started: exit_code={} abrupt={:?}\nstdout:\n{}\nstderr:\n{}",
+                outcome.response.exit_code,
+                outcome.abrupt,
+                s(&out),
+                s(&err)
+            );
+        }
         assert!(
             Instant::now() < deadline,
             "timed out waiting for genrule action to start"

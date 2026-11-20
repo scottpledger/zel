@@ -43,6 +43,7 @@ pub static SIGWINCH_COUNT: AtomicUsize = AtomicUsize::new(0);
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn killpg(pgrp: i32, sig: i32) -> i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
     fn signal(sig: i32, handler: usize) -> usize;
     fn sysv_signal(sig: i32, handler: usize) -> usize;
     fn setsid() -> i32;
@@ -277,12 +278,28 @@ extern "system" {
     ) -> i32;
 }
 
-/// True if a process with `pid` exists (signal 0 probe; EPERM counts as alive).
+/// True if a process with `pid` exists and has not terminated (reaps an exited direct child first
+/// so a leaked daemon `Child` never stays `<defunct>` and stalls `wait_for_exit`).
 pub fn process_alive(pid: i32) -> bool {
     #[cfg(unix)]
     {
         if pid <= 0 {
             return false;
+        }
+        const WNOHANG: i32 = 1;
+        let mut status: i32 = 0;
+        if unsafe { waitpid(pid, &mut status, WNOHANG) } == pid {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if let Some(rparen) = stat.rfind(')') {
+                if let Some(state) = stat.get(rparen + 2..).and_then(|rest| rest.chars().next()) {
+                    if matches!(state, 'Z' | 'X') {
+                        return false;
+                    }
+                }
+            }
         }
         let rc = unsafe { kill(pid, 0) };
         rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
@@ -838,4 +855,31 @@ pub fn set_io_nice_level(level: i32) {
         }
     }
     let _ = level;
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn process_alive_reaps_exited_child_zombie_immediately() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn sh");
+        let pid = child.id() as i32;
+        std::mem::forget(child);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while process_alive(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "process_alive({pid}) treated an exited unwaited child zombie as alive"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!process_alive(pid));
+    }
 }

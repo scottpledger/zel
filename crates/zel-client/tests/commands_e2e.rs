@@ -703,6 +703,27 @@ fn unlimit_coredumps_and_shutdown() {
 }
 
 #[cfg(unix)]
+fn local_registry() -> PathBuf {
+    static REG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    REG.get_or_init(|| {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let dir = std::env::temp_dir().join(format!("zel-cmd-e2e-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let st = Command::new("python3")
+            .arg(repo_root.join("scripts/make_vendored_registry.py"))
+            .arg(&dir)
+            .status()
+            .expect("python3 is required to build the local test registry");
+        assert!(st.success(), "make_vendored_registry.py failed");
+        dir
+    })
+    .clone()
+}
+
+#[cfg(unix)]
 fn slow_workspace(e: &Env) {
     fs::write(
         e.ws.join("BUILD"),
@@ -717,8 +738,9 @@ fn live_output_streaming_and_sigint_cancel() {
     let e = Env::new("stream");
     slow_workspace(&e);
     e.run(&[], &["version"]);
+    let registry_flag = format!("--registry=file://{}", local_registry().display());
     let mut child = e
-        .cmd(&[], &["build", "//:slow"])
+        .cmd(&[], &["build", &registry_flag, "//:slow"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
