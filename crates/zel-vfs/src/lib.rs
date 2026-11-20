@@ -1073,11 +1073,12 @@ impl FileSystem for LocalFileSystem {
                 (mtime, perms, 0)
             }
         };
+        let is_link = !follow_symlinks && is_metadata_junction_or_symlink(&std_path, &meta);
         Ok(FileStatus {
-            is_file: ft.is_file(),
-            is_directory: ft.is_dir(),
-            is_symlink: ft.is_symlink(),
-            is_special_file: !ft.is_file() && !ft.is_dir() && !ft.is_symlink(),
+            is_file: !is_link && ft.is_file(),
+            is_directory: !is_link && ft.is_dir(),
+            is_symlink: is_link,
+            is_special_file: !is_link && !ft.is_file() && !ft.is_dir() && !ft.is_symlink(),
             size: meta.len(),
             last_modified_time_ms: mtime,
             last_change_time_ms: ctime,
@@ -1130,7 +1131,7 @@ impl FileSystem for LocalFileSystem {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let ft = entry.file_type()?;
-            let dirent_type = if ft.is_symlink() {
+            let dirent_type = if ft.is_symlink() || is_junction_or_symlink(&entry.path()) {
                 DirentType::Symlink
             } else if ft.is_dir() {
                 DirentType::Directory
@@ -1149,16 +1150,9 @@ impl FileSystem for LocalFileSystem {
         let p = Self::to_std_path(path);
         match fs::symlink_metadata(&p) {
             Ok(meta) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-                    if meta.file_type().is_symlink()
-                        || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
-                    {
-                        fs::remove_dir(&p).or_else(|_| fs::remove_file(&p))?;
-                        return Ok(true);
-                    }
+                if is_metadata_junction_or_symlink(&p, &meta) {
+                    remove_junction_or_symlink(&p)?;
+                    return Ok(true);
                 }
                 if meta.is_dir() {
                     fs::remove_dir(&p)?;
@@ -1398,6 +1392,42 @@ pub fn link_target_matches_str(
         trimmed.to_ascii_lowercase()
     };
     norm(actual_link_target) == norm(expected_target)
+}
+
+fn is_metadata_junction_or_symlink(path: &StdPath, meta: &fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+            return fs::read_link(path).is_ok();
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+    false
+}
+
+/// Returns `true` if `path` is a symbolic link or Windows NTFS directory junction without
+/// following the link (`IsSymlinkOrJunction` in `file_windows.cc`).
+pub fn is_junction_or_symlink(path: &StdPath) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| is_metadata_junction_or_symlink(path, &meta))
+}
+
+/// Removes a symbolic link or Windows NTFS directory junction without following it or modifying
+/// its target directory (`RemoveDirectoryW` before `DeleteFileW` on Windows).
+pub fn remove_junction_or_symlink(path: &StdPath) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        fs::remove_dir(path).or_else(|_| fs::remove_file(path))
+    }
+    #[cfg(not(windows))]
+    {
+        fs::remove_file(path)
+    }
 }
 
 /// Returns `true` if `link` is a symlink or NTFS junction whose target matches `expected_target`.
@@ -2776,6 +2806,9 @@ mod tests {
         let dir_link = dir.join("dir_link");
         create_directory_junction_or_symlink(&dir.join("target_dir"), &dir_link).unwrap();
         assert_eq!(fs::read(dir_link.join("inside")).unwrap(), b"ok");
+        assert!(is_junction_or_symlink(&dir_link));
+        assert!(!is_junction_or_symlink(&dir.join("target_dir")));
+        assert!(!is_junction_or_symlink(&dir.join("protected")));
         assert!(junction_or_symlink_points_to(
             &dir_link,
             &dir.join("target_dir")
@@ -2790,8 +2823,20 @@ mod tests {
         ));
 
         let lfs = LocalFileSystem::default();
-        // Writing to a directory junction/symlink replaces the link itself without touching target_dir.
         let dir_link_frag = PathFragment::create(&dir_link.to_string_lossy());
+        let st_nofollow = lfs.stat(&dir_link_frag, false).unwrap();
+        assert!(st_nofollow.is_symlink && !st_nofollow.is_directory);
+        let st_follow = lfs.stat(&dir_link_frag, true).unwrap();
+        assert!(!st_follow.is_symlink && st_follow.is_directory);
+
+        let dir_link2 = dir.join("dir_link2");
+        create_directory_junction_or_symlink(&dir.join("target_dir"), &dir_link2).unwrap();
+        remove_junction_or_symlink(&dir_link2).unwrap();
+        assert!(!is_junction_or_symlink(&dir_link2));
+        assert!(fs::symlink_metadata(&dir_link2).is_err());
+        assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");
+
+        // Writing to a directory junction/symlink replaces the link itself without touching target_dir.
         lfs.write_file(&dir_link_frag, b"replaced_dir_link")
             .unwrap();
         assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");

@@ -114,26 +114,19 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
     }
     for (link, target) in &links {
         let lp = Path::new(link);
-        let existing = std::fs::symlink_metadata(lp);
         if req.mode == ConvenienceSymlinksMode::Clean {
-            if matches!(&existing, Ok(m) if m.file_type().is_symlink()) {
-                #[cfg(windows)]
-                let _ = std::fs::remove_dir(lp).or_else(|_| std::fs::remove_file(lp));
-                #[cfg(not(windows))]
-                let _ = std::fs::remove_file(lp);
+            if zel_vfs::is_junction_or_symlink(lp) {
+                let _ = zel_vfs::remove_junction_or_symlink(lp);
             }
             continue;
         }
         let _ = std::fs::create_dir_all(target);
-        if let Ok(m) = &existing {
-            if m.file_type().is_symlink() {
+        if std::fs::symlink_metadata(lp).is_ok() {
+            if zel_vfs::is_junction_or_symlink(lp) {
                 if zel_vfs::junction_or_symlink_points_to(lp, Path::new(target)) {
                     continue;
                 }
-                #[cfg(windows)]
-                let _ = std::fs::remove_dir(lp).or_else(|_| std::fs::remove_file(lp));
-                #[cfg(not(windows))]
-                let _ = std::fs::remove_file(lp);
+                let _ = zel_vfs::remove_junction_or_symlink(lp);
             } else {
                 msgs.push(format!(
                     "WARNING: Failed to create convenience symlink '{link}': it exists and is not a symlink"
@@ -153,59 +146,159 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
     msgs
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn req<'a>(
-        ws: &'a str,
-        prefix: Option<&'a str>,
-        mode: ConvenienceSymlinksMode,
-    ) -> SymlinkRequest<'a> {
-        SymlinkRequest {
-            workspace_dir: ws,
-            execroot: "/tmp/ob/execroot/_main",
-            bin_dir: "/tmp/ob/execroot/_main/bazel-out/k8-fastbuild/bin",
-            testlogs_dir: "/tmp/ob/execroot/_main/bazel-out/k8-fastbuild/testlogs",
-            genfiles_dir: "/tmp/ob/execroot/_main/bazel-out/k8-fastbuild/bin",
-            symlink_prefix: prefix,
-            mode,
-            product_name: "bazel",
-            skip_genfiles: true,
-        }
-    }
-
-    #[cfg(unix)]
     #[test]
-    fn creates_and_cleans_links_and_honors_prefix() {
-        let ws = std::env::temp_dir().join(format!("zel-symlinks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&ws);
+    fn creates_retargets_and_cleans_links_and_honors_prefix() {
+        let root = std::env::temp_dir().join(format!("zel-symlinks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        let execroot = root.join("ob/execroot/_main");
+        let bin_fastbuild = execroot.join("bazel-out/k8-fastbuild/bin");
+        let testlogs_fastbuild = execroot.join("bazel-out/k8-fastbuild/testlogs");
+        let bin_opt = execroot.join("bazel-out/k8-opt/bin");
+        let testlogs_opt = execroot.join("bazel-out/k8-opt/testlogs");
         std::fs::create_dir_all(&ws).unwrap();
-        let w = ws.to_str().unwrap();
-        let msgs = create_convenience_symlinks(&req(w, None, ConvenienceSymlinksMode::Normal));
+        std::fs::create_dir_all(&bin_fastbuild).unwrap();
+        std::fs::write(bin_fastbuild.join("artifact.txt"), b"fastbuild").unwrap();
+        std::fs::create_dir_all(&bin_opt).unwrap();
+        std::fs::write(bin_opt.join("artifact.txt"), b"opt").unwrap();
+
+        let ws_s = ws.to_string_lossy().into_owned();
+        let er_s = execroot.to_string_lossy().into_owned();
+        let bin_fb_s = bin_fastbuild.to_string_lossy().into_owned();
+        let tl_fb_s = testlogs_fastbuild.to_string_lossy().into_owned();
+        let bin_opt_s = bin_opt.to_string_lossy().into_owned();
+        let tl_opt_s = testlogs_opt.to_string_lossy().into_owned();
+
+        fn make_req<'a>(
+            ws: &'a str,
+            er: &'a str,
+            prefix: Option<&'a str>,
+            mode: ConvenienceSymlinksMode,
+            bin: &'a str,
+            tl: &'a str,
+        ) -> SymlinkRequest<'a> {
+            SymlinkRequest {
+                workspace_dir: ws,
+                execroot: er,
+                bin_dir: bin,
+                testlogs_dir: tl,
+                genfiles_dir: bin,
+                symlink_prefix: prefix,
+                mode,
+                product_name: "bazel",
+                skip_genfiles: true,
+            }
+        }
+
+        let msgs = create_convenience_symlinks(&make_req(
+            &ws_s,
+            &er_s,
+            None,
+            ConvenienceSymlinksMode::Normal,
+            &bin_fb_s,
+            &tl_fb_s,
+        ));
         assert!(msgs.is_empty(), "{msgs:?}");
-        assert!(std::fs::read_link(ws.join("bazel-bin"))
-            .unwrap()
-            .ends_with("k8-fastbuild/bin"));
-        assert!(std::fs::read_link(ws.join("bazel-out"))
-            .unwrap()
-            .ends_with("_main/bazel-out"));
-        assert!(std::fs::symlink_metadata(ws.join(format!(
-            "bazel-{}",
-            ws.file_name().unwrap().to_str().unwrap()
-        )))
-        .is_ok());
-        create_convenience_symlinks(&req(w, None, ConvenienceSymlinksMode::Clean));
+        assert!(zel_vfs::is_junction_or_symlink(&ws.join("bazel-bin")));
+        assert!(zel_vfs::junction_or_symlink_points_to(
+            &ws.join("bazel-bin"),
+            &bin_fastbuild
+        ));
+        assert!(zel_vfs::junction_or_symlink_points_to(
+            &ws.join("bazel-out"),
+            &execroot.join("bazel-out")
+        ));
+        assert!(zel_vfs::is_junction_or_symlink(&ws.join("bazel-ws")));
+
+        // Repeat Normal with identical targets is a silent no-op.
+        let msgs_repeat = create_convenience_symlinks(&make_req(
+            &ws_s,
+            &er_s,
+            None,
+            ConvenienceSymlinksMode::Normal,
+            &bin_fb_s,
+            &tl_fb_s,
+        ));
+        assert!(msgs_repeat.is_empty(), "{msgs_repeat:?}");
+
+        // Retargeting `bazel-bin` / `bazel-testlogs` replaces existing links/junctions without
+        // warning or touching the previous target directory's contents.
+        let msgs_retarget = create_convenience_symlinks(&make_req(
+            &ws_s,
+            &er_s,
+            None,
+            ConvenienceSymlinksMode::Normal,
+            &bin_opt_s,
+            &tl_opt_s,
+        ));
+        assert!(msgs_retarget.is_empty(), "{msgs_retarget:?}");
+        assert!(zel_vfs::junction_or_symlink_points_to(
+            &ws.join("bazel-bin"),
+            &bin_opt
+        ));
+        assert_eq!(
+            std::fs::read(ws.join("bazel-bin/artifact.txt")).unwrap(),
+            b"opt"
+        );
+        assert_eq!(
+            std::fs::read(bin_fastbuild.join("artifact.txt")).unwrap(),
+            b"fastbuild"
+        );
+
+        // Clean removes convenience links/junctions while preserving target contents.
+        create_convenience_symlinks(&make_req(
+            &ws_s,
+            &er_s,
+            None,
+            ConvenienceSymlinksMode::Clean,
+            &bin_opt_s,
+            &tl_opt_s,
+        ));
         assert!(std::fs::symlink_metadata(ws.join("bazel-bin")).is_err());
-        create_convenience_symlinks(&req(w, Some("zz-"), ConvenienceSymlinksMode::Normal));
-        assert!(std::fs::symlink_metadata(ws.join("zz-testlogs")).is_ok());
-        assert!(convenience_links(&req(w, Some("/"), ConvenienceSymlinksMode::Normal)).is_empty());
+        assert!(std::fs::symlink_metadata(ws.join("bazel-out")).is_err());
+        assert_eq!(std::fs::read(bin_opt.join("artifact.txt")).unwrap(), b"opt");
+
+        create_convenience_symlinks(&make_req(
+            &ws_s,
+            &er_s,
+            Some("zz-"),
+            ConvenienceSymlinksMode::Normal,
+            &bin_opt_s,
+            &tl_opt_s,
+        ));
+        assert!(zel_vfs::is_junction_or_symlink(&ws.join("zz-testlogs")));
+        assert!(convenience_links(&make_req(
+            &ws_s,
+            &er_s,
+            Some("/"),
+            ConvenienceSymlinksMode::Normal,
+            &bin_opt_s,
+            &tl_opt_s
+        ))
+        .is_empty());
+
         // Real directory in the way => warning, not clobbered.
         std::fs::create_dir(ws.join("bazel-bin")).unwrap();
-        let m = create_convenience_symlinks(&req(w, None, ConvenienceSymlinksMode::Normal));
+        std::fs::write(ws.join("bazel-bin/real.txt"), b"keep").unwrap();
+        let m = create_convenience_symlinks(&make_req(
+            &ws_s,
+            &er_s,
+            None,
+            ConvenienceSymlinksMode::Normal,
+            &bin_opt_s,
+            &tl_opt_s,
+        ));
         assert!(m
             .iter()
             .any(|x| x.contains("bazel-bin") && x.starts_with("WARNING")));
-        let _ = std::fs::remove_dir_all(&ws);
+        assert_eq!(
+            std::fs::read(ws.join("bazel-bin/real.txt")).unwrap(),
+            b"keep"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

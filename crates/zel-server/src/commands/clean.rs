@@ -169,13 +169,10 @@ impl BlazeRuntime {
         for suffix in [ws_name.as_str(), "out", "bin", "testlogs", "genfiles"] {
             let name = format!("{prefix}{suffix}");
             let link = Path::new(ws).join(&name);
-            match std::fs::symlink_metadata(&link) {
-                Ok(md) if md.file_type().is_symlink() => {
-                    if let Err(e) = std::fs::remove_file(&link) {
-                        failures.push(format!("{}: {e}", link.display()));
-                    }
+            if zel_vfs::is_junction_or_symlink(&link) {
+                if let Err(e) = zel_vfs::remove_junction_or_symlink(&link) {
+                    failures.push(format!("{}: {e}", link.display()));
                 }
-                _ => {}
             }
         }
         // `removeDirectoryAndParents(workspace, prefix)`: a prefix naming a directory, e.g. `out/`.

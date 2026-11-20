@@ -1165,8 +1165,8 @@ mod win_impl {
         pub fn delete_path(p: &Path) -> io::Result<bool> {
             match std::fs::symlink_metadata(p) {
                 Ok(meta) => {
-                    if meta.file_type().is_symlink() {
-                        std::fs::remove_dir(p).or_else(|_| std::fs::remove_file(p))?;
+                    if zel_vfs::is_junction_or_symlink(p) {
+                        zel_vfs::remove_junction_or_symlink(p)?;
                     } else if meta.is_dir() {
                         std::fs::remove_dir(p)?;
                     } else {
@@ -1181,7 +1181,7 @@ mod win_impl {
 
         pub fn delete_trees_below(dir: &Path) -> io::Result<()> {
             let meta = std::fs::symlink_metadata(dir)?;
-            if meta.file_type().is_symlink() || !meta.is_dir() {
+            if zel_vfs::is_junction_or_symlink(dir) || !meta.is_dir() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "not a real directory",
@@ -1191,8 +1191,8 @@ mod win_impl {
                 let entry = entry?;
                 let p = entry.path();
                 let ft = entry.file_type()?;
-                if ft.is_symlink() {
-                    std::fs::remove_dir(&p).or_else(|_| std::fs::remove_file(&p))?;
+                if zel_vfs::is_junction_or_symlink(&p) {
+                    zel_vfs::remove_junction_or_symlink(&p)?;
                 } else if ft.is_dir() {
                     delete_trees_below(&p)?;
                     std::fs::remove_dir(&p)?;

@@ -71,20 +71,12 @@ pub fn delete_tree(path: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
-    if md.file_type().is_symlink() || !md.is_dir() {
-        let rm = {
-            #[cfg(windows)]
-            {
-                if md.file_type().is_symlink() {
-                    std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))
-                } else {
-                    std::fs::remove_file(path)
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                std::fs::remove_file(path)
-            }
+    let is_link = zel_vfs::is_junction_or_symlink(path);
+    if is_link || !md.is_dir() {
+        let rm = if is_link {
+            zel_vfs::remove_junction_or_symlink(path)
+        } else {
+            std::fs::remove_file(path)
         };
         match rm {
             Ok(()) => Ok(()),
@@ -693,10 +685,7 @@ pub fn sync_symlink_tree(
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 std::fs::create_dir_all(at)?;
             }
-            Ok(lmd) if lmd.file_type().is_symlink() => {
-                // If symlink points to a real directory, keep only if not replaced; Wait: if a path
-                // is both a symlink and a directory prefix, the directory pass must replace it
-                // with a real directory so files aren't written through the symlink.
+            Ok(_) if zel_vfs::is_junction_or_symlink(at) => {
                 delete_tree(at)?;
                 std::fs::create_dir_all(at)?;
             }
@@ -726,24 +715,25 @@ pub fn sync_symlink_tree(
             let basename = entry.file_name().to_string_lossy().into_owned();
             let next = entry.path();
             let ft = entry.file_type()?;
+            let next_is_link = zel_vfs::is_junction_or_symlink(&next);
             if let Some(next_dir) = node.directories.remove(&basename) {
                 // If both symlink and directory exist for the same segment, directory wins.
                 node.symlinks.remove(&basename);
-                if !ft.is_dir() || ft.is_symlink() {
+                if !ft.is_dir() || next_is_link {
                     delete_tree(&next)?;
                 }
                 sync_dir(&next, next_dir)?;
             } else if let Some(val) = node.symlinks.remove(&basename) {
                 match val {
                     None => {
-                        if !ft.is_file() || ft.is_symlink() {
+                        if !ft.is_file() || next_is_link {
                             delete_tree(&next)?;
                             std::fs::write(&next, b"")?;
                         }
                         // Existing regular file is left untruncated like Bazel.
                     }
                     Some(target) => {
-                        if !ft.is_symlink() {
+                        if !next_is_link {
                             delete_tree(&next)?;
                         }
                         ensure_symlink(&next, &target)?;
