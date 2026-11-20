@@ -252,11 +252,14 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
     assert!(l < f, "{err}");
 
     // Import of an unreadable file: INTERNAL_ERROR (37) with the Parsing log lines.
-    fs::write(
-        w.ws.join(".bazelrc"),
-        format!("import {}/missing.rc\n", w.root.display()),
-    )
-    .unwrap();
+    // `rc_file.cc` (`blaze_util::Tokenize`) treats `\` as an escape character on all platforms,
+    // so normalize Windows path separators to `/` before writing into `.bazelrc`.
+    let missing_rc = w
+        .root
+        .join("missing.rc")
+        .to_string_lossy()
+        .replace('\\', "/");
+    fs::write(w.ws.join(".bazelrc"), format!("import \"{missing_rc}\"\n")).unwrap();
     let o = w.run(&[], &["info", "release"], &[]);
     let err = s(&o.stderr);
     assert_eq!(o.status.code(), Some(37), "{err}");
