@@ -2275,13 +2275,15 @@ pub fn run_post_analysis(
             let fetch_errs = env.tenv.repo_fetch_errors.borrow().clone();
             if !fetch_errs.is_empty() {
                 let mut is_ext_err = false;
-                for raw in &fetch_errs {
-                    if zel_packages::lookup::is_module_extension_error(raw) {
+                for fetch_err in &fetch_errs {
+                    if fetch_err.is_module_extension() {
                         is_ext_err = true;
                     }
                     outcome
                         .stderr
-                        .push(zel_packages::lookup::format_repo_fetch_error(raw));
+                        .push(zel_packages::lookup::format_repo_fetch_error(
+                            &fetch_err.message,
+                        ));
                 }
                 outcome
                     .stderr

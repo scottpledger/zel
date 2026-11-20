@@ -1078,7 +1078,7 @@ impl SkyFunction for PackageLookupFunction {
             {
                 Some(Ok(root)) => root,
                 Some(Err(zel_packages::lookup::RepoRootError::FetchFailed(err))) => {
-                    let short = zel_packages::lookup::short_repo_fetch_error(&err);
+                    let short = zel_packages::lookup::short_repo_fetch_error(&err.message);
                     return Err(SkyFunctionError::transient(format!(
                         "no such package '{}//{}': {short}",
                         pkg_id.repository().canonical_form(),

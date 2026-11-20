@@ -213,13 +213,14 @@ pub struct PatternError {
     /// still be partially usable; Bazel reports `package contains errors: <pkg>: <first error>`).
     pub package_errors: Option<PackageErrors>,
     /// Set when the pattern failed because fetching an external repository or evaluating its
-    /// module extension failed; holds the raw diagnostic from the repository resolver.
-    pub repo_fetch_error: Option<String>,
+    /// module extension failed; holds the raw diagnostic and classification from the repository
+    /// resolver.
+    pub repo_fetch_error: Option<crate::lookup::RepoFetchError>,
 }
 
 struct ExpandError {
     message: String,
-    repo_fetch_error: Option<String>,
+    repo_fetch_error: Option<crate::lookup::RepoFetchError>,
 }
 
 impl ExpandError {
@@ -588,7 +589,7 @@ impl PatternResolver {
         &self,
         dir: &PackageIdentifier,
         out: &mut Vec<PackageIdentifier>,
-    ) -> Result<(), (String, Option<String>)> {
+    ) -> Result<(), (String, Option<crate::lookup::RepoFetchError>)> {
         let mut ignored_events = Vec::new();
         self.find_packages_below_excluding_with_pattern(dir, &[], None, out, &mut ignored_events)
             .map_err(|e| (e.message, e.repo_fetch_error))
@@ -623,7 +624,7 @@ impl PatternResolver {
         let root = match lookup.resolver.resolve_repo_root(dir.repository()) {
             Ok(root) => root,
             Err(crate::lookup::RepoRootError::FetchFailed(err)) => {
-                let short = crate::lookup::short_repo_fetch_error(&err).to_string();
+                let short = crate::lookup::short_repo_fetch_error(&err.message).to_string();
                 return Err(ExpandError {
                     message: short,
                     repo_fetch_error: Some(err),

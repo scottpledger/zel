@@ -39,15 +39,22 @@ impl RepoResolver for BzlmodRepoResolver {
                 &self.rt.opts.workspace_root.display().to_string(),
             ));
         }
-        match self.rt.fetch_repo(repo.name()) {
+        match self.rt.fetch_repo_detailed(repo.name()) {
             Ok(dir) => Ok(PathFragment::create(&dir.display().to_string())),
-            Err(e) => {
-                if e == format!("Repository '@@{}' is not defined", repo.name()) {
-                    Err(zel_packages::lookup::RepoRootError::NotFound)
-                } else {
-                    self.errors.lock().unwrap().push(e.clone());
-                    Err(zel_packages::lookup::RepoRootError::FetchFailed(e))
-                }
+            Err(crate::fetch::FetchRepoError::NotDefined(_)) => {
+                Err(zel_packages::lookup::RepoRootError::NotFound)
+            }
+            Err(crate::fetch::FetchRepoError::ModuleExtension(e)) => {
+                self.errors.lock().unwrap().push(e.clone());
+                Err(zel_packages::lookup::RepoRootError::FetchFailed(
+                    zel_packages::lookup::RepoFetchError::module_extension(e),
+                ))
+            }
+            Err(crate::fetch::FetchRepoError::RepoRule(e)) => {
+                self.errors.lock().unwrap().push(e.clone());
+                Err(zel_packages::lookup::RepoRootError::FetchFailed(
+                    zel_packages::lookup::RepoFetchError::repo_rule(e),
+                ))
             }
         }
     }
@@ -164,17 +171,28 @@ impl RepoResolver for LazyBzlmodResolver {
         let Some(s) = self.session() else {
             return Err(zel_packages::lookup::RepoRootError::NotFound);
         };
-        match s.rt.fetch_repo(repo.name()) {
+        match s.rt.fetch_repo_detailed(repo.name()) {
             Ok(dir) => Ok(PathFragment::create(&dir.display().to_string())),
-            Err(e) => {
-                if e == format!("Repository '@@{}' is not defined", repo.name()) {
-                    return Err(zel_packages::lookup::RepoRootError::NotFound);
-                }
+            Err(crate::fetch::FetchRepoError::NotDefined(_)) => {
+                Err(zel_packages::lookup::RepoRootError::NotFound)
+            }
+            Err(crate::fetch::FetchRepoError::ModuleExtension(e)) => {
                 self.errors
                     .lock()
                     .unwrap()
                     .push(zel_packages::lookup::format_repo_fetch_error(&e));
-                Err(zel_packages::lookup::RepoRootError::FetchFailed(e))
+                Err(zel_packages::lookup::RepoRootError::FetchFailed(
+                    zel_packages::lookup::RepoFetchError::module_extension(e),
+                ))
+            }
+            Err(crate::fetch::FetchRepoError::RepoRule(e)) => {
+                self.errors
+                    .lock()
+                    .unwrap()
+                    .push(zel_packages::lookup::format_repo_fetch_error(&e));
+                Err(zel_packages::lookup::RepoRootError::FetchFailed(
+                    zel_packages::lookup::RepoFetchError::repo_rule(e),
+                ))
             }
         }
     }

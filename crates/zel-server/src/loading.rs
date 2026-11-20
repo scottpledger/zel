@@ -448,8 +448,9 @@ impl BlazeRuntime {
             writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
             let mut printed_fetch: Vec<String> = Vec::new();
             for err in &outcome.errors {
-                if let Some(raw) = &err.repo_fetch_error {
-                    let formatted = zel_packages::lookup::format_repo_fetch_error(raw);
+                if let Some(fetch_err) = &err.repo_fetch_error {
+                    let formatted =
+                        zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
                     if !printed_fetch.contains(&formatted) {
                         writeln_bytes(stderr, &formatted);
                         printed_fetch.push(formatted);
@@ -471,30 +472,53 @@ impl BlazeRuntime {
                 }
             }
         } else if had_errors && outcome.errors.iter().any(|e| e.repo_fetch_error.is_some()) {
-            // A repository fetch or module extension evaluation failed while resolving a target
-            // pattern. Surface the actual fetch/extension diagnostic (e.g. Starlark `fail()`,
-            // `--nofetch`, or `--override_repository` failure) instead of reporting the repo
-            // as invisible.
-            let mut printed: Vec<String> = Vec::new();
+            // At least one target pattern failed while fetching an external repository or
+            // evaluating its module extension. Surface the fetch/extension diagnostics (e.g.
+            // Starlark `fail()`, invalid extension return value, `--nofetch`, or
+            // `--override_repository` failure) AND any other collected non-fetch pattern errors
+            // (missing targets, missing packages, unknown repos) so none are silently dropped.
+            let mut formatted_fetch: Vec<String> = Vec::new();
             let mut is_extension_error = false;
             for err in &outcome.errors {
-                if let Some(raw) = &err.repo_fetch_error {
-                    if zel_packages::lookup::is_module_extension_error(raw) {
+                if let Some(fetch_err) = &err.repo_fetch_error {
+                    if fetch_err.is_module_extension() {
                         is_extension_error = true;
                     }
-                    let formatted = zel_packages::lookup::format_repo_fetch_error(raw);
-                    if !printed.contains(&formatted) {
-                        printed.push(formatted);
+                    let formatted =
+                        zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
+                    if !formatted_fetch.contains(&formatted) {
+                        formatted_fetch.push(formatted);
                     }
                 }
             }
             for m in self.repo_resolver.take_messages() {
-                if !printed.contains(&m) && !m.starts_with("ERROR: ") {
+                if !formatted_fetch.contains(&m) && !m.starts_with("ERROR: ") {
                     writeln_bytes(stderr, &m);
                 }
             }
-            for line in &printed {
-                writeln_bytes(stderr, line);
+            let mut printed_fetch: Vec<String> = Vec::new();
+            for err in &outcome.errors {
+                if let Some(fetch_err) = &err.repo_fetch_error {
+                    let formatted =
+                        zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
+                    if !printed_fetch.contains(&formatted) {
+                        writeln_bytes(stderr, &formatted);
+                        printed_fetch.push(formatted);
+                    }
+                } else if let Some(m) = Self::unknown_repo_message(&err.pattern, &err.message) {
+                    writeln_bytes(stderr, &format!("ERROR: {m}"));
+                } else {
+                    if warn_without_keep_going
+                        || (err.message.starts_with("no such target '")
+                            && !err.message.contains("(did you mean"))
+                    {
+                        writeln_bytes(
+                            stderr,
+                            &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
+                        );
+                    }
+                    writeln_bytes(stderr, &format!("ERROR: {}", err.message));
+                }
             }
             writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
             writeln_bytes(stderr, "INFO: 0 processes.");

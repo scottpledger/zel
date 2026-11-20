@@ -135,8 +135,8 @@ pub struct PackageLoadError {
     pub message: String,
     pub events: Vec<PackageEvent>,
     /// Set when loading failed because fetching an external repository or evaluating its module
-    /// extension failed; holds the raw diagnostic from the repository resolver.
-    pub repo_fetch_error: Option<String>,
+    /// extension failed; holds the raw diagnostic and classification from the repository resolver.
+    pub repo_fetch_error: Option<crate::lookup::RepoFetchError>,
 }
 
 impl std::fmt::Display for PackageLoadError {
@@ -670,7 +670,7 @@ impl PackageLoader {
                     id.repository().canonical_form(),
                     id.package_fragment()
                 );
-                let short = crate::lookup::short_repo_fetch_error(&err);
+                let short = crate::lookup::short_repo_fetch_error(&err.message);
                 Err(PackageLoadError {
                     message: format!("no such package '{pkg_display}': {short}"),
                     events: Vec::new(),

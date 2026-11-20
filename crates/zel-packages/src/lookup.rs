@@ -21,14 +21,54 @@ use std::sync::Arc;
 use zel_cmdline::{Label, PackageIdentifier, RepositoryMapping, RepositoryName};
 use zel_vfs::{FileSystem, PathFragment};
 
+/// Classification of a repository fetch or module extension evaluation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoFetchErrorKind {
+    /// Fetching or evaluating a repository rule (or `--nofetch`, `--override_repository`, etc.)
+    /// failed; Bazel reports this with exit code 1 (`BUILD_FAILURE`).
+    RepoRule,
+    /// Evaluating a Bzlmod module extension (including `.bzl` loading, missing extension export,
+    /// invalid return value, `fail()`, or `use_repo`/`override_repo`/`inject_repo` validation)
+    /// failed; Bazel reports this with exit code 48.
+    ModuleExtension,
+}
+
+/// A repository fetch or module extension evaluation error with its structured classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoFetchError {
+    pub message: String,
+    pub kind: RepoFetchErrorKind,
+}
+
+impl RepoFetchError {
+    pub fn new(message: impl Into<String>, kind: RepoFetchErrorKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+        }
+    }
+
+    pub fn repo_rule(message: impl Into<String>) -> Self {
+        Self::new(message, RepoFetchErrorKind::RepoRule)
+    }
+
+    pub fn module_extension(message: impl Into<String>) -> Self {
+        Self::new(message, RepoFetchErrorKind::ModuleExtension)
+    }
+
+    pub fn is_module_extension(&self) -> bool {
+        self.kind == RepoFetchErrorKind::ModuleExtension
+    }
+}
+
 /// Failure reason returned by [`RepoResolver::resolve_repo_root`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepoRootError {
     /// The repository is not visible from the requesting repo or is not defined.
     NotFound,
     /// The repository exists (or its owning module extension exists), but fetching or evaluating
-    /// it failed with the given diagnostic message.
-    FetchFailed(String),
+    /// it failed with the given diagnostic and classification.
+    FetchFailed(RepoFetchError),
 }
 
 /// Extracts the trailing concise cause from a multi-line repository/extension fetch diagnostic
@@ -55,16 +95,6 @@ pub fn format_repo_fetch_error(raw: &str) -> String {
     } else {
         format!("ERROR: {raw}")
     }
-}
-
-/// Returns true when a raw fetch diagnostic represents a module extension evaluation / import error
-/// (which Bazel reports with exit code 48 rather than 1).
-pub fn is_module_extension_error(raw: &str) -> bool {
-    raw.contains("error evaluating module extension ")
-        || (raw.contains("module extension ")
-            && (raw.contains(" does not generate repository ")
-                || raw.contains(" generates repository ")))
-        || (raw.contains("Error loading '") && raw.contains("for module extensions"))
 }
 
 /// Maps repositories to their source roots and apparent names to canonical names.
@@ -197,7 +227,7 @@ pub enum PackageLookup {
     Deleted(String),
     InvalidName(String),
     RepoNotFound(String),
-    RepoFetchError(String),
+    RepoFetchError(RepoFetchError),
     IoError(String),
 }
 
@@ -445,8 +475,8 @@ impl PackageLookupConfig {
             PackageLookup::Deleted(r)
             | PackageLookup::InvalidName(r)
             | PackageLookup::RepoNotFound(r)
-            | PackageLookup::RepoFetchError(r)
             | PackageLookup::IoError(r) => r.clone(),
+            PackageLookup::RepoFetchError(e) => e.message.clone(),
             PackageLookup::Found { .. } => String::new(),
         }
     }
@@ -501,7 +531,7 @@ mod tests {
 
     struct FailingFetchResolver {
         main_root: PathFragment,
-        err: String,
+        err: RepoFetchError,
     }
 
     impl RepoResolver for FailingFetchResolver {
@@ -532,7 +562,8 @@ mod tests {
     #[test]
     fn lookup_distinguishes_fetch_error_from_unknown_repo() {
         let fs = Arc::new(InMemoryFileSystem::default());
-        let fetch_err = "INFO: Repo mod++ext+bad defined by rule r in @@mod+//:ext.bzl\nERROR: /x/ext.bzl:2:5: An error occurred during the fetch of repository 'mod++ext+bad':\nError in fail: boom\nERROR: boom".to_string();
+        let raw = "INFO: Repo mod++ext+bad defined by rule r in @@mod+//:ext.bzl\nERROR: /x/ext.bzl:2:5: An error occurred during the fetch of repository 'mod++ext+bad':\nError in fail: boom\nERROR: boom".to_string();
+        let fetch_err = RepoFetchError::repo_rule(raw.clone());
         let cfg = PackageLookupConfig {
             fs,
             resolver: Arc::new(FailingFetchResolver {
@@ -551,12 +582,12 @@ mod tests {
             cfg.lookup(&bad_pkg),
             PackageLookup::RepoFetchError(fetch_err.clone())
         );
-        assert_eq!(short_repo_fetch_error(&fetch_err), "boom");
-        assert!(repo_fetch_error_preamble(&fetch_err)
+        assert_eq!(short_repo_fetch_error(&raw), "boom");
+        assert!(repo_fetch_error_preamble(&raw)
             .unwrap()
             .contains("An error occurred during the fetch of repository 'mod++ext+bad'"));
-        assert_eq!(format_repo_fetch_error(&fetch_err), fetch_err);
-        assert!(!is_module_extension_error(&fetch_err));
+        assert_eq!(format_repo_fetch_error(&raw), raw);
+        assert!(!fetch_err.is_module_extension());
 
         let missing_pkg = PackageIdentifier::create(
             RepositoryName::create_unvalidated("no_such_repo"),
@@ -576,7 +607,11 @@ mod tests {
             short_repo_fetch_error(ext_err),
             "error evaluating module extension @@mod+//:ext.bzl%ext"
         );
-        assert!(is_module_extension_error(ext_err));
+        assert!(RepoFetchError::module_extension(ext_err).is_module_extension());
+        assert!(RepoFetchError::module_extension(
+            "expected module extension @@mod+//:ext.bzl%ext to return None or extension_metadata, got int"
+        )
+        .is_module_extension());
         assert!(format_repo_fetch_error(ext_err).starts_with("ERROR: /x/ext.bzl:2:5:"));
 
         let nofetch = "to fix, run\n\tbazel fetch //...\nExternal repository @@foo+ not found and fetching repositories is disabled.";

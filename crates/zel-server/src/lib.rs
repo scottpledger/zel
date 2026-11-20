@@ -3099,8 +3099,8 @@ impl BlazeRuntime {
         let resolver = self.pattern_resolver(&parsed);
         let outcome = resolver.resolve_patterns(&[target_pattern.clone()]);
         if let Some(err) = outcome.errors.first() {
-            if let Some(raw) = &err.repo_fetch_error {
-                let formatted = zel_packages::lookup::format_repo_fetch_error(raw);
+            if let Some(fetch_err) = &err.repo_fetch_error {
+                let formatted = zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
                 for m in self.repo_resolver.take_messages() {
                     if m != formatted && !m.starts_with("ERROR: ") {
                         writeln_bytes(stderr, &m);
@@ -3117,7 +3117,7 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                return if zel_packages::lookup::is_module_extension_error(raw) {
+                return if fetch_err.is_module_extension() {
                     ExitCode::from_numeric(48)
                 } else {
                     ExitCode::BUILD_FAILURE

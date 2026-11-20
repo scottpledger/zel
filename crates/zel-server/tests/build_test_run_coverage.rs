@@ -1993,3 +1993,177 @@ ext = module_extension(implementation = _ext_impl)
     );
     assert!(!q.err.contains("No repository visible"), "{}", q.err);
 }
+
+#[test]
+fn test_cli_non_fail_module_extension_errors_exit_48() {
+    let ext_root =
+        std::env::temp_dir().join(format!("zel-btrc-ext-bad-ret-mod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ext_root);
+    std::fs::create_dir_all(&ext_root).unwrap();
+    let ext_root = std::fs::canonicalize(&ext_root).unwrap();
+    std::fs::write(
+        ext_root.join("MODULE.bazel"),
+        "module(name = \"ext_mod\", version = \"0.1.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_root.join("BUILD.bazel"), "").unwrap();
+    std::fs::write(
+        ext_root.join("ext.bzl"),
+        r#"
+def _ext_impl(mctx):
+    return 123
+
+bad_ret_ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let module_bazel = format!(
+        "module(name = \"root\")\nbazel_dep(name = \"ext_mod\", version = \"0.1.0\")\nlocal_path_override(module_name = \"ext_mod\", path = \"{}\")\ne1 = use_extension(\"@ext_mod//:ext.bzl\", \"bad_ret_ext\")\nuse_repo(e1, \"r_bad_ret\")\ne2 = use_extension(\"@ext_mod//:ext.bzl\", \"no_such_ext\")\nuse_repo(e2, \"r_missing_ext\")\n",
+        ext_root.display()
+    );
+    let (_root, w) = make_ws_no_root_build("ext-bad-ret-ws", &module_bazel);
+
+    // Extension returning an invalid type must get exit code 48 across build/test/run/cquery/aquery.
+    for cmd in ["build", "test", "run", "cquery", "aquery"] {
+        let r = w.run(&[cmd, "@r_bad_ret//:foo"]);
+        assert_eq!(r.code, 48, "{cmd} expected exit 48:\n{}", r.err);
+        assert!(
+            r.err
+                .contains("to return None or extension_metadata, got int"),
+            "{cmd}:\n{}",
+            r.err
+        );
+        assert!(
+            !r.err.contains("No repository visible"),
+            "{cmd}:\n{}",
+            r.err
+        );
+    }
+    let q = w.run(&["query", "@r_bad_ret//:foo"]);
+    assert_eq!(q.code, 7, "{}", q.err);
+    assert!(
+        q.err.contains(
+            "Target parsing failed due to unexpected exception: expected module extension"
+        ),
+        "{}",
+        q.err
+    );
+
+    // Missing extension export in .bzl must also get exit code 48.
+    for cmd in ["build", "cquery"] {
+        let r = w.run(&[cmd, "@r_missing_ext//:foo"]);
+        assert_eq!(r.code, 48, "{cmd} expected exit 48:\n{}", r.err);
+        assert!(
+            r.err
+                .contains("does not export a module extension called no_such_ext"),
+            "{cmd}:\n{}",
+            r.err
+        );
+    }
+}
+
+#[test]
+fn test_cli_mixed_repo_fetch_and_non_fetch_pattern_errors_report_both() {
+    let ext_root =
+        std::env::temp_dir().join(format!("zel-btrc-ext-mixed-mod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ext_root);
+    std::fs::create_dir_all(&ext_root).unwrap();
+    let ext_root = std::fs::canonicalize(&ext_root).unwrap();
+    std::fs::write(
+        ext_root.join("MODULE.bazel"),
+        "module(name = \"ext_mod\", version = \"0.1.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_root.join("BUILD.bazel"), "").unwrap();
+    std::fs::write(
+        ext_root.join("ext.bzl"),
+        r#"
+def _bad_repo_impl(rctx):
+    fail("boom from repo rule")
+
+bad_repo = repository_rule(implementation = _bad_repo_impl)
+
+def _ext_ok_impl(mctx):
+    bad_repo(name = "bad_repo")
+
+ext_rule_fail = module_extension(implementation = _ext_ok_impl)
+
+def _ext_bad_ret_impl(mctx):
+    return 42
+
+ext_bad_ret = module_extension(implementation = _ext_bad_ret_impl)
+"#,
+    )
+    .unwrap();
+
+    let module_bazel = format!(
+        "module(name = \"root\")\nbazel_dep(name = \"ext_mod\", version = \"0.1.0\")\nlocal_path_override(module_name = \"ext_mod\", path = \"{}\")\ne1 = use_extension(\"@ext_mod//:ext.bzl\", \"ext_rule_fail\")\nuse_repo(e1, \"bad_repo\")\ne2 = use_extension(\"@ext_mod//:ext.bzl\", \"ext_bad_ret\")\nuse_repo(e2, \"bad_ext\")\n",
+        ext_root.display()
+    );
+    let (_root, w) = make_ws_no_root_build("ext-mixed-ws", &module_bazel);
+    std::fs::create_dir_all(w.ws.join("pkg")).unwrap();
+    std::fs::write(
+        w.ws.join("pkg/BUILD.bazel"),
+        "genrule(name = \"ok\", outs = [\"ok.txt\"], cmd = \"echo hi > $@\")\n",
+    )
+    .unwrap();
+
+    // Without --keep_going: repo fetch error + missing target must report BOTH errors.
+    let r = w.run(&["build", "@bad_repo//:foo", "//pkg:nope"]);
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(
+        r.err.contains("Error in fail: boom from repo rule"),
+        "missing fetch error:\n{}",
+        r.err
+    );
+    assert!(
+        r.err.contains("no such target '//pkg:nope'"),
+        "missing non-fetch target error:\n{}",
+        r.err
+    );
+
+    // Without --keep_going: repo fetch error + missing package must report BOTH errors.
+    let r = w.run(&["build", "//no_such_pkg:bar", "@bad_repo//:foo"]);
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(
+        r.err.contains("no such package 'no_such_pkg'"),
+        "missing non-fetch package error:\n{}",
+        r.err
+    );
+    assert!(
+        r.err.contains("Error in fail: boom from repo rule"),
+        "missing fetch error:\n{}",
+        r.err
+    );
+
+    // Without --keep_going: repo fetch error + unknown repo must report BOTH errors.
+    let r = w.run(&["build", "@bad_repo//:foo", "@no_such_repo//:x"]);
+    assert_eq!(r.code, 1, "{}", r.err);
+    assert!(
+        r.err.contains("Error in fail: boom from repo rule"),
+        "missing fetch error:\n{}",
+        r.err
+    );
+    assert!(
+        r.err
+            .contains("ERROR: No repository visible as '@no_such_repo' from main repository"),
+        "missing unknown repo error:\n{}",
+        r.err
+    );
+
+    // Without --keep_going: module extension error + missing target reports BOTH and exits 48.
+    let r = w.run(&["build", "@bad_ext//:foo", "//pkg:nope"]);
+    assert_eq!(r.code, 48, "{}", r.err);
+    assert!(
+        r.err
+            .contains("to return None or extension_metadata, got int"),
+        "missing extension error:\n{}",
+        r.err
+    );
+    assert!(
+        r.err.contains("no such target '//pkg:nope'"),
+        "missing non-fetch target error:\n{}",
+        r.err
+    );
+}

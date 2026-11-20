@@ -1445,8 +1445,8 @@ pub struct TargetEnv<'a> {
     pub graphless: bool,
     pub output_format: String,
     pub order_output: Option<crate::format::OrderOutput>,
-    /// Raw repository fetch / module extension errors encountered while resolving patterns.
-    pub(crate) repo_fetch_errors: RefCell<Vec<String>>,
+    /// Structured repository fetch / module extension errors encountered while resolving patterns.
+    pub(crate) repo_fetch_errors: RefCell<Vec<zel_packages::lookup::RepoFetchError>>,
     /// Preformatted stderr preamble lines (e.g. `INFO: Repo ...` + Starlark traceback) for `query`.
     pub(crate) raw_stderr: RefCell<Vec<String>>,
 }
@@ -1477,12 +1477,12 @@ impl<'a> TargetEnv<'a> {
         }
     }
 
-    fn record_repo_fetch_error(&self, raw: &str) {
+    fn record_repo_fetch_error(&self, err: &zel_packages::lookup::RepoFetchError) {
         let mut errs = self.repo_fetch_errors.borrow_mut();
-        if !errs.iter().any(|e| e == raw) {
-            errs.push(raw.to_string());
+        if !errs.iter().any(|e| e == err) {
+            errs.push(err.clone());
         }
-        if let Some(pre) = zel_packages::lookup::repo_fetch_error_preamble(raw) {
+        if let Some(pre) = zel_packages::lookup::repo_fetch_error_preamble(&err.message) {
             let formatted = zel_packages::lookup::format_repo_fetch_error(pre);
             let mut out = self.raw_stderr.borrow_mut();
             if !out.contains(&formatted) {
@@ -2089,12 +2089,11 @@ impl<'a> TargetEnv<'a> {
                             vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
                         );
                     }
-                    Err(zel_packages::lookup::RepoRootError::FetchFailed(raw)) => {
-                        self.record_repo_fetch_error(&raw);
-                        let short = zel_packages::lookup::short_repo_fetch_error(&raw);
-                        if pattern.ends_with("//...")
-                            || zel_packages::lookup::is_module_extension_error(&raw)
-                        {
+                    Err(zel_packages::lookup::RepoRootError::FetchFailed(fetch_err)) => {
+                        self.record_repo_fetch_error(&fetch_err);
+                        let short =
+                            zel_packages::lookup::short_repo_fetch_error(&fetch_err.message);
+                        if pattern.ends_with("//...") || fetch_err.is_module_extension() {
                             return (
                                 Vec::new(),
                                 vec![format!(
@@ -2304,10 +2303,11 @@ impl<'a> TargetEnv<'a> {
                     errors.push(String::new());
                 }
                 None => {
-                    if let Some(raw) = &e.repo_fetch_error {
-                        self.record_repo_fetch_error(raw);
-                        if zel_packages::lookup::is_module_extension_error(raw) {
-                            let short = zel_packages::lookup::short_repo_fetch_error(raw);
+                    if let Some(fetch_err) = &e.repo_fetch_error {
+                        self.record_repo_fetch_error(fetch_err);
+                        if fetch_err.is_module_extension() {
+                            let short =
+                                zel_packages::lookup::short_repo_fetch_error(&fetch_err.message);
                             errors.push(format!(
                                 "\0Target parsing failed due to unexpected exception: {short}"
                             ));
