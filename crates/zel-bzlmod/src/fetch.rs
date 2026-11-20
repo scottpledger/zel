@@ -4081,4 +4081,118 @@ inspect_repo(name = "via_use_repo_rule")
             outer_entry2.recorded_inputs
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_tree_on_symlink_to_directory_invalidates_marker_on_edits_and_retarget() {
+        let base = tmpdir("watch_tree_symlink_root");
+        let ws = base.join("ws");
+        let target_a = base.join("external_tree_a");
+        let target_b = base.join("external_tree_b");
+        write(&target_a, "nested/data.txt", "alpha");
+        write(&target_b, "nested/data.txt", "bravo");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::os::unix::fs::symlink(&target_a, ws.join("linked_tree")).unwrap();
+
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    tree_dir = rctx.workspace_root.get_child('linked_tree')\n",
+                "    rctx.watch_tree(tree_dir)\n",
+                "    val = rctx.read(tree_dir.get_child('nested').get_child('data.txt'), watch = 'no')\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('captured.txt', val)\n",
+                "tree_repo = repository_rule(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "tree_repo = use_repo_rule('//:defs.bzl', 'tree_repo')\n",
+                "tree_repo(name = 'watched')\n",
+            ),
+        );
+
+        let reg = base.join("reg");
+        std::fs::create_dir_all(&reg).unwrap();
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![crate::file_url_for_path(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap());
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let canon = "+tree_repo+watched";
+
+        let rt1 = Rt::new(opts.clone(), res.clone());
+        let dir1 = rt1.fetch_repo(canon).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir1.join("captured.txt")).unwrap(),
+            "alpha"
+        );
+        let marker =
+            std::fs::read_to_string(base.join("ob/external/@+tree_repo+watched.marker")).unwrap();
+        assert!(
+            marker.contains("DIRTREE:@@//linked_tree ") && !marker.contains("NOT_DIR"),
+            "symlink-to-directory watch_tree must record tree digest, not NOT_DIR: {marker}"
+        );
+
+        // Unchanged symlink target reuses cached repo directory without refetching.
+        std::fs::write(dir1.join(".cached_sentinel"), "1").unwrap();
+        let rt_same = Rt::new(opts.clone(), res.clone());
+        let dir_same = rt_same.fetch_repo(canon).unwrap();
+        assert!(
+            dir_same.join(".cached_sentinel").exists(),
+            "unchanged symlinked watch_tree must hit repository marker"
+        );
+
+        // 1. Modifying a file inside `target_a` invalidates the marker and refetches.
+        write(&target_a, "nested/data.txt", "alpha-updated");
+        let rt_mod = Rt::new(opts.clone(), res.clone());
+        let dir_mod = rt_mod.fetch_repo(canon).unwrap();
+        assert!(!dir_mod.join(".cached_sentinel").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir_mod.join("captured.txt")).unwrap(),
+            "alpha-updated"
+        );
+
+        // 2. Adding and then deleting an unrelated file inside `target_a` both invalidate the marker.
+        std::fs::write(dir_mod.join(".cached_sentinel"), "1").unwrap();
+        write(&target_a, "nested/extra.txt", "added");
+        let rt_add = Rt::new(opts.clone(), res.clone());
+        let dir_add = rt_add.fetch_repo(canon).unwrap();
+        assert!(
+            !dir_add.join(".cached_sentinel").exists(),
+            "adding a file under symlinked watch_tree must invalidate marker"
+        );
+
+        std::fs::write(dir_add.join(".cached_sentinel"), "1").unwrap();
+        std::fs::remove_file(target_a.join("nested/extra.txt")).unwrap();
+        let rt_del = Rt::new(opts.clone(), res.clone());
+        let dir_del = rt_del.fetch_repo(canon).unwrap();
+        assert!(
+            !dir_del.join(".cached_sentinel").exists(),
+            "deleting a file under symlinked watch_tree must invalidate marker"
+        );
+
+        // 3. Retargeting `ws/linked_tree` to `target_b` invalidates the marker and refetches.
+        std::fs::write(dir_del.join(".cached_sentinel"), "1").unwrap();
+        std::fs::remove_file(ws.join("linked_tree")).unwrap();
+        std::os::unix::fs::symlink(&target_b, ws.join("linked_tree")).unwrap();
+        let rt_retarget = Rt::new(opts, res);
+        let dir_retarget = rt_retarget.fetch_repo(canon).unwrap();
+        assert!(!dir_retarget.join(".cached_sentinel").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir_retarget.join("captured.txt")).unwrap(),
+            "bravo"
+        );
+    }
 }

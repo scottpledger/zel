@@ -464,17 +464,39 @@ pub fn escape_unescape_roundtrip_for_tests(s: &str) -> bool {
 }
 
 /// Computes a deterministic recursive digest of a directory tree (`DIRTREE:` recorded input),
-/// covering directory structure, symlink targets (without following symlinks), and file contents.
+/// mirroring `DirectoryTreeDigestFunction`: resolves symlinks on the root directory (while also
+/// hashing the root symlink target when `root` itself is a symlink so retargeting always
+/// invalidates), hashes nested file/symlink targets and resolved file/directory contents, and
+/// guards canonicalized ancestor paths against symlink cycles.
 pub fn compute_dirtree_digest(root: &std::path::Path) -> String {
-    let meta = match std::fs::symlink_metadata(root) {
+    let lmeta = match std::fs::symlink_metadata(root) {
         Ok(m) => m,
         Err(_) => return "ENOENT".to_string(),
     };
-    if !meta.file_type().is_dir() {
+    let meta = match std::fs::metadata(root) {
+        Ok(m) => m,
+        Err(_) => return "ENOENT".to_string(),
+    };
+    if !meta.is_dir() {
         return "NOT_DIR".to_string();
     }
     let mut fp = crate::hash::Fingerprint::new();
-    fn walk(dir: &std::path::Path, rel_prefix: &str, fp: &mut crate::hash::Fingerprint) {
+    if lmeta.file_type().is_symlink() {
+        let target = std::fs::read_link(root)
+            .map(|t| t.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        fp.add_string(&format!("ROOT_SYM:{target}"));
+    }
+    let mut ancestors = std::collections::BTreeSet::new();
+    if let Ok(canon) = std::fs::canonicalize(root) {
+        ancestors.insert(canon);
+    }
+    fn walk(
+        dir: &std::path::Path,
+        rel_prefix: &str,
+        fp: &mut crate::hash::Fingerprint,
+        ancestors: &mut std::collections::BTreeSet<std::path::PathBuf>,
+    ) {
         let mut entries: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir)
             .map(|rd| {
                 rd.filter_map(|e| e.ok())
@@ -499,9 +521,47 @@ pub fn compute_dirtree_digest(root: &std::path::Path) -> String {
                     .map(|t| t.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 fp.add_string(&format!("SYM:{rel}:{target}"));
+                match std::fs::metadata(&path) {
+                    Ok(tmeta) if tmeta.is_dir() => match std::fs::canonicalize(&path) {
+                        Ok(canon) if ancestors.contains(&canon) => {
+                            fp.add_string(&format!("SYM_CYCLE:{rel}"));
+                        }
+                        Ok(canon) => {
+                            fp.add_string(&format!("SYM_DIR:{rel}"));
+                            ancestors.insert(canon.clone());
+                            walk(&path, &rel, fp, ancestors);
+                            ancestors.remove(&canon);
+                        }
+                        Err(_) => {
+                            fp.add_string(&format!("SYM_ERR:{rel}"));
+                        }
+                    },
+                    Ok(_) => {
+                        let h = std::fs::read(&path)
+                            .map(|b| crate::hash::sha256_hex(&b))
+                            .unwrap_or_default();
+                        fp.add_string(&format!("SYM_FILE:{rel}:{h}"));
+                    }
+                    Err(_) => {
+                        fp.add_string(&format!("SYM_DANGLING:{rel}"));
+                    }
+                }
             } else if ft.is_dir() {
-                fp.add_string(&format!("DIR:{rel}"));
-                walk(&path, &rel, fp);
+                match std::fs::canonicalize(&path) {
+                    Ok(canon) if ancestors.contains(&canon) => {
+                        fp.add_string(&format!("DIR_CYCLE:{rel}"));
+                    }
+                    Ok(canon) => {
+                        fp.add_string(&format!("DIR:{rel}"));
+                        ancestors.insert(canon.clone());
+                        walk(&path, &rel, fp, ancestors);
+                        ancestors.remove(&canon);
+                    }
+                    Err(_) => {
+                        fp.add_string(&format!("DIR:{rel}"));
+                        walk(&path, &rel, fp, ancestors);
+                    }
+                }
             } else {
                 let h = std::fs::read(&path)
                     .map(|b| crate::hash::sha256_hex(&b))
@@ -510,7 +570,7 @@ pub fn compute_dirtree_digest(root: &std::path::Path) -> String {
             }
         }
     }
-    walk(root, "", &mut fp);
+    walk(root, "", &mut fp, &mut ancestors);
     fp.hex_digest()
 }
 
@@ -858,5 +918,62 @@ mod tests {
             ),
             Some("source repo gone_repo+ doesn't exist anymore".to_string())
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dirtree_symlink_root_retarget_nested_symlinks_and_cycles() {
+        let d = crate::registry::testutil::tmpdir("dirtree_symlink_root");
+        let dir_a = d.join("dir_a");
+        let dir_b = d.join("dir_b");
+        std::fs::create_dir_all(dir_a.join("sub")).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        std::fs::write(dir_a.join("sub/item.txt"), "initial").unwrap();
+        std::fs::write(dir_b.join("sub_item.txt"), "other").unwrap();
+
+        let root_link = d.join("watched_link");
+        std::os::unix::fs::symlink(&dir_a, &root_link).unwrap();
+
+        let d0 = compute_dirtree_digest(&root_link);
+        assert_ne!(d0, "NOT_DIR");
+        assert_ne!(d0, "ENOENT");
+
+        // Modifying, adding, and deleting files inside the symlinked target directory must change digest.
+        std::fs::write(dir_a.join("sub/item.txt"), "modified").unwrap();
+        let d_mod = compute_dirtree_digest(&root_link);
+        assert_ne!(d_mod, d0);
+
+        std::fs::write(dir_a.join("added.txt"), "extra").unwrap();
+        let d_add = compute_dirtree_digest(&root_link);
+        assert_ne!(d_add, d_mod);
+
+        std::fs::remove_file(dir_a.join("added.txt")).unwrap();
+        assert_eq!(compute_dirtree_digest(&root_link), d_mod);
+
+        // Symlink cycle inside the directory tree terminates deterministically without stack overflow.
+        std::os::unix::fs::symlink(&dir_a, dir_a.join("self_loop")).unwrap();
+        let d_cycle = compute_dirtree_digest(&root_link);
+        assert_ne!(d_cycle, d_mod);
+        assert_eq!(compute_dirtree_digest(&root_link), d_cycle);
+
+        // Retargeting the root symlink to a different directory changes the digest (even between two empty dirs).
+        let empty_one = d.join("empty_one");
+        let empty_two = d.join("empty_two");
+        std::fs::create_dir_all(&empty_one).unwrap();
+        std::fs::create_dir_all(&empty_two).unwrap();
+        std::fs::remove_file(&root_link).unwrap();
+        std::os::unix::fs::symlink(&empty_one, &root_link).unwrap();
+        let d_empty_one = compute_dirtree_digest(&root_link);
+        std::fs::remove_file(&root_link).unwrap();
+        std::os::unix::fs::symlink(&empty_two, &root_link).unwrap();
+        let d_empty_two = compute_dirtree_digest(&root_link);
+        assert_ne!(d_empty_one, d_empty_two);
+
+        // Replacing root symlink with a regular file -> NOT_DIR; deleting -> ENOENT.
+        std::fs::remove_file(&root_link).unwrap();
+        std::fs::write(&root_link, "plain-file").unwrap();
+        assert_eq!(compute_dirtree_digest(&root_link), "NOT_DIR");
+        std::fs::remove_file(&root_link).unwrap();
+        assert_eq!(compute_dirtree_digest(&root_link), "ENOENT");
     }
 }

@@ -1418,17 +1418,13 @@ impl Downloader {
         }
     }
 
-    fn curl_get(
+    fn build_curl_command(
         &self,
         url: &str,
         headers: &[(String, String)],
+        tmp: &Path,
         attempt: u32,
-    ) -> Result<Vec<u8>, FetchError> {
-        let tmp = std::env::temp_dir().join(format!(
-            "zel-curl-{}-{}",
-            std::process::id(),
-            next_counter()
-        ));
+    ) -> Command {
         let connect_secs = self.connect_timeout_for(attempt).as_secs_f64().max(0.1);
         let connect_str = if (connect_secs.fract()).abs() < 1e-6 {
             format!("{}", connect_secs as u64)
@@ -1436,6 +1432,20 @@ impl Downloader {
             format!("{connect_secs:.3}")
         };
         let mut cmd = Command::new(&self.curl_binary);
+        // Strip ambient server-process proxy variables so `curl` strictly obeys `self.client_env`
+        // (`ProxyHelper` in Bazel only consults `clientEnv`, never daemon process env).
+        for k in [
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+        ] {
+            cmd.env_remove(k);
+        }
         cmd.args([
             "-fsSL",
             "--connect-timeout",
@@ -1458,25 +1468,27 @@ impl Downloader {
         {
             cmd.args(["-A", "bazel/9.3.2"]);
         }
-        if let Some(p) = select_proxy_env("https", &self.client_env) {
-            if p.is_empty() {
-                cmd.args(["--noproxy", "*"]);
-            } else {
-                cmd.args(["--proxy", &p]);
-            }
-        }
-        if let Some(np) = self
-            .client_env
-            .get("no_proxy")
-            .or_else(|| self.client_env.get("NO_PROXY"))
-        {
-            cmd.args(["--noproxy", np]);
-        }
-        cmd.arg("-o").arg(&tmp);
+        cmd.args(curl_proxy_args(url, &self.client_env));
+        cmd.arg("-o").arg(tmp);
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
         }
         cmd.arg(url);
+        cmd
+    }
+
+    fn curl_get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        attempt: u32,
+    ) -> Result<Vec<u8>, FetchError> {
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-curl-{}-{}",
+            std::process::id(),
+            next_counter()
+        ));
+        let mut cmd = self.build_curl_command(url, headers, &tmp, attempt);
         let out = crate::output_retry_etxtbsy(&mut cmd).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 fe(
@@ -1769,7 +1781,8 @@ fn select_proxy_env(scheme: &str, client_env: &BTreeMap<String, String>) -> Opti
 fn host_bypassed_by_no_proxy(host: &str, client_env: &BTreeMap<String, String>) -> bool {
     let Some(np) = client_env
         .get("no_proxy")
-        .or_else(|| client_env.get("NO_PROXY"))
+        .filter(|s| !s.is_empty())
+        .or_else(|| client_env.get("NO_PROXY").filter(|s| !s.is_empty()))
     else {
         return false;
     };
@@ -1791,6 +1804,45 @@ fn host_bypassed_by_no_proxy(host: &str, client_env: &BTreeMap<String, String>) 
         }
     }
     false
+}
+
+fn curl_proxy_args(url: &str, client_env: &BTreeMap<String, String>) -> Vec<String> {
+    let host = Url::parse(url).map(|u| u.host).unwrap_or_default();
+    if !host.is_empty() && host_bypassed_by_no_proxy(&host, client_env) {
+        return vec!["--noproxy".to_string(), "*".to_string()];
+    }
+    let Some(proxy) = select_proxy_env("https", client_env) else {
+        return vec!["--noproxy".to_string(), "*".to_string()];
+    };
+    if proxy.is_empty() {
+        return vec!["--noproxy".to_string(), "*".to_string()];
+    }
+    let mut args = vec!["--proxy".to_string(), proxy];
+    if let Some(np) = client_env
+        .get("no_proxy")
+        .filter(|s| !s.is_empty())
+        .or_else(|| client_env.get("NO_PROXY").filter(|s| !s.is_empty()))
+    {
+        let filtered: Vec<&str> = np
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| {
+                if entry.is_empty() {
+                    return false;
+                }
+                if let Some(suf) = entry.strip_prefix('.') {
+                    !host.eq_ignore_ascii_case(suf)
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if !filtered.is_empty() {
+            args.push("--noproxy".to_string());
+            args.push(filtered.join(","));
+        }
+    }
+    args
 }
 
 fn resolve_http_proxy(host: &str, client_env: &BTreeMap<String, String>) -> Option<Url> {
@@ -3153,6 +3205,161 @@ mod tests {
                 1,
                 "{req_ch}"
             );
+        }
+    }
+
+    #[test]
+    fn curl_proxy_args_and_empty_https_proxy_not_overridden_by_no_proxy() {
+        let d = tmpdir("curl-proxy-args");
+
+        // Explicit empty `https_proxy=""` with `no_proxy="localhost,127.0.0.1"` must keep
+        // `--noproxy *` without emitting a second `--noproxy` that would overwrite `*`, and must
+        // clear ambient process proxy env vars (`ProxyHelper.createProxyIfNeeded`).
+        let mut client_env = BTreeMap::new();
+        client_env.insert("https_proxy".to_string(), String::new());
+        client_env.insert(
+            "HTTPS_PROXY".to_string(),
+            "http://should-not-win:8080".to_string(),
+        );
+        client_env.insert("no_proxy".to_string(), "localhost,127.0.0.1".to_string());
+
+        let dl = Downloader {
+            client_env: client_env.clone(),
+            ..quick()
+        };
+        let cmd = dl.build_curl_command(
+            "https://bcr.bazel.build/modules/foo/1.0/MODULE.bazel",
+            &[],
+            &d.join("tmp.out"),
+            0,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let noproxy_vals: Vec<&str> = args
+            .windows(2)
+            .filter_map(|w| (w[0] == "--noproxy").then_some(w[1].as_str()))
+            .collect();
+        assert_eq!(noproxy_vals, vec!["*"], "args: {args:?}");
+        assert!(!args.iter().any(|a| a == "--proxy"), "args: {args:?}");
+
+        let removed_envs: BTreeMap<String, Option<String>> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|val| val.to_string_lossy().into_owned()),
+                )
+            })
+            .collect();
+        for key in [
+            "http_proxy",
+            "HTTP_PROXY",
+            "https_proxy",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+            "no_proxy",
+            "NO_PROXY",
+        ] {
+            assert_eq!(
+                removed_envs.get(key),
+                Some(&None),
+                "missing env_remove({key})"
+            );
+        }
+
+        // Unset `https_proxy` with `no_proxy` set also emits `--noproxy *` only.
+        let mut unset_env = BTreeMap::new();
+        unset_env.insert("no_proxy".to_string(), "localhost,127.0.0.1".to_string());
+        assert_eq!(
+            curl_proxy_args("https://bcr.bazel.build/a", &unset_env),
+            vec!["--noproxy", "*"]
+        );
+
+        // Non-empty `https_proxy` respects `ProxyHelper` leading-dot subdomain-only `no_proxy`.
+        let mut active_env = BTreeMap::new();
+        active_env.insert(
+            "https_proxy".to_string(),
+            "http://corp-proxy.internal:8080".to_string(),
+        );
+        active_env.insert("no_proxy".to_string(), ".example.com,localhost".to_string());
+        assert_eq!(
+            curl_proxy_args("https://sub.example.com/pkg.tgz", &active_env),
+            vec!["--noproxy", "*"]
+        );
+        assert_eq!(
+            curl_proxy_args("https://example.com/pkg.tgz", &active_env),
+            vec![
+                "--proxy",
+                "http://corp-proxy.internal:8080",
+                "--noproxy",
+                "localhost"
+            ]
+        );
+
+        // End-to-end fake curl invocation under ambient `https_proxy=http://bad-proxy:8080`
+        // verifying the child sees empty proxy env and `--noproxy *`.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let fake_curl = d.join("fake-curl.sh");
+            let log_file = d.join("curl-invoked.log");
+            fs::write(
+                &fake_curl,
+                format!(
+                    "#!/bin/sh\nout=''\nnoproxy_seen=''\nproxy_seen=''\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -o) out=\"$2\"; shift 2 ;;\n    --noproxy) noproxy_seen=\"${{noproxy_seen}}|$2\"; shift 2 ;;\n    --proxy) proxy_seen=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nprintf 'noproxy=%s\\nproxy=%s\\nenv_https=%s\\nenv_HTTPS=%s\\n' \"$noproxy_seen\" \"$proxy_seen\" \"${{https_proxy:-}}\" \"${{HTTPS_PROXY:-}}\" > '{}'\nprintf 'ok-https-payload' > \"$out\"\n",
+                    log_file.display()
+                ),
+            )
+            .unwrap();
+            fs::set_permissions(&fake_curl, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let dl_e2e = Downloader {
+                curl_binary: fake_curl.to_string_lossy().into_owned(),
+                client_env,
+                ..quick()
+            };
+            let r = req(
+                vec!["https://bcr.bazel.build/modules/foo/1.0/MODULE.bazel".to_string()],
+                d.join("downloaded.bin"),
+            );
+            dl_e2e.download(&r).unwrap();
+            assert_eq!(
+                fs::read(d.join("downloaded.bin")).unwrap(),
+                b"ok-https-payload"
+            );
+            let logged = fs::read_to_string(&log_file).unwrap();
+            assert_eq!(
+                logged, "noproxy=|*\nproxy=\nenv_https=\nenv_HTTPS=\n",
+                "{logged}"
+            );
+            if std::env::var("ZEL_CURL_AMBIENT_SUBPROC").as_deref() == Ok("1") {
+                assert_eq!(
+                    std::env::var("https_proxy").as_deref(),
+                    Ok("http://bad-proxy:8080")
+                );
+            } else {
+                let exe = std::env::current_exe().unwrap();
+                let sub = Command::new(exe)
+                    .args([
+                        "--exact",
+                        "download::tests::curl_proxy_args_and_empty_https_proxy_not_overridden_by_no_proxy",
+                        "--nocapture",
+                    ])
+                    .env("ZEL_CURL_AMBIENT_SUBPROC", "1")
+                    .env("https_proxy", "http://bad-proxy:8080")
+                    .env("HTTPS_PROXY", "http://bad-proxy:8080")
+                    .output()
+                    .unwrap();
+                assert!(
+                    sub.status.success(),
+                    "subprocess failed:\n{}\n{}",
+                    String::from_utf8_lossy(&sub.stdout),
+                    String::from_utf8_lossy(&sub.stderr)
+                );
+            }
         }
     }
 }
