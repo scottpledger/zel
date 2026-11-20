@@ -31,6 +31,47 @@ impl FetchRepoError {
     }
 }
 
+thread_local! {
+    /// Captures a `ModuleExtension` failure raised during a nested `fetch_repo_detailed` call
+    /// inside Starlark execution (e.g. `rctx.path(Label(...))` or `.bzl` `load()`), so the
+    /// enclosing `fetch_repo_inner_detailed` preserves `FetchRepoError::ModuleExtension` instead
+    /// of downgrading it to `FetchRepoError::RepoRule`.
+    static NESTED_EXT_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn record_nested_extension_error(msg: &str) {
+    NESTED_EXT_ERROR.with(|slot| {
+        let mut g = slot.borrow_mut();
+        if g.is_none() {
+            *g = Some(msg.to_string());
+        }
+    });
+}
+
+struct NestedExtErrorScope {
+    prev: Option<String>,
+}
+
+impl NestedExtErrorScope {
+    fn enter() -> Self {
+        let prev = NESTED_EXT_ERROR.with(|slot| slot.borrow_mut().take());
+        Self { prev }
+    }
+
+    fn take(&self) -> Option<String> {
+        NESTED_EXT_ERROR.with(|slot| slot.borrow_mut().take())
+    }
+}
+
+impl Drop for NestedExtErrorScope {
+    fn drop(&mut self) {
+        NESTED_EXT_ERROR.with(|slot| {
+            *slot.borrow_mut() = self.prev.take();
+        });
+    }
+}
+
 /// Gson representation used by Bazel's `AttributeValues` marker fingerprint.
 ///
 /// This intentionally differs from lockfile JSON: Gson serializes `StarlarkInt` through its
@@ -592,8 +633,17 @@ impl Rt {
         } else {
             spec = self.repo_spec_for_detailed(canonical)?;
         }
-        self.fetch_repo_with_spec(canonical, dir, marker, spec)
-            .map_err(FetchRepoError::RepoRule)
+        let scope = NestedExtErrorScope::enter();
+        match self.fetch_repo_with_spec(canonical, dir, marker, spec) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(ext_err) = scope.take() {
+                    Err(FetchRepoError::ModuleExtension(ext_err))
+                } else {
+                    Err(FetchRepoError::RepoRule(e))
+                }
+            }
+        }
     }
 
     fn fetch_repo_with_spec(
@@ -1104,6 +1154,7 @@ impl Rt {
         id: &ExtensionId,
         verify_imports: bool,
     ) -> Result<ExtensionResult, String> {
+        let _nested_ext_scope = NestedExtErrorScope::enter();
         let res = self.resolution.clone();
         let usages = res.usages_of(id);
         let cached = self.state.lock().unwrap().ext_results.get(id).cloned();

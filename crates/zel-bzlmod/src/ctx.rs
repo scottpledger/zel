@@ -1240,7 +1240,14 @@ impl CtxData {
                     ));
                 }
                 let repo = l.repository().name().to_string();
-                let dir = s_err(rt.fetch_repo(&repo))?;
+                let dir = match rt.fetch_repo_detailed(&repo) {
+                    Ok(dir) => dir,
+                    Err(crate::fetch::FetchRepoError::ModuleExtension(e)) => {
+                        crate::fetch::record_nested_extension_error(&e);
+                        return Err(StarlarkError(e));
+                    }
+                    Err(e) => return Err(StarlarkError(e.into_message())),
+                };
                 let pkg = l.package_name();
                 let base = if pkg.is_empty() { dir } else { dir.join(pkg) };
                 let resolved = base.join(l.name());

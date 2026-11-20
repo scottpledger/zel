@@ -2167,3 +2167,118 @@ ext_bad_ret = module_extension(implementation = _ext_bad_ret_impl)
         r.err
     );
 }
+
+#[test]
+fn test_cli_nested_module_extension_errors_preserve_exit_48() {
+    let ext_root =
+        std::env::temp_dir().join(format!("zel-btrc-ext-nested-mod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ext_root);
+    std::fs::create_dir_all(&ext_root).unwrap();
+    let ext_root = std::fs::canonicalize(&ext_root).unwrap();
+    std::fs::write(
+        ext_root.join("MODULE.bazel"),
+        "module(name = \"ext_mod\", version = \"0.1.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_root.join("BUILD.bazel"), "").unwrap();
+    std::fs::write(
+        ext_root.join("bad_ext.bzl"),
+        r#"
+def _fail_impl(mctx):
+    fail("boom from nested ext")
+fail_ext = module_extension(implementation = _fail_impl)
+
+def _bad_ret_impl(mctx):
+    return 123
+bad_ret_ext = module_extension(implementation = _bad_ret_impl)
+
+def _bad_rule_impl(rctx):
+    fail("boom from nested repo rule")
+bad_rule_repo = repository_rule(implementation = _bad_rule_impl)
+
+def _ok_ext_impl(mctx):
+    bad_rule_repo(name = "bad_rule_r")
+ok_ext = module_extension(implementation = _ok_ext_impl)
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        ext_root.join("outer.bzl"),
+        r#"
+def _outer_impl(rctx):
+    p = rctx.path(rctx.attr.target)
+    rctx.file("BUILD.bazel", "exports_files(['a'])\n")
+    rctx.file("a", str(p))
+
+outer_path_repo = repository_rule(
+    implementation = _outer_impl,
+    attrs = {"target": attr.label()},
+)
+
+def _outer_ext_impl(mctx):
+    outer_path_repo(name = "outer_fail_ext", target = Label("@@ext_mod++fail_ext+bad_r1//:f"))
+    outer_path_repo(name = "outer_bad_ret", target = Label("@@ext_mod++bad_ret_ext+bad_r2//:f"))
+    outer_path_repo(name = "outer_bad_rule", target = Label("@@ext_mod++ok_ext+bad_rule_r//:f"))
+
+outer_ext = module_extension(implementation = _outer_ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let module_bazel = format!(
+        r#"module(name = "root")
+bazel_dep(name = "ext_mod", version = "0.1.0")
+local_path_override(module_name = "ext_mod", path = "{}")
+e_fail = use_extension("@ext_mod//:bad_ext.bzl", "fail_ext")
+use_repo(e_fail, "bad_r1")
+e_ret = use_extension("@ext_mod//:bad_ext.bzl", "bad_ret_ext")
+use_repo(e_ret, "bad_r2")
+e_ok = use_extension("@ext_mod//:bad_ext.bzl", "ok_ext")
+use_repo(e_ok, "bad_rule_r")
+e_outer = use_extension("@ext_mod//:outer.bzl", "outer_ext")
+use_repo(e_outer, "outer_fail_ext", "outer_bad_ret", "outer_bad_rule")
+use_r = use_repo_rule("@ext_mod//:outer.bzl", "outer_path_repo")
+use_r(name = "innate_fail_ext", target = "@bad_r1//:f")
+use_r(name = "innate_bad_ret", target = "@bad_r2//:f")
+"#,
+        ext_root.display()
+    );
+    let (_root, w) = make_ws_no_root_build("ext-nested-ws", &module_bazel);
+
+    // Nested fail() in module extension via rctx.path (both extension repo and use_repo_rule) -> exit 48.
+    for target in ["@outer_fail_ext//:a", "@innate_fail_ext//:a"] {
+        for cmd in ["build", "cquery", "run"] {
+            let r = w.run(&[cmd, target]);
+            assert_eq!(r.code, 48, "{cmd} {target} expected exit 48:\n{}", r.err);
+            assert!(
+                r.err.contains("Error in fail: boom from nested ext"),
+                "{cmd} {target}:\n{}",
+                r.err
+            );
+            assert!(
+                r.err.contains("ERROR: error evaluating module extension"),
+                "{cmd} {target}:\n{}",
+                r.err
+            );
+        }
+    }
+
+    // Nested invalid return type in module extension via rctx.path -> exit 48.
+    for target in ["@outer_bad_ret//:a", "@innate_bad_ret//:a"] {
+        for cmd in ["build", "cquery"] {
+            let r = w.run(&[cmd, target]);
+            assert_eq!(r.code, 48, "{cmd} {target} expected exit 48:\n{}", r.err);
+            assert!(
+                r.err
+                    .contains("to return None or extension_metadata, got int"),
+                "{cmd} {target}:\n{}",
+                r.err
+            );
+        }
+    }
+
+    // Control: nested repository rule failure (not a module extension failure) still exits 1.
+    let r = w.run(&["build", "@outer_bad_rule//:a"]);
+    assert_eq!(r.code, 1, "expected exit 1:\n{}", r.err);
+    assert!(r.err.contains("boom from nested repo rule"), "{}", r.err);
+}
