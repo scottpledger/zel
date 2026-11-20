@@ -676,18 +676,21 @@ fn ctx_method(
                 return Ok(Value::Bool(false));
             }
             if let Some(ct) = target_ct {
-                let has_provider = ct.instrumented_files.is_some()
-                    || ct.providers.contains_key("InstrumentedFilesInfo");
+                let actual = ct.get_actual();
+                let has_provider = actual.instrumented_files.is_some()
+                    || actual.providers.contains_key("InstrumentedFilesInfo");
                 return Ok(Value::Bool(
                     has_provider
-                        && should_include_local_sources(
-                            &st.cfg,
-                            ct.actual_target_label(),
-                            ct.is_test,
-                        ),
+                        && should_include_local_sources(&st.cfg, &actual.label, actual.is_test),
                 ));
             }
-            let is_test = st.rule.is_test_rule();
+            let is_test = st
+                .rule
+                .extra
+                .rule_class
+                .as_ref()
+                .is_some_and(|rc| rc.is_test)
+                || (st.rule.is_test_rule() && st.rule.rule_class != "test_suite");
             Ok(Value::Bool(should_include_local_sources(
                 &st.cfg, &st.label, is_test,
             )))

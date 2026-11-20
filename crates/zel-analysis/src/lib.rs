@@ -308,6 +308,10 @@ impl BuildConfigurationKey {
         let mut untrimmed = base.clone();
         untrimmed.keep_test_exec = true;
         let mut java = base;
+        java.options.insert(
+            "java_runtime_version".to_string(),
+            "remotejdk_25".to_string(),
+        );
         java.post_exec.insert(
             "java_runtime_version".to_string(),
             "remotejdk_25".to_string(),
@@ -330,19 +334,89 @@ impl BuildConfigurationKey {
     /// platform suffix `exec`. The baseline for the `ST-<hash>` diff stays the original
     /// top-level configuration.
     pub fn to_exec_for(&self, exec_platform: &str) -> Self {
-        // The exec transition is idempotent: an exec configuration for the same execution
-        // platform maps to itself (its `cpu`/`compilation_mode` already come from `--host_*`).
-        if self.is_exec && self.platforms.len() == 1 && self.platforms[0] == exec_platform {
+        // The exec transition is idempotent once in a plain exec configuration for the same
+        // execution platform (`post_exec` is empty); if a post-exec transition mutated options
+        // (such as `coverage_tool_configs` setting `java_runtime_version`), re-running the exec
+        // transition resets non-propagated / host-overwritten options just like
+        // `ExecutionTransitionFactory` + `FunctionTransitionUtil.maybeGetExecDefaults`.
+        if self.is_exec
+            && self.platforms.len() == 1
+            && self.platforms[0] == exec_platform
+            && self.post_exec.is_empty()
+        {
             return self.clone();
         }
         let mut out = self.clone();
+        let exclude_defines =
+            self.bool_option("experimental_exclude_defines_from_exec_config", false);
+        let exclude_starlark_flags = self.bool_option(
+            "incompatible_exclude_starlark_flags_from_exec_config",
+            false,
+        );
+        let keep_test_opts = !self.bool_option("trim_test_configuration", true);
+        let is_preserved_native = |name: &str| -> bool {
+            // `builtin_exec_platforms.bzl` `_java_options` overwrites both from `tool_java_*`
+            // even though `JavaOptions` lists them in `propagate`.
+            if matches!(name, "java_language_version" | "java_runtime_version") {
+                return false;
+            }
+            if name == "define" {
+                return !exclude_defines;
+            }
+            if matches!(
+                name,
+                "flag_alias"
+                    | "modify_execution_info"
+                    | "experimental_override_platform_cpu_name"
+                    | "incompatible_disable_select_on"
+                    | "incompatible_target_cpu_from_platform"
+            ) {
+                return true;
+            }
+            if keep_test_opts
+                && build_options::find_option(name)
+                    .is_some_and(|(cls, _)| cls == build_options::TEST_OPTIONS)
+            {
+                return true;
+            }
+            build_options::EXEC_PROPAGATED.contains(&name)
+        };
         out.post_exec.clear();
+        if exclude_defines {
+            out.user_defines.clear();
+        }
+        if exclude_starlark_flags {
+            out.flag_values.clear();
+            out.flag_types.clear();
+        }
+        let overridden_non_preserved: Vec<String> = out
+            .options
+            .keys()
+            .filter(|name| self.has_options_override(name) && !is_preserved_native(name))
+            .cloned()
+            .collect();
+        for name in overridden_non_preserved {
+            if let Some(nat) = self.native.get(&name) {
+                out.options.insert(name, nat.raw.clone());
+            } else {
+                out.options.remove(&name);
+            }
+        }
+        let keep_change = |k: &str| match k.strip_prefix("//command_line_option:") {
+            Some("platforms") => true,
+            Some(name) => is_preserved_native(name),
+            None => !exclude_starlark_flags,
+        };
+        out.transition_changes.retain(|k, _| keep_change(k));
+        out.transition_baseline.retain(|k, _| keep_change(k));
         let native = |n: &str| self.native.get(n).map(|s| s.value.display());
         out.compilation_mode = native("host_compilation_mode")
             .or_else(|| self.options.get("host_compilation_mode").cloned())
             .unwrap_or_else(|| "opt".to_string());
         out.is_exec = true;
         out.keep_test = false;
+        out.keep_test_exec = false;
+        out.env.action_env = out.env.host_action_env.clone();
         // `_core_options`: `cpu` becomes `--host_cpu` in the exec configuration.
         out.cpu = native("host_cpu")
             .or_else(|| self.options.get("host_cpu").cloned())
@@ -405,6 +479,9 @@ impl BuildConfigurationKey {
                         value: build_options::ConfigValue::Scalar(val),
                     },
                 );
+            } else {
+                out.options.remove(target_k);
+                out.native.remove(target_k);
             }
         }
         const KEY: &str = "//command_line_option:platforms";
@@ -2525,6 +2602,155 @@ mod tests {
         assert_eq!(
             fragments::late_bound_label("java", "launcher", &exec_with_host),
             Some(Label::parse_canonical("@@//pkg:host_launcher").unwrap())
+        );
+    }
+
+    #[test]
+    fn exec_transition_resets_post_exec_and_non_propagated_transition_changes() {
+        let host_cpu = build_options::auto_host_cpu();
+        let target = BuildConfigurationKey::target(host_cpu, "fastbuild");
+        let [_untrimmed_cov, java_cov] = target
+            .coverage_tool_configs()
+            .try_into()
+            .expect("two coverage tool configs");
+        assert_eq!(
+            java_cov.mnemonic(),
+            format!("{host_cpu}-opt-exec-ST-9b53c6127b00")
+        );
+        assert_eq!(
+            java_cov.option_str("java_runtime_version").as_deref(),
+            Some("remotejdk_25")
+        );
+        assert_eq!(
+            java_cov.build_options().get("java_runtime_version"),
+            Some(&build_options::ConfigValue::Scalar("remotejdk_25".into()))
+        );
+
+        // Re-applying the exec transition to a different execution platform drops the post-exec
+        // `java_runtime_version` override from `post_exec`, `options`, `build_options()`, AND
+        // `transition_changes` (ST-hash), matching `target.to_exec_for(...)`.
+        let expected_other = target.to_exec_for("@@//p:other_exec");
+        let re_exec_other = java_cov.to_exec_for("@@//p:other_exec");
+        assert!(re_exec_other.post_exec.is_empty());
+        assert!(
+            !re_exec_other
+                .transition_changes
+                .contains_key("//command_line_option:java_runtime_version"),
+            "unexpected stale transition_changes: {:?}",
+            re_exec_other.transition_changes
+        );
+        assert_eq!(
+            re_exec_other.option_str("java_runtime_version").as_deref(),
+            Some("local_jdk")
+        );
+        assert_eq!(
+            re_exec_other.build_options(),
+            expected_other.build_options()
+        );
+        assert_eq!(
+            re_exec_other.untrimmed_build_options(),
+            expected_other.untrimmed_build_options()
+        );
+        assert_eq!(re_exec_other.mnemonic(), expected_other.mnemonic());
+        assert_eq!(
+            re_exec_other.config_display_mnemonic(),
+            expected_other.config_display_mnemonic()
+        );
+        assert_eq!(re_exec_other.checksum(), expected_other.checksum());
+
+        // Re-applying the exec transition onto the same host platform also resets post-exec
+        // `java_runtime_version` back to the baseline exec configuration.
+        let re_exec_same = java_cov.to_exec();
+        let expected_same = target.to_exec();
+        assert_eq!(re_exec_same.mnemonic(), expected_same.mnemonic());
+        assert_eq!(re_exec_same.build_options(), expected_same.build_options());
+        assert_eq!(re_exec_same.checksum(), expected_same.checksum());
+
+        // When `--tool_java_runtime_version` was set on the command line, `coverage_tool_configs`
+        // overrides `java_runtime_version` to `remotejdk_25`, and a subsequent exec transition
+        // restores `java_runtime_version` back to `tool_java_runtime_version`.
+        let mut cli_tool_jdk = target.clone();
+        cli_tool_jdk
+            .options
+            .insert("tool_java_runtime_version".into(), "17".into());
+        cli_tool_jdk.native.insert(
+            "tool_java_runtime_version".into(),
+            NativeSetting {
+                raw: "17".into(),
+                value: build_options::ConfigValue::Scalar("17".into()),
+            },
+        );
+        let [_, java_cov_17] = cli_tool_jdk
+            .coverage_tool_configs()
+            .try_into()
+            .expect("two coverage tool configs");
+        assert_eq!(
+            java_cov_17.option_str("java_runtime_version").as_deref(),
+            Some("remotejdk_25")
+        );
+        let re_exec_17 = java_cov_17.to_exec_for("@@//p:other_exec");
+        let expected_17 = cli_tool_jdk.to_exec_for("@@//p:other_exec");
+        assert_eq!(
+            re_exec_17.option_str("java_runtime_version").as_deref(),
+            Some("17")
+        );
+        assert_eq!(re_exec_17.mnemonic(), expected_17.mnemonic());
+        assert_eq!(re_exec_17.build_options(), expected_17.build_options());
+
+        // Post-exec Starlark transition: non-propagated options (`copt`) are cleared on a
+        // subsequent exec transition, whereas propagated options (`protocopt`,
+        // `tool_java_runtime_version`) remain in both `build_options()` and `ST-<hash>`.
+        let mk_str_list = |s: &str| {
+            zel_starlark::Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+                zel_starlark::StarlarkList::new(vec![zel_starlark::Value::String(s.to_string())]),
+            )))
+        };
+        let mut post_exec_copt = target.to_exec();
+        transition::set_setting(
+            &mut post_exec_copt,
+            "//command_line_option:copt",
+            &mk_str_list("-DPOST_EXEC"),
+        )
+        .unwrap();
+        let after_copt_re_exec = post_exec_copt.to_exec_for("@@//p:other_exec");
+        assert_eq!(after_copt_re_exec.mnemonic(), expected_other.mnemonic());
+        assert_eq!(
+            after_copt_re_exec.build_options(),
+            expected_other.build_options()
+        );
+
+        let mut post_exec_prop = target.to_exec();
+        transition::set_setting(
+            &mut post_exec_prop,
+            "//command_line_option:protocopt",
+            &mk_str_list("--post-proto"),
+        )
+        .unwrap();
+        transition::set_setting(
+            &mut post_exec_prop,
+            "//command_line_option:tool_java_runtime_version",
+            &zel_starlark::Value::String("remotejdk_25".into()),
+        )
+        .unwrap();
+        let mut pre_exec_prop = target.clone();
+        transition::set_setting(
+            &mut pre_exec_prop,
+            "//command_line_option:protocopt",
+            &mk_str_list("--post-proto"),
+        )
+        .unwrap();
+        transition::set_setting(
+            &mut pre_exec_prop,
+            "//command_line_option:tool_java_runtime_version",
+            &zel_starlark::Value::String("remotejdk_25".into()),
+        )
+        .unwrap();
+        let from_post_prop = post_exec_prop.to_exec_for("@@//p:other_exec");
+        let from_pre_prop = pre_exec_prop.to_exec_for("@@//p:other_exec");
+        assert_eq!(from_post_prop.mnemonic(), from_pre_prop.mnemonic());
+        assert_eq!(
+            from_post_prop.build_options(),
+            from_pre_prop.build_options()
         );
     }
 }

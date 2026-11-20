@@ -4963,6 +4963,9 @@ def _probe_impl(ctx):
         "sub_fg=" + str(ctx.coverage_instrumented(ctx.attr.sub_fg)),
         "inc_plain=" + str(ctx.coverage_instrumented(ctx.attr.inc_plain)),
         "inc_test=" + str(ctx.coverage_instrumented(ctx.attr.inc_test)),
+        "alias_test=" + str(ctx.coverage_instrumented(ctx.attr.alias_test)),
+        "alias_inc_cov=" + str(ctx.coverage_instrumented(ctx.attr.alias_inc_cov)),
+        "alias_exc_cov=" + str(ctx.coverage_instrumented(ctx.attr.alias_exc_cov)),
         "src_file=" + str(ctx.coverage_instrumented(ctx.attr.src_file)),
         "gen_file=" + str(ctx.coverage_instrumented(ctx.attr.gen_file)),
     ]
@@ -4980,6 +4983,9 @@ probe = rule(
         "sub_fg": attr.label(),
         "inc_plain": attr.label(),
         "inc_test": attr.label(),
+        "alias_test": attr.label(),
+        "alias_inc_cov": attr.label(),
+        "alias_exc_cov": attr.label(),
         "src_file": attr.label(allow_single_file = True),
         "gen_file": attr.label(allow_single_file = True),
         "bad_arg": attr.bool(default = False),
@@ -4992,6 +4998,7 @@ probe = rule(
         (
             "inc/BUILD",
             r#"
+package(default_visibility = ["//visibility:public"])
 load("//:defs.bzl", "cov_lib", "plain_lib", "cov_test", "probe")
 exports_files(["src.c"])
 genrule(name = "gen", outs = ["gen_out.c"], cmd = "echo 'int x = 0;' > $@")
@@ -5000,6 +5007,7 @@ filegroup(name = "fg", srcs = ["src.c"])
 filegroup(name = "excluded_fg", srcs = ["src.c"])
 plain_lib(name = "plain")
 cov_test(name = "my_test", srcs = ["src.c"])
+alias(name = "alias_to_exc_lib", actual = "//exc:lib")
 probe(
     name = "p",
     testonly = True,
@@ -5010,6 +5018,9 @@ probe(
     sub_fg = "//inc:excluded_fg",
     inc_plain = "//inc:plain",
     inc_test = "//inc:my_test",
+    alias_test = "//exc:chain_to_inc_test",
+    alias_inc_cov = "//exc:alias_to_inc_lib",
+    alias_exc_cov = "//inc:alias_to_exc_lib",
     src_file = "//inc:src.c",
     gen_file = "//inc:gen_out.c",
 )
@@ -5024,6 +5035,9 @@ package(default_visibility = ["//visibility:public"])
 load("//:defs.bzl", "cov_lib")
 cov_lib(name = "lib", srcs = ["src.c"])
 filegroup(name = "fg", srcs = ["src.c"])
+alias(name = "alias_to_inc_lib", actual = "//inc:lib")
+alias(name = "alias_to_inc_test", actual = "//inc:my_test", testonly = True)
+alias(name = "chain_to_inc_test", actual = ":alias_to_inc_test", testonly = True)
 "#,
         ),
     ]);
@@ -5055,26 +5069,26 @@ filegroup(name = "fg", srcs = ["src.c"])
     // Coverage disabled: everything is False.
     assert_eq!(
         run_with(false, Some("//inc"), true),
-        "self=False|inc_cov=False|exc_cov=False|inc_fg=False|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=False|src_file=False|gen_file=False"
+        "self=False|inc_cov=False|exc_cov=False|inc_fg=False|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=False|alias_test=False|alias_inc_cov=False|alias_exc_cov=False|src_file=False|gen_file=False"
     );
 
     // Coverage enabled with filter `^//inc`, test targets excluded:
-    // - `//inc:lib`, `//inc:fg`, `//inc:excluded_fg`, and self (`//inc:p`) are True.
-    // - `//exc:lib` and `//exc:fg` have InstrumentedFilesInfo, but are excluded by filter -> False!
+    // - `//inc:lib`, `//inc:fg`, `//inc:excluded_fg`, `//exc:alias_to_inc_lib`, and self (`//inc:p`) are True.
+    // - `//exc:lib`, `//inc:alias_to_exc_lib`, and `//exc:fg` are excluded by actual label -> False!
     // - `//inc:plain` lacks InstrumentedFilesInfo -> False.
-    // - `//inc:my_test` is a test rule with --noinstrument_test_targets -> False.
+    // - `//inc:my_test` and `//exc:chain_to_inc_test` (chained alias of a test) are excluded with --noinstrument_test_targets -> False.
     // - `//inc:src.c` (source file) and `//inc:gen` (rule without InstrumentedFilesInfo) -> False.
     assert_eq!(
         run_with(true, Some("^//inc"), false),
-        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=True|inc_plain=False|inc_test=False|src_file=False|gen_file=False"
+        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=True|inc_plain=False|inc_test=False|alias_test=False|alias_inc_cov=True|alias_exc_cov=False|src_file=False|gen_file=False"
     );
 
     // Coverage enabled with negative filter exclusion `-//inc:excluded_fg` and `--instrument_test_targets`:
-    // - `//inc:my_test` becomes True.
+    // - `//inc:my_test` and `//exc:chain_to_inc_test` become True.
     // - `//inc:excluded_fg` becomes False despite carrying InstrumentedFilesInfo.
     assert_eq!(
         run_with(true, Some("^//inc,-^//inc:excluded_fg$"), true),
-        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=True|src_file=False|gen_file=False"
+        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=True|alias_test=True|alias_inc_cov=True|alias_exc_cov=False|src_file=False|gen_file=False"
     );
 
     // Invalid target type fails eagerly even when coverage is disabled.
