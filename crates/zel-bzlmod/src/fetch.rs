@@ -322,7 +322,10 @@ impl Rt {
     ///   passed to the repo rule.
     pub(crate) fn original_name_for(&self, canonical: &str, spec: &RepoSpec) -> String {
         let res = &self.resolution;
-        if res.canonical_repo_names.contains_key(canonical) {
+        if res
+            .canonical_repo_names
+            .contains_key(&canonical.to_string())
+        {
             return canonical.to_string();
         }
         if let Some((_, exported)) = res.extension_for_canonical(canonical) {

@@ -185,8 +185,7 @@ fn netrc_and_credential_helper_auth_headers() {
         );
 
         let empty_helper = dir.join("empty_helper.sh");
-        std::fs::write(&empty_helper, "#!/bin/sh\ncat >/dev/null\necho '{}'\n").unwrap();
-        std::fs::set_permissions(&empty_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        write_executable_script(&empty_helper, b"#!/bin/sh\ncat >/dev/null\necho '{}'\n");
         let hdrs_empty = resolve_auth_headers(
             "https://example.com/modules/a/1.0/MODULE.bazel",
             &[("example.com".to_string(), empty_helper)],
@@ -199,12 +198,10 @@ fn netrc_and_credential_helper_auth_headers() {
         );
 
         let fail_helper = dir.join("fail_helper.sh");
-        std::fs::write(
+        write_executable_script(
             &fail_helper,
-            "#!/bin/sh\ncat >/dev/null\necho 'denied' >&2\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fail_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\ncat >/dev/null\necho 'denied' >&2\nexit 1\n",
+        );
         let err = resolve_auth_headers(
             "https://example.com/modules/a/1.0/MODULE.bazel",
             &[("example.com".to_string(), fail_helper)],
