@@ -71,7 +71,9 @@ pub fn delete_trees_below_not_prefixed(dir: &Path, prefix: &str) -> io::Result<(
         }
         let p = e.path();
         let md = std::fs::symlink_metadata(&p)?;
-        if md.is_dir() {
+        if zel_vfs::is_junction_or_symlink(&p) {
+            zel_vfs::remove_junction_or_symlink(&p)?;
+        } else if md.is_dir() {
             std::fs::remove_dir_all(&p)?;
         } else {
             std::fs::remove_file(&p)?;
@@ -126,7 +128,15 @@ pub fn plant_symlink_forest(
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(target, execroot.join(&base))?;
                 #[cfg(not(unix))]
-                copy_tree_fallback(target, &execroot.join(&base))?;
+                {
+                    let dst = execroot.join(&base);
+                    if target.is_dir() {
+                        zel_vfs::create_directory_junction_or_symlink(target, &dst)
+                            .or_else(|_| copy_tree_fallback(target, &dst))?;
+                    } else {
+                        copy_tree_fallback(target, &dst)?;
+                    }
+                }
             }
         } else {
             conflicts.insert(lower);
@@ -140,17 +150,6 @@ pub fn plant_symlink_forest(
 /// `--experimental_sibling_repository_layout` is enabled) for every fetched repository directory.
 pub fn plant_external_repo_links(execroot: &Path, output_base: &Path) -> io::Result<Vec<PathBuf>> {
     plant_external_repo_links_with_layout(execroot, output_base, false)
-}
-
-fn remove_symlink(p: &Path) -> io::Result<()> {
-    #[cfg(windows)]
-    {
-        std::fs::remove_dir(p).or_else(|_| std::fs::remove_file(p))
-    }
-    #[cfg(not(windows))]
-    {
-        std::fs::remove_file(p)
-    }
 }
 
 pub fn plant_external_repo_links_with_layout(
@@ -176,8 +175,8 @@ pub fn plant_external_repo_links_with_layout(
                     continue;
                 }
                 let p = e.path();
-                if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
-                    let _ = remove_symlink(&p);
+                if zel_vfs::is_junction_or_symlink(&p) {
+                    let _ = zel_vfs::remove_junction_or_symlink(&p);
                 }
             }
         }
@@ -214,12 +213,12 @@ pub fn plant_external_repo_links_with_layout(
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(ext.join(&n), &link)?;
-        #[cfg(windows)]
-        if std::os::windows::fs::symlink_dir(ext.join(&n), &link).is_err() {
-            copy_tree_fallback(&ext.join(&n), &link)?;
+        #[cfg(not(unix))]
+        {
+            let target = ext.join(&n);
+            zel_vfs::create_directory_junction_or_symlink(&target, &link)
+                .or_else(|_| copy_tree_fallback(&target, &link))?;
         }
-        #[cfg(not(any(unix, windows)))]
-        copy_tree_fallback(&ext.join(&n), &link)?;
         planted.push(link);
     }
     Ok(planted)
@@ -316,11 +315,9 @@ pub fn ensure_output_base_layout(
         // tools there); keep the link from dangling so tools can be installed into it.
         let _ = std::fs::create_dir_all(ib);
         let link = output_base.join("install");
-        let cur = std::fs::read_link(&link).ok();
-        if cur.as_deref() != Some(ib) {
-            let _ = std::fs::remove_file(&link);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(ib, &link)?;
+        if !zel_vfs::junction_or_symlink_points_to(&link, ib) {
+            let _ = zel_vfs::remove_junction_or_symlink(&link);
+            zel_vfs::create_directory_junction_or_symlink(ib, &link)?;
         }
     }
     Ok(())
@@ -491,11 +488,7 @@ mod tests {
         let c = plant_symlink_forest(&er, &ws, "bazel-", &["skipme".to_string()]).unwrap();
         assert!(c.is_empty());
         assert_eq!(std::fs::read_to_string(er.join("pkg/a.txt")).unwrap(), "a");
-        #[cfg(unix)]
-        assert!(std::fs::symlink_metadata(er.join("pkg"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(zel_vfs::is_junction_or_symlink(&er.join("pkg")));
         assert!(er.join("MODULE.bazel").exists());
         assert!(!er.join("external").exists(), "external/ is never linked");
         assert!(
@@ -512,6 +505,16 @@ mod tests {
                 .unwrap()
                 .is_dir(),
             "bazel-out stays a real dir"
+        );
+
+        // Re-planting (or calling `delete_trees_below_not_prefixed`) unlinks existing directory
+        // junctions/symlinks without deleting the target workspace directory's contents.
+        delete_trees_below_not_prefixed(&er, "bazel-").unwrap();
+        assert!(!er.join("pkg").exists());
+        assert_eq!(
+            std::fs::read_to_string(ws.join("pkg/a.txt")).unwrap(),
+            "a",
+            "source directory behind execroot link/junction must survive cleanup"
         );
     }
 
@@ -583,9 +586,41 @@ mod tests {
         for d in ["execroot", "external", "server", "action_cache"] {
             assert!(ob.join(d).is_dir(), "{d}");
         }
+        let install_link = ob.join("install");
+        assert!(zel_vfs::junction_or_symlink_points_to(&install_link, &ib));
         #[cfg(unix)]
-        assert_eq!(std::fs::read_link(ob.join("install")).unwrap(), ib);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Making `ob` read-only proves a repeat `ensure_output_base_layout` with the same
+            // `install_base` leaves `ob/install` untouched rather than unlinking & recreating it.
+            std::fs::set_permissions(&ob, std::fs::Permissions::from_mode(0o555)).unwrap();
+            ensure_output_base_layout(&ob, Some(&ib)).unwrap();
+            std::fs::set_permissions(&ob, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let created_before = std::fs::symlink_metadata(&install_link)
+                .unwrap()
+                .created()
+                .ok();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            ensure_output_base_layout(&ob, Some(&ib)).unwrap();
+            let created_after = std::fs::symlink_metadata(&install_link)
+                .unwrap()
+                .created()
+                .ok();
+            if let (Some(b), Some(a)) = (created_before, created_after) {
+                assert_eq!(b, a, "matching install junction must not be recreated");
+            }
+        }
+        // Changing `install_base` replaces the stale `install` link/junction.
+        let ib2 = root.join("install_base_v2");
+        std::fs::create_dir_all(&ib2).unwrap();
+        ensure_output_base_layout(&ob, Some(&ib2)).unwrap();
+        assert!(zel_vfs::junction_or_symlink_points_to(&install_link, &ib2));
+        assert!(!zel_vfs::junction_or_symlink_points_to(&install_link, &ib));
         ensure_output_base_layout(&ob, Some(&ib)).unwrap();
+        assert!(zel_vfs::junction_or_symlink_points_to(&install_link, &ib));
         write_command_log(&ob, b"out\n", b"err\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(ob.join("command.log")).unwrap(),

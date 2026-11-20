@@ -34,14 +34,8 @@ impl Ws {
     fn new(name: &str, fixture: &str) -> Ws {
         let base = fs::canonicalize(std::env::temp_dir()).unwrap();
         #[cfg(windows)]
-        let base = {
-            let s = base.to_string_lossy();
-            if let Some(rest) = s.strip_prefix(r"\\?\") {
-                PathBuf::from(rest)
-            } else {
-                base
-            }
-        };
+        let base =
+            PathBuf::from(zel_vfs::strip_windows_nt_prefix(&base.to_string_lossy()).into_owned());
         let root = base.join(format!("zel-fix6-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let ws = root.join("ws");
@@ -252,14 +246,14 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
     assert!(l < f, "{err}");
 
     // Import of an unreadable file: INTERNAL_ERROR (37) with the Parsing log lines.
-    // `rc_file.cc` (`blaze_util::Tokenize`) treats `\` as an escape character on all platforms,
-    // so normalize Windows path separators to `/` before writing into `.bazelrc`.
-    let missing_rc = w
-        .root
-        .join("missing.rc")
-        .to_string_lossy()
-        .replace('\\', "/");
-    fs::write(w.ws.join(".bazelrc"), format!("import \"{missing_rc}\"\n")).unwrap();
+    // `.bazelrc` tokenization (`blaze_util::Tokenize`) treats `\` as an escape character on all
+    // platforms, so paths in `.bazelrc` must use `/` or escaped `\\`.
+    let root_slash = w.root.to_string_lossy().replace('\\', "/");
+    fs::write(
+        w.ws.join(".bazelrc"),
+        format!("import \"{root_slash}/missing.rc\"\n"),
+    )
+    .unwrap();
     let o = w.run(&[], &["info", "release"], &[]);
     let err = s(&o.stderr);
     assert_eq!(o.status.code(), Some(37), "{err}");
@@ -267,6 +261,21 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
     assert!(
         err.contains("] Unexpected error reading config file '")
             && err.contains("missing.rc': (error: 2): "),
+        "{err}"
+    );
+
+    let root_escaped = w.root.to_string_lossy().replace('\\', "\\\\");
+    fs::write(
+        w.ws.join(".bazelrc"),
+        format!("import {root_escaped}/missing_escaped.rc\n"),
+    )
+    .unwrap();
+    let o = w.run(&[], &["info", "release"], &[]);
+    let err = s(&o.stderr);
+    assert_eq!(o.status.code(), Some(37), "{err}");
+    assert!(
+        err.contains("] Unexpected error reading config file '")
+            && err.contains("missing_escaped.rc': (error: 2): "),
         "{err}"
     );
 
@@ -284,6 +293,20 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
         "{err}"
     );
     assert!(!err.contains("[ERROR"), "{err}");
+
+    // `--bazelrc=` resolves `""` to `cwd` and fails `CanReadFile` with BAD_ARGV (2), while
+    // `BAZELRC` skips trailing/consecutive empty comma slots per `blaze_util::Split`.
+    fs::write(w.ws.join(".bazelrc"), "").unwrap();
+    fs::write(w.ws.join("extra.rc"), "common --isatty=0\n").unwrap();
+    let o = w.run(&["--bazelrc="], &["info", "release"], &[]);
+    let err = s(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("Error: Unable to read .bazelrc file '"),
+        "{err}"
+    );
+    let o = w.run(&[], &["info", "release"], &[("BAZELRC", ",extra.rc,,")]);
+    assert_eq!(o.status.code(), Some(0), "{}", s(&o.stderr));
 }
 
 #[test]

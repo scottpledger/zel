@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `.bazelrc` file discovery, tokenizer, import resolution, and inheritance.
-//! Mirrors `src/main/cpp/rc_file.cc` and `src/main/cpp/option_processor.cc`.
+//! `.bazelrc` file discovery, tokenizer, import resolution, semantic version conditions, and inheritance.
+//! Mirrors `src/main/cpp/rc_file.cc`, `src/main/cpp/sem_ver.cc`, and `src/main/cpp/option_processor.cc`.
 
 use crate::error::OptionsParsingError;
-use crate::flag_tables::COMMAND_INHERITANCE;
+use crate::flag_tables::{get_startup_options_map, COMMAND_INHERITANCE};
 use crate::priority::{OptionPriority, PriorityCategory};
-use crate::startup::StartupOptions;
+use crate::startup::{absolute_path_from_flag, parse_startup_flag_token, StartupOptions};
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 use std::io;
 use zel_util::Os;
 use zel_vfs::{FileSystem, PathFragment};
-
-const MAX_IMPORT_DEPTH: usize = 100;
 
 /// Buffered `BAZEL_LOG(INFO)` lines of the C++ client (`file:line`, message); the launcher
 /// flushes them in front of a fatal error (`BAZEL_DIE`), so they are collected here.
@@ -55,13 +54,32 @@ fn errno_text(e: &io::Error) -> String {
     s
 }
 
+/// Distinguishes a direct unreadable target file (`ParseError::UNREADABLE_FILE`, ignored by `try-import`)
+/// from malformed syntax, import loops, or failed nested mandatory `import`s.
+enum RcLoadError {
+    UnreadableTarget(OptionsParsingError),
+    ParseFailure(OptionsParsingError),
+}
+
+impl RcLoadError {
+    fn into_inner(self) -> OptionsParsingError {
+        match self {
+            Self::UnreadableTarget(e) | Self::ParseFailure(e) => e,
+        }
+    }
+}
+
 /// Parsed `.bazelrc` configuration containing command and config entries.
 #[derive(Debug, Clone, Default)]
 pub struct BazelrcConfig {
     /// Maps section key (e.g. `"startup"`, `"common"`, `"build"`, `"build:opt"`) to list of `(option, source_path)`.
     pub sections: BTreeMap<String, Vec<(String, String)>>,
-    /// Canonical paths of all loaded rc files in order.
+    /// Distinct loaded rc file paths in first-load order.
     pub loaded_rc_files: Vec<PathFragment>,
+    /// Canonical paths of every rc file load (including duplicate imports).
+    pub canonical_rc_paths: Vec<PathFragment>,
+    /// Non-fatal warnings collected during rc discovery and loading (e.g. duplicate rc files).
+    pub warnings: Vec<String>,
 }
 
 impl BazelrcConfig {
@@ -127,19 +145,18 @@ impl BazelrcConfig {
         fs: &dyn FileSystem,
         visited: &mut HashSet<PathFragment>,
     ) -> Result<(), OptionsParsingError> {
-        let pf = PathFragment::create(source_path);
-        let mut import_stack = vec![pf.clone()];
-        visited.insert(pf);
+        visited.insert(PathFragment::create(source_path));
+        let mut import_stack = vec![source_path.to_string()];
         self.parse_str_internal(
             content,
             source_path,
             Some(workspace_dir),
+            Some(workspace_dir),
             fs,
             "7.0.0",
             &mut import_stack,
-            visited,
-            0,
         )
+        .map_err(RcLoadError::into_inner)
     }
 
     /// Parses an RC file with explicit build label.
@@ -151,20 +168,17 @@ impl BazelrcConfig {
         fs: &dyn FileSystem,
         build_label: &str,
     ) -> Result<(), OptionsParsingError> {
-        let pf = PathFragment::create(source_path);
-        let mut import_stack = vec![pf.clone()];
-        let mut visited = HashSet::new();
-        visited.insert(pf);
+        let mut import_stack = vec![source_path.to_string()];
         self.parse_str_internal(
             content,
             source_path,
             workspace_dir,
+            workspace_dir,
             fs,
             build_label,
             &mut import_stack,
-            &mut visited,
-            0,
         )
+        .map_err(RcLoadError::into_inner)
     }
 
     /// Reads and parses an RC file from filesystem.
@@ -175,59 +189,67 @@ impl BazelrcConfig {
         fs: &dyn FileSystem,
         build_label: &str,
     ) -> Result<(), OptionsParsingError> {
-        let mut import_stack = vec![rc_path.clone()];
-        let mut visited = HashSet::new();
-        visited.insert(rc_path.clone());
+        self.parse_file_with_cwd(rc_path, workspace_dir, workspace_dir, fs, build_label)
+    }
+
+    /// Reads and parses an RC file from filesystem resolving relative non-`%workspace%/` imports against `cwd`.
+    pub fn parse_file_with_cwd(
+        &mut self,
+        rc_path: &PathFragment,
+        workspace_dir: Option<&PathFragment>,
+        cwd: Option<&PathFragment>,
+        fs: &dyn FileSystem,
+        build_label: &str,
+    ) -> Result<(), OptionsParsingError> {
+        let mut import_stack = vec![rc_path.path_string().to_string()];
         self.parse_file_internal(
             rc_path,
+            rc_path.path_string(),
             workspace_dir,
+            cwd,
             fs,
             build_label,
             &mut import_stack,
-            &mut visited,
-            0,
         )
+        .map_err(RcLoadError::into_inner)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn parse_file_internal(
         &mut self,
         rc_path: &PathFragment,
+        display_path: &str,
         workspace_dir: Option<&PathFragment>,
+        cwd: Option<&PathFragment>,
         fs: &dyn FileSystem,
         build_label: &str,
-        import_stack: &mut Vec<PathFragment>,
-        visited: &mut HashSet<PathFragment>,
-        depth: usize,
-    ) -> Result<(), OptionsParsingError> {
+        import_stack: &mut Vec<String>,
+    ) -> Result<(), RcLoadError> {
         client_log(
             "src/main/cpp/rc_file.cc:94",
-            format!("Parsing the RcFile {rc_path}"),
+            format!("Parsing the RcFile {display_path}"),
         );
         let bytes = fs.read_file(rc_path).map_err(|e| {
-            OptionsParsingError::new(format!(
-                "Unexpected error reading config file '{rc_path}': {}",
+            RcLoadError::UnreadableTarget(OptionsParsingError::new(format!(
+                "Unexpected error reading config file '{display_path}': {}",
                 errno_text(&e)
-            ))
+            )))
         })?;
         let content = String::from_utf8_lossy(&bytes);
         if !self.loaded_rc_files.contains(rc_path) {
             self.loaded_rc_files.push(rc_path.clone());
         }
-        // `rc_file.cc`: option sources (shown by `--announce_rc`) are the *canonical* file names
-        // (`canonicalize_path(filename)`); error texts keep the name as given.
-        let canonical = std::fs::canonicalize(rc_path.path_string())
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| rc_path.path_string().to_string());
+        let canonical = canonicalize_rc_path(fs, rc_path);
+        self.canonical_rc_paths
+            .push(PathFragment::create(&canonical));
         self.parse_str_internal(
             &content,
             &canonical,
             workspace_dir,
+            cwd,
             fs,
             build_label,
             import_stack,
-            visited,
-            depth,
         )
     }
 
@@ -237,21 +259,11 @@ impl BazelrcConfig {
         content: &str,
         source_path: &str,
         workspace_dir: Option<&PathFragment>,
+        cwd: Option<&PathFragment>,
         fs: &dyn FileSystem,
         build_label: &str,
-        import_stack: &mut Vec<PathFragment>,
-        visited: &mut HashSet<PathFragment>,
-        depth: usize,
-    ) -> Result<(), OptionsParsingError> {
-        if depth > MAX_IMPORT_DEPTH {
-            return Err(OptionsParsingError::new(format!(
-                "Maximum import depth exceeded parsing config file '{source_path}'"
-            )));
-        }
-
-        let source_pf = PathFragment::create(source_path);
-        let source_dir = source_pf.parent_directory();
-
+        import_stack: &mut Vec<String>,
+    ) -> Result<(), RcLoadError> {
         // `rc_file.cc`: "A '\\' at the end of a line continues the line" - both `\\\r\n` and `\\\n` are deleted
         // from the whole file before it is split on '\n' and each line stripped.
         let content = content.replace("\\\r\n", "").replace("\\\n", "");
@@ -275,8 +287,10 @@ impl BazelrcConfig {
                 if (is_version_conditioned && tokens.len() != 3)
                     || (!is_version_conditioned && tokens.len() != 2)
                 {
-                    return Err(OptionsParsingError::new(format!(
-                        "Invalid import declaration in config file '{source_path}': '{full_line}'"
+                    return Err(RcLoadError::ParseFailure(OptionsParsingError::new(
+                        format!(
+                            "Invalid import declaration in config file '{source_path}': '{full_line}'"
+                        ),
                     )));
                 }
 
@@ -285,13 +299,14 @@ impl BazelrcConfig {
                     let matches = match eval_bazel_version_condition(condition, build_label) {
                         Ok(m) => m,
                         Err(err_msg) => {
-                            return Err(OptionsParsingError::new(format!(
-                                "Invalid version condition in config file '{source_path}': '{full_line}'. {err_msg}"
+                            return Err(RcLoadError::ParseFailure(OptionsParsingError::new(
+                                format!(
+                                    "Invalid version condition in config file '{source_path}': '{full_line}'. {err_msg}"
+                                ),
                             )));
                         }
                     };
                     if !matches {
-                        // Condition did not match; skip import
                         continue;
                     }
                 }
@@ -302,173 +317,133 @@ impl BazelrcConfig {
                     &tokens[1]
                 };
 
-                let resolved_path = if import_target_str.starts_with("%workspace%") {
+                let (resolved_path, stack_entry) = if let Some(rel) =
+                    import_target_str.strip_prefix("%workspace%/")
+                {
                     let Some(ws) = workspace_dir else {
                         if !is_try {
-                            return Err(OptionsParsingError::new(format!(
+                            return Err(RcLoadError::ParseFailure(OptionsParsingError::new(format!(
                                 "Nonexistent path in import declaration in config file '{source_path}': '{full_line}'. This is because no workspace was found and %workspace%-relative imports are only supported when running from within a workspace."
-                            )));
+                            ))));
                         }
-                        continue;
-                    };
-                    let rel = import_target_str
-                        .trim_start_matches("%workspace%")
-                        .trim_start_matches('/');
-                    ws.get_relative_str(rel)
-                } else {
-                    let target_pf = PathFragment::create(import_target_str);
-                    if target_pf.is_absolute() {
-                        target_pf
-                    } else if let Some(ref dir) = source_dir {
-                        dir.get_relative(&target_pf)
-                    } else if let Some(ws) = workspace_dir {
-                        ws.get_relative(&target_pf)
-                    } else {
-                        target_pf
-                    }
-                };
-
-                // Check for import cycle
-                if import_stack.contains(&resolved_path) {
-                    let mut loop_str = String::from("Import loop detected:\n");
-                    for p in import_stack.iter() {
-                        loop_str.push_str(&format!("  {}\n", p.path_string()));
-                    }
-                    loop_str.push_str(&format!("  {}\n", resolved_path.path_string()));
-                    return Err(OptionsParsingError::new(loop_str));
-                }
-
-                if visited.contains(&resolved_path) {
-                    continue;
-                }
-
-                if !fs.exists(&resolved_path, true) {
-                    if is_try {
-                        // rc_file.cc: a `%workspace%` import that cannot be resolved is skipped
-                        // before reading (line 205); a plain path is read first (line 94) and the
-                        // unreadable file skipped afterwards (line 234).
-                        let loc = if import_target_str.starts_with("%workspace%") {
-                            "src/main/cpp/rc_file.cc:205"
-                        } else {
-                            client_log(
-                                "src/main/cpp/rc_file.cc:94",
-                                format!("Parsing the RcFile {import_target_str}"),
-                            );
-                            "src/main/cpp/rc_file.cc:234"
-                        };
                         client_log(
-                            loc,
+                            "src/main/cpp/rc_file.cc:205",
                             format!(
                                 "Skipped optional import of {import_target_str}, the specified rc file either does not exist or is not readable."
                             ),
                         );
                         continue;
-                    }
-                    if import_target_str.starts_with("%workspace%") {
-                        return Err(OptionsParsingError::new(format!(
+                    };
+                    let p = ws.get_relative_str(rel.trim_start_matches('/'));
+                    if !fs.exists(&p, true) {
+                        if is_try {
+                            client_log(
+                                "src/main/cpp/rc_file.cc:205",
+                                format!(
+                                    "Skipped optional import of {import_target_str}, the specified rc file either does not exist or is not readable."
+                                ),
+                            );
+                            continue;
+                        }
+                        return Err(RcLoadError::ParseFailure(OptionsParsingError::new(format!(
                             "Nonexistent path in import declaration in config file '{source_path}': '{full_line}' (are you in your source checkout/WORKSPACE?)"
-                        )));
+                        ))));
                     }
-                    // A plain path is only found missing when it is read (RcFile::ParseFile).
-                    client_log(
-                        "src/main/cpp/rc_file.cc:94",
-                        format!("Parsing the RcFile {import_target_str}"),
-                    );
-                    let io_err = fs.read_file(&resolved_path).err().unwrap_or_else(|| {
-                        io::Error::new(io::ErrorKind::NotFound, "No such file or directory")
-                    });
-                    return Err(OptionsParsingError::new(format!(
-                        "Unexpected error reading config file '{import_target_str}': {}",
-                        errno_text(&io_err)
+                    let entry = p.path_string().to_string();
+                    (p, entry)
+                } else {
+                    // Non-`%workspace%/` imports are opened literally as written (`rc_file.cc`),
+                    // so relative paths resolve against `cwd` rather than the importing file's directory.
+                    let target_pf = PathFragment::create(import_target_str);
+                    let fs_pf = if target_pf.is_absolute() {
+                        target_pf
+                    } else if let Some(c) = cwd {
+                        c.get_relative(&target_pf)
+                    } else if let Some(ws) = workspace_dir {
+                        ws.get_relative(&target_pf)
+                    } else if let Ok(cur) = std::env::current_dir() {
+                        PathFragment::create(&cur.to_string_lossy()).get_relative(&target_pf)
+                    } else {
+                        target_pf
+                    };
+                    (fs_pf, import_target_str.to_string())
+                };
+
+                // Import cycles are exact string matches on the path pushed onto `import_stack`.
+                if import_stack.iter().any(|p| p == &stack_entry) {
+                    let mut loop_str = String::from("Import loop detected:\n");
+                    for p in import_stack.iter() {
+                        loop_str.push_str(&format!("  {p}\n"));
+                    }
+                    loop_str.push_str(&format!("  {stack_entry}\n"));
+                    return Err(RcLoadError::ParseFailure(OptionsParsingError::new(
+                        loop_str,
                     )));
                 }
 
-                import_stack.push(resolved_path.clone());
-                visited.insert(resolved_path.clone());
-
+                import_stack.push(stack_entry.clone());
                 let sub_res = self.parse_file_internal(
                     &resolved_path,
+                    &stack_entry,
                     workspace_dir,
+                    cwd,
                     fs,
                     build_label,
                     import_stack,
-                    visited,
-                    depth + 1,
                 );
-
                 import_stack.pop();
 
-                if let Err(e) = sub_res {
-                    if is_try && e.message.contains("Unexpected error reading config file") {
-                        continue;
+                match sub_res {
+                    Ok(()) => {}
+                    Err(RcLoadError::UnreadableTarget(e)) => {
+                        if is_try {
+                            client_log(
+                                "src/main/cpp/rc_file.cc:234",
+                                format!(
+                                    "Skipped optional import of {import_target_str}, the specified rc file either does not exist or is not readable."
+                                ),
+                            );
+                            continue;
+                        }
+                        return Err(RcLoadError::ParseFailure(e));
                     }
-                    return Err(e);
+                    Err(RcLoadError::ParseFailure(e)) => {
+                        return Err(RcLoadError::ParseFailure(e));
+                    }
                 }
                 continue;
             }
 
-            const VALID_COMMANDS: &[&str] = &[
-                "always",
-                "common",
-                "startup",
-                "build",
-                "test",
-                "run",
-                "clean",
-                "info",
-                "query",
-                "cquery",
-                "aquery",
-                "coverage",
-                "version",
-                "help",
-                "shutdown",
-                "canonicalize-flags",
-                "config",
-                "dump",
-                "print_action",
-                "mobile-install",
-                "license",
-                "mod",
-                "fetch",
-                "vendor",
-                "sync",
-            ];
-
             // Normal section line: command [option ...]
+            // `rc_file.cc` has no command whitelist; any non-directive first token is stored as a section.
             let cmd_base = match command.split_once(':') {
                 Some((base, _)) => base,
                 None => command.as_str(),
             };
-            if !VALID_COMMANDS.contains(&cmd_base) {
-                eprintln!(
-                    "WARNING: while reading option defaults file '{source_path}':\n  invalid command name '{command}'."
-                );
-                continue;
-            }
 
-            // Check that rc-disallowed startup flags are NOT specified in RC file!
-            for tok in &tokens[1..] {
-                let flag_only = tok.split('=').next().unwrap_or(tok.as_str());
-                if flag_only == "--bazelrc" {
-                    return Err(OptionsParsingError::new(
-                        "Can't specify --bazelrc in the RC file.",
-                    ));
-                }
-                if matches!(
-                    flag_only,
-                    "--system_rc"
-                        | "--nosystem_rc"
-                        | "--workspace_rc"
-                        | "--noworkspace_rc"
-                        | "--home_rc"
-                        | "--nohome_rc"
-                        | "--ignore_all_rc_files"
-                        | "--noignore_all_rc_files"
-                ) {
-                    return Err(OptionsParsingError::new(format!(
-                        "Can't specify {flag_only} in the RC file."
-                    )));
+            if cmd_base == "startup" {
+                for tok in &tokens[1..] {
+                    let flag_only = tok.split('=').next().unwrap_or(tok.as_str());
+                    if flag_only == "--bazelrc" {
+                        return Err(RcLoadError::ParseFailure(OptionsParsingError::new(
+                            "Can't specify --bazelrc in the RC file.",
+                        )));
+                    }
+                    if matches!(
+                        flag_only,
+                        "--system_rc"
+                            | "--nosystem_rc"
+                            | "--workspace_rc"
+                            | "--noworkspace_rc"
+                            | "--home_rc"
+                            | "--nohome_rc"
+                            | "--ignore_all_rc_files"
+                            | "--noignore_all_rc_files"
+                    ) {
+                        return Err(RcLoadError::ParseFailure(OptionsParsingError::new(
+                            format!("Can't specify {flag_only} in the RC file."),
+                        )));
+                    }
                 }
             }
 
@@ -494,12 +469,67 @@ impl BazelrcConfig {
     }
 }
 
+fn canonicalize_rc_path(fs: &dyn FileSystem, rc_path: &PathFragment) -> String {
+    if let Ok(p) = std::fs::canonicalize(rc_path.path_string()) {
+        let s = p.to_string_lossy();
+        #[cfg(windows)]
+        let s = zel_vfs::strip_windows_nt_prefix(&s);
+        return s.into_owned();
+    }
+    if let Ok(resolved) = zel_vfs::resolve_symlink_chain(fs, rc_path) {
+        return resolved.real_path.path_string().to_string();
+    }
+    rc_path.path_string().to_string()
+}
+
+fn expand_windows_percent_vars(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('%') {
+            let var = &after[..end];
+            if !var.is_empty() {
+                if let Ok(val) = std::env::var(var) {
+                    out.push_str(&val);
+                    rest = &after[end + 1..];
+                    continue;
+                }
+            }
+            out.push('%');
+            out.push_str(var);
+            out.push('%');
+            rest = &after[end + 1..];
+        } else {
+            out.push('%');
+            out.push_str(after);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn can_read_rc_file(fs: &dyn FileSystem, path: &PathFragment) -> bool {
+    let Ok(st) = fs.stat(path, true) else {
+        return false;
+    };
+    if st.is_directory {
+        return false;
+    }
+    if !st.is_special_file && std::fs::symlink_metadata(path.path_string()).is_ok() {
+        return std::fs::File::open(path.path_string()).is_ok();
+    }
+    (st.permissions & 0o444) != 0
+}
+
 /// Discovers and loads rc files in full parity with Bazel's discovery order:
-/// 1. `/etc/bazel.bazelrc` (system rc)
-/// 2. `%workspace%/.bazelrc` and `.zelrc` (workspace rc)
-/// 3. `$HOME/.bazelrc` and `.zelrc` (home rc)
+/// 1. `/etc/bazel.bazelrc` or `%ProgramData%/bazel.bazelrc` (system rc)
+/// 2. `%workspace%/.bazelrc` (workspace rc)
+/// 3. `$HOME/.bazelrc` (home rc)
 /// 4. `$BAZELRC` env var
-/// 5. `--bazelrc` CLI flags
+/// 5. `--bazelrc` CLI flags (`/dev/null` stops subsequent `--bazelrc` entries)
 pub fn discover_and_load_rc_files(
     startup: &mut StartupOptions,
     workspace_dir: Option<&PathFragment>,
@@ -508,9 +538,30 @@ pub fn discover_and_load_rc_files(
     fs: &dyn FileSystem,
     build_label: &str,
 ) -> Result<BazelrcConfig, OptionsParsingError> {
+    let bazelrc_env = std::env::var("BAZELRC").ok();
+    discover_and_load_rc_files_with_env(
+        startup,
+        workspace_dir,
+        home_dir,
+        cwd,
+        fs,
+        build_label,
+        bazelrc_env.as_deref(),
+    )
+}
+
+fn discover_and_load_rc_files_with_env(
+    startup: &mut StartupOptions,
+    workspace_dir: Option<&PathFragment>,
+    home_dir: Option<&str>,
+    cwd: &PathFragment,
+    fs: &dyn FileSystem,
+    build_label: &str,
+    bazelrc_env: Option<&str>,
+) -> Result<BazelrcConfig, OptionsParsingError> {
     let mut config = BazelrcConfig::default();
     if startup.ignore_all_rc_files {
-        if !startup.bazelrc_files.is_empty() {
+        if startup.bazelrc_files.last().is_some_and(|v| !v.is_empty()) {
             eprintln!("WARNING: Value of --bazelrc is ignored, since --ignore_all_rc_files is on.");
         }
         if startup.home_rc && startup.parsed_options.contains_key("home_rc") {
@@ -522,81 +573,78 @@ pub fn discover_and_load_rc_files(
         if startup.workspace_rc && startup.parsed_options.contains_key("workspace_rc") {
             eprintln!("WARNING: Explicit value of --workspace_rc is ignored, since --ignore_all_rc_files is on.");
         }
+        startup.absolutize_paths(cwd, home_dir);
         return Ok(config);
     }
 
-    let mut potential_rc_files: Vec<(PathFragment, bool)> = Vec::new(); // (path, is_explicit)
+    let mut potential_rc_files: Vec<PathFragment> = Vec::new();
 
     // 1. System rc (unless --nosystem_rc)
     if startup.system_rc {
         let sys_rc = match Os::current() {
-            Os::Windows => PathFragment::create("C:/ProgramData/bazel.bazelrc"),
+            Os::Windows => {
+                let expanded = expand_windows_percent_vars("%ProgramData%/bazel.bazelrc");
+                let path = if expanded.contains("%ProgramData%") {
+                    "C:/ProgramData/bazel.bazelrc".to_string()
+                } else {
+                    expanded
+                };
+                PathFragment::create(&path)
+            }
             _ => PathFragment::create("/etc/bazel.bazelrc"),
         };
-        potential_rc_files.push((sys_rc, false));
+        potential_rc_files.push(sys_rc);
     }
 
     // 2. Workspace rc: %workspace%/.bazelrc (unless --noworkspace_rc)
     if startup.workspace_rc {
         if let Some(ws) = workspace_dir {
-            potential_rc_files.push((ws.get_relative_str(".bazelrc"), false));
+            potential_rc_files.push(ws.get_relative_str(".bazelrc"));
         }
     }
 
     // 3. User rc: $HOME/.bazelrc (unless --nohome_rc)
     if startup.home_rc {
-        if let Some(h) = home_dir {
+        if let Some(h) = home_dir.filter(|s| !s.is_empty()) {
             let home_pf = PathFragment::create(h);
-            potential_rc_files.push((home_pf.get_relative_str(".bazelrc"), false));
+            potential_rc_files.push(home_pf.get_relative_str(".bazelrc"));
         }
     }
 
-    // 4. Env var BAZELRC (split by comma)
-    if let Ok(bazelrc_env) = std::env::var("BAZELRC") {
-        for part in bazelrc_env.split(',') {
-            let trimmed = part.trim();
-            if !trimmed.is_empty() {
-                let pf = PathFragment::create(trimmed);
-                let full_pf = if pf.is_absolute() {
-                    pf
-                } else {
-                    cwd.get_relative(&pf)
-                };
-                potential_rc_files.push((full_pf, true));
+    // 4. Env var BAZELRC (`blaze_util::Split(GetEnv("BAZELRC"), ',')` + `GetAndValidateExistingRcFiles`):
+    // skips empty comma-delimited slots without trimming whitespace; `/dev/null` is a readable empty
+    // file and does not ignore subsequent `BAZELRC` entries.
+    if let Some(bazelrc_env) = bazelrc_env {
+        for part in bazelrc_env.split(',').filter(|part| !part.is_empty()) {
+            if part == "/dev/null" {
+                continue;
             }
+            let full_pf = absolute_path_from_flag(part, cwd, home_dir);
+            if !can_read_rc_file(fs, &full_pf) {
+                return Err(OptionsParsingError::new(format!(
+                    "Error: Unable to read .bazelrc file '{}'.",
+                    full_pf.path_string()
+                )));
+            }
+            potential_rc_files.push(full_pf);
         }
     }
 
-    // 5. Command-line provided --bazelrc (can be repeated; `/dev/null` stops further `--bazelrc`s)
+    // 5. Command-line provided --bazelrc (`GetAllUnaryOptionValues(..., "--bazelrc", "/dev/null")`
+    // + `GetAndValidateExistingRcFiles`): `/dev/null` stops collecting subsequent `--bazelrc` flags,
+    // while `--bazelrc=` resolves `""` via `AbsolutePathFromFlag` to `cwd` and fails `CanReadFile`.
     for custom_rc in &startup.bazelrc_files {
         if custom_rc == "/dev/null" {
-            potential_rc_files.push((PathFragment::create("/dev/null"), true));
             break;
         }
-        let full_pf = if custom_rc == "~" {
-            home_dir
-                .map(PathFragment::create)
-                .unwrap_or_else(|| cwd.get_relative_str("~"))
-        } else if let Some(rest) = custom_rc.strip_prefix("~/").or_else(|| {
-            if Os::current() == Os::Windows {
-                custom_rc.strip_prefix("~\\")
-            } else {
-                None
-            }
-        }) {
-            match home_dir {
-                Some(h) => PathFragment::create(h).get_relative_str(rest),
-                None => cwd.get_relative_str(custom_rc),
-            }
-        } else {
-            let pf = PathFragment::create(custom_rc);
-            if pf.is_absolute() {
-                pf
-            } else {
-                cwd.get_relative(&pf)
-            }
-        };
-        potential_rc_files.push((full_pf, true));
+        let full_pf = absolute_path_from_flag(custom_rc, cwd, home_dir);
+        if !can_read_rc_file(fs, &full_pf) {
+            return Err(OptionsParsingError::new(format!(
+                "Error: Unable to read .bazelrc file '{}'.",
+                full_pf.path_string()
+            )));
+        }
+        potential_rc_files.push(full_pf);
     }
 
     client_log(
@@ -605,78 +653,124 @@ pub fn discover_and_load_rc_files(
             "Looking for the following rc files: {}",
             potential_rc_files
                 .iter()
-                .map(|(p, _)| p.path_string().to_string())
+                .map(|p| p.path_string().to_string())
                 .collect::<Vec<_>>()
                 .join(",")
         ),
     );
 
-    // Deduplicate by canonical path and load
-    let mut visited = HashSet::new();
-    for (rc_path, is_explicit) in potential_rc_files {
-        if !fs.exists(&rc_path, true) {
-            if is_explicit {
-                return Err(OptionsParsingError::new(format!(
-                    "Unable to read .bazelrc file '{}'.",
-                    rc_path.path_string()
-                )));
-            }
+    // Deduplicate top-level candidate queue by canonical path (`DedupeBlazercPaths`) and load.
+    let mut top_level_seen = HashSet::new();
+    for rc_path in potential_rc_files {
+        if !fs.stat(&rc_path, true).is_ok_and(|st| !st.is_directory) {
             continue;
         }
 
-        let canonical_key = std::fs::canonicalize(rc_path.path_string())
-            .map(|p| PathFragment::create(&p.display().to_string()))
-            .unwrap_or_else(|_| rc_path.clone());
-        if !visited.insert(canonical_key) {
+        let canonical_key = PathFragment::create(&canonicalize_rc_path(fs, &rc_path));
+        if !top_level_seen.insert(canonical_key) {
             continue;
         }
 
-        config.parse_file(&rc_path, workspace_dir, fs, build_label)?;
+        config.parse_file_with_cwd(&rc_path, workspace_dir, Some(cwd), fs, build_label)?;
     }
 
-    // Apply any startup options found in rc files (`startup` followed by `startup:<os>`) at RcFile priority.
-    let startup_map = crate::flag_tables::get_startup_options_map();
+    // `OptionProcessor::WarnAboutDuplicateRcFiles`: warn if a canonical rc path was loaded multiple times
+    // (for example, a diamond import or importing a standard rc file that was already discovered).
+    let mut seen_canon = HashSet::new();
+    let mut warned_canon = HashSet::new();
+    for canon in &config.canonical_rc_paths {
+        if !seen_canon.insert(canon.clone()) && warned_canon.insert(canon.clone()) {
+            config.warnings.push(format!(
+                "WARNING: Duplicate rc file: {}",
+                canon.path_string()
+            ));
+        }
+    }
+
+    // Apply startup options from `startup` and `startup:<os>` at RcFile priority, keeping rc-tagged
+    // startup options ahead of CLI-tagged startup options in `startup.raw_tagged_options`.
+    let startup_sections = [
+        "startup".to_string(),
+        format!("startup:{}", crate::config_expander::get_platform_name()),
+    ];
+    let cli_tagged = std::mem::take(&mut startup.raw_tagged_options);
+    let startup_map = get_startup_options_map();
     let mut priority = OptionPriority::lowest_at_category(PriorityCategory::RcFile);
-    let host_startup_section = format!("startup:{}", crate::config_expander::get_platform_name());
-    for section_name in ["startup", host_startup_section.as_str()] {
-        if let Some(startup_opts) = config.sections.get(section_name) {
-            for (flag, src) in startup_opts {
-                if let Some((f, _)) = flag.split_once('=') {
-                    let naked = f.strip_prefix("--").unwrap_or(f);
-                    let is_nullary =
-                        |n: &str| startup_map.get(n).is_some_and(|d| !d.requires_value());
-                    let nullary_negated = naked.strip_prefix("no").is_some_and(|rest| {
-                        startup_map
-                            .get(rest)
-                            .is_some_and(|d| d.uses_boolean_syntax())
-                    });
-                    if f.starts_with("--")
-                        && naked != "block_for_lock"
-                        && (is_nullary(naked) || nullary_negated)
-                    {
-                        return Err(OptionsParsingError::new(format!(
-                            "FATAL: In argument '{flag}': option '{f}' does not take a value."
-                        )));
-                    }
-                }
-                if let Err(e) = startup.apply_flag_with_priority(flag, src, priority.clone()) {
-                    let prod = if startup.product_name.is_empty() {
-                        "bazel"
-                    } else {
-                        &startup.product_name
-                    };
-                    let msg = &e.message;
-                    if msg.starts_with("Invalid argument to") {
-                        return Err(OptionsParsingError::new(format!("FATAL: {msg}")));
-                    }
+
+    let finish_raw_tagged = |startup: &mut StartupOptions, cli: Vec<_>| {
+        startup.raw_tagged_options.extend(cli);
+    };
+
+    for sec_name in &startup_sections {
+        let Some(startup_opts) = config.sections.get(sec_name) else {
+            continue;
+        };
+        let mut idx = 0;
+        while idx < startup_opts.len() {
+            let (flag, src) = &startup_opts[idx];
+            if let Some((f, _)) = flag.split_once('=') {
+                let naked = f.strip_prefix("--").unwrap_or(f);
+                let is_nullary = |n: &str| startup_map.get(n).is_some_and(|d| !d.requires_value());
+                let nullary_negated = naked.strip_prefix("no").is_some_and(|rest| {
+                    startup_map
+                        .get(rest)
+                        .is_some_and(|d| d.uses_boolean_syntax())
+                });
+                if f.starts_with("--")
+                    && naked != "block_for_lock"
+                    && (is_nullary(naked) || nullary_negated)
+                {
+                    finish_raw_tagged(startup, cli_tagged);
                     return Err(OptionsParsingError::new(format!(
-                        "FATAL: Unknown startup option: '{flag}'.\n  For more info, run '{prod} help startup_options'."
+                        "FATAL: In argument '{flag}': option '{f}' does not take a value."
                     )));
                 }
-                priority = priority.next();
             }
+
+            let (flag_name, inline_val) = parse_startup_flag_token(flag);
+            let combined_buf;
+            let effective_flag = if inline_val.is_none()
+                && startup_map
+                    .get(flag_name.as_str())
+                    .is_some_and(|d| d.requires_value())
+            {
+                if idx + 1 < startup_opts.len() && startup_opts[idx + 1].1 == *src {
+                    combined_buf = format!("{flag}={}", startup_opts[idx + 1].0);
+                    idx += 1;
+                    combined_buf.as_str()
+                } else {
+                    let prod = startup.lowercase_product_name();
+                    finish_raw_tagged(startup, cli_tagged);
+                    return Err(OptionsParsingError::new(format!(
+                        "FATAL: {}",
+                        OptionsParsingError::startup_option_missing_value(flag, &prod).message
+                    )));
+                }
+            } else {
+                flag.as_str()
+            };
+
+            if let Err(e) = startup.apply_flag_with_priority(effective_flag, src, priority.clone())
+            {
+                let prod = startup.lowercase_product_name();
+                let msg = &e.message;
+                finish_raw_tagged(startup, cli_tagged);
+                if msg.starts_with("Invalid argument to")
+                    || msg.starts_with("The startup flag --invocation_policy")
+                {
+                    return Err(OptionsParsingError::new(format!("FATAL: {msg}")));
+                }
+                return Err(OptionsParsingError::new(format!(
+                    "FATAL: Unknown startup option: '{flag}'.\n  For more info, run '{prod} help startup_options'."
+                )));
+            }
+            priority = priority.next();
+            idx += 1;
         }
     }
+
+    finish_raw_tagged(startup, cli_tagged);
+    startup.absolutize_paths(cwd, home_dir);
 
     Ok(config)
 }
@@ -783,42 +877,48 @@ pub fn partition_rc_sources_and_apply(
     Ok(remaining)
 }
 
-/// Tokenizes an RC file line respecting quotes, backslashes, and # comments.
+/// Tokenizes an RC file line respecting quotes, backslashes (including inside single quotes), and `#` comments.
+/// Mirrors `blaze_util::SplitQuotedStringUsing` as invoked by `rc_file.cc`.
 pub fn tokenize_rc_line(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut has_token = false;
     let mut in_single = false;
     let mut in_double = false;
     let mut chars = line.chars().peekable();
 
     while let Some(c) = chars.next() {
         if c == '#' && !in_single && !in_double {
-            // Rest of line is comment
             break;
         }
         if c == '\\' {
             if let Some(next_c) = chars.next() {
+                has_token = true;
                 current.push(next_c);
             }
             continue;
         }
         if c == '\'' && !in_double {
+            has_token = true;
             in_single = !in_single;
             continue;
         }
         if c == '"' && !in_single {
+            has_token = true;
             in_double = !in_double;
             continue;
         }
-        if c.is_whitespace() && !in_single && !in_double {
-            if !current.is_empty() {
+        if matches!(c, ' ' | '\t' | '\n' | '\r') && !in_single && !in_double {
+            if has_token {
                 tokens.push(std::mem::take(&mut current));
+                has_token = false;
             }
             continue;
         }
+        has_token = true;
         current.push(c);
     }
-    if !current.is_empty() {
+    if has_token {
         tokens.push(current);
     }
     tokens
@@ -854,6 +954,15 @@ pub struct SemVer {
 }
 
 impl SemVer {
+    pub fn new(major: i32, minor: i32, patch: i32) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+            prerelease: Vec::new(),
+        }
+    }
+
     fn parse_component(part: &str) -> Option<i32> {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
             return None;
@@ -979,14 +1088,13 @@ impl SemVer {
 }
 
 impl PartialOrd for SemVer {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for SemVer {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
+    fn cmp(&self, other: &Self) -> Ordering {
         match (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch)) {
             Ordering::Equal => {}
             non_eq => return non_eq,
@@ -1015,28 +1123,25 @@ impl Ord for SemVer {
     }
 }
 
-/// Evaluates a Bazel version condition (e.g. `>=7.0.0`, `<8.0.0`, `==7.1.0`, `~8.2.4`).
+/// Evaluates a Bazel version condition (`<`, `<=`, `>`, `>=`, `==`, `!=`, `~`) matching `rc_file.cc`.
 pub fn eval_bazel_version_condition(
     condition: &str,
     current_version: &str,
 ) -> Result<bool, String> {
-    let mut op_len = 0;
-    if condition.starts_with("<=")
+    let op_len = if condition.starts_with("<=")
         || condition.starts_with(">=")
         || condition.starts_with("==")
         || condition.starts_with("!=")
     {
-        op_len = 2;
+        2
     } else if condition.starts_with('<') || condition.starts_with('>') || condition.starts_with('~')
     {
-        op_len = 1;
-    }
-
-    if op_len == 0 {
+        1
+    } else {
         return Err(format!(
             "Condition '{condition}'. A valid condition is one of the comparison operators ('<', '<=', '>', '>=', '==', '!=', '~') followed by a semantic version."
         ));
-    }
+    };
 
     let op = &condition[..op_len];
     let ver_str = &condition[op_len..];
@@ -1061,12 +1166,12 @@ pub fn eval_bazel_version_condition(
 
     let ord = curr_ver.cmp(&target_ver);
     match op {
-        "<" => Ok(ord == std::cmp::Ordering::Less),
-        "<=" => Ok(ord != std::cmp::Ordering::Greater),
-        ">" => Ok(ord == std::cmp::Ordering::Greater),
-        ">=" => Ok(ord != std::cmp::Ordering::Less),
-        "==" => Ok(ord == std::cmp::Ordering::Equal),
-        "!=" => Ok(ord != std::cmp::Ordering::Equal),
+        "<" => Ok(ord == Ordering::Less),
+        "<=" => Ok(ord != Ordering::Greater),
+        ">" => Ok(ord == Ordering::Greater),
+        ">=" => Ok(ord != Ordering::Less),
+        "==" => Ok(ord == Ordering::Equal),
+        "!=" => Ok(ord != Ordering::Equal),
         _ => Err(format!("Unsupported operator '{op}'")),
     }
 }
@@ -1077,23 +1182,29 @@ mod tests {
     use zel_vfs::InMemoryFileSystem;
 
     #[test]
-    fn test_rc_tokenize() {
+    fn test_rc_tokenize_and_single_quote_backslash() {
         let line = "build --copt=\"-O3 -Wall\" --jobs 16 # this is a comment";
         let tokens = tokenize_rc_line(line);
         assert_eq!(tokens, vec!["build", "--copt=-O3 -Wall", "--jobs", "16"]);
+
+        // `rc_file.cc`: backslash escapes even inside single quotes (`'foo\'bar'` -> `foo'bar`).
+        let single_escaped = tokenize_rc_line("build '--copt=foo\\'bar' ''");
+        assert_eq!(single_escaped, vec!["build", "--copt=foo'bar", ""]);
     }
 
     #[test]
-    fn test_rc_relative_import() {
+    fn test_rc_relative_import_resolves_against_cwd_not_importing_dir() {
         let fs = InMemoryFileSystem::default();
         let ws = PathFragment::create("/workspace");
-        fs.create_directory_and_parents(&ws).unwrap();
+        let cwd = PathFragment::create("/workspace/cwd_dir");
         let sub = ws.get_relative_str("sub");
+        fs.create_directory_and_parents(&cwd).unwrap();
         fs.create_directory_and_parents(&sub).unwrap();
 
-        fs.write_file(&sub.get_relative_str("base.bazelrc"), b"build -c opt\n")
+        fs.write_file(&cwd.get_relative_str("base.bazelrc"), b"build -c opt\n")
             .unwrap();
-
+        fs.write_file(&sub.get_relative_str("base.bazelrc"), b"build -c dbg\n")
+            .unwrap();
         fs.write_file(
             &sub.get_relative_str("nested.bazelrc"),
             b"import base.bazelrc\nbuild --jobs=32\n",
@@ -1102,9 +1213,10 @@ mod tests {
 
         let mut config = BazelrcConfig::default();
         config
-            .parse_file(
+            .parse_file_with_cwd(
                 &sub.get_relative_str("nested.bazelrc"),
                 Some(&ws),
+                Some(&cwd),
                 &fs,
                 "7.0.0",
             )
@@ -1113,6 +1225,155 @@ mod tests {
         let opts = config.get_inherited_command_options("build");
         let flags: Vec<String> = opts.into_iter().map(|(o, _)| o).collect();
         assert_eq!(flags, vec!["-c", "opt", "--jobs=32"]);
+    }
+
+    #[test]
+    fn test_rc_diamond_imports_apply_twice_and_warn_duplicate() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        fs.create_directory_and_parents(&ws).unwrap();
+
+        fs.write_file(
+            &ws.get_relative_str(".bazelrc"),
+            b"import %workspace%/a.rc\nimport %workspace%/b.rc\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &ws.get_relative_str("a.rc"),
+            b"import %workspace%/shared.rc\nbuild --copt=-DA\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &ws.get_relative_str("b.rc"),
+            b"import %workspace%/shared.rc\nbuild --copt=-DB\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &ws.get_relative_str("shared.rc"),
+            b"build --copt=-DSHARED\n",
+        )
+        .unwrap();
+
+        let mut startup = StartupOptions {
+            system_rc: false,
+            home_rc: false,
+            ..Default::default()
+        };
+        let cfg =
+            discover_and_load_rc_files(&mut startup, Some(&ws), None, &ws, &fs, "9.3.2").unwrap();
+        let flags: Vec<String> = cfg
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(
+            flags,
+            vec![
+                "--copt=-DSHARED",
+                "--copt=-DA",
+                "--copt=-DSHARED",
+                "--copt=-DB"
+            ]
+        );
+        assert!(
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("Duplicate rc file") && w.contains("shared.rc")),
+            "{:?}",
+            cfg.warnings
+        );
+    }
+
+    #[test]
+    fn test_rc_try_import_only_ignores_unreadable_direct_target() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        fs.create_directory_and_parents(&ws).unwrap();
+
+        // Readable try-import with malformed import inside must fail.
+        fs.write_file(&ws.get_relative_str("bad_syntax.rc"), b"import a b c\n")
+            .unwrap();
+        fs.write_file(
+            &ws.get_relative_str("root1.rc"),
+            b"try-import %workspace%/bad_syntax.rc\n",
+        )
+        .unwrap();
+        let mut cfg1 = BazelrcConfig::default();
+        let err1 = cfg1
+            .parse_file(&ws.get_relative_str("root1.rc"), Some(&ws), &fs, "9.3.2")
+            .unwrap_err();
+        assert!(
+            err1.message.contains("Invalid import declaration"),
+            "{}",
+            err1.message
+        );
+
+        // Readable try-import containing a mandatory `import` of a missing plain path must ALSO fail.
+        fs.write_file(
+            &ws.get_relative_str("nested_missing.rc"),
+            b"import /nonexistent/mandatory.rc\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &ws.get_relative_str("root2.rc"),
+            b"try-import %workspace%/nested_missing.rc\n",
+        )
+        .unwrap();
+        let mut cfg2 = BazelrcConfig::default();
+        let err2 = cfg2
+            .parse_file(&ws.get_relative_str("root2.rc"), Some(&ws), &fs, "9.3.2")
+            .unwrap_err();
+        assert!(
+            err2.message
+                .contains("Unexpected error reading config file"),
+            "{}",
+            err2.message
+        );
+    }
+
+    #[test]
+    fn test_rc_arbitrary_command_names_accepted_without_warning() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.write_file(
+            &ws.get_relative_str(".bazelrc"),
+            b"custom_starlark_cmd --foo=bar\nbuild --jobs=4\n",
+        )
+        .unwrap();
+
+        let mut cfg = BazelrcConfig::default();
+        cfg.parse_file(&ws.get_relative_str(".bazelrc"), Some(&ws), &fs, "9.3.2")
+            .unwrap();
+        assert!(cfg.sections.contains_key("custom_starlark_cmd"));
+    }
+
+    #[test]
+    fn test_semver_and_tilde_conditions() {
+        // SemVer parsing and pre-release/build metadata rules
+        assert!(SemVer::parse("7.0.0+build.1").is_some());
+        assert!(SemVer::parse("01.0.0").is_none());
+        assert!(SemVer::parse("v7.0.0").is_none());
+        assert!(SemVer::parse("7.0").is_none());
+        assert_eq!(
+            SemVer::parse("7.0.0+20260101").unwrap(),
+            SemVer::parse("7.0.0+other").unwrap()
+        );
+        assert!(SemVer::parse("8.0.0-alpha.2").unwrap() < SemVer::parse("8.0.0-alpha.10").unwrap());
+        assert!(SemVer::parse("8.0.0-rc.1").unwrap() < SemVer::parse("8.0.0").unwrap());
+
+        // Tilde: `~8` is [8.0.0, 9.0.0); `~8.1` and `~8.1.4` are bounded by next minor 8.2.0
+        assert!(eval_bazel_version_condition("~8", "8.9.2").unwrap());
+        assert!(!eval_bazel_version_condition("~8", "9.0.0").unwrap());
+        assert!(eval_bazel_version_condition("~8.1", "8.1.9").unwrap());
+        assert!(!eval_bazel_version_condition("~8.1", "8.2.0").unwrap());
+        assert!(eval_bazel_version_condition("~8.1.4", "8.1.5").unwrap());
+        assert!(!eval_bazel_version_condition("~8.1.4", "8.2.0").unwrap());
+        assert!(!eval_bazel_version_condition("~8.1.4", "8.1.3").unwrap());
+
+        // Unparseable running build_label skips the directive (returns false)
+        assert!(!eval_bazel_version_condition(">=7.0.0", "no_version").unwrap());
+        assert!(!eval_bazel_version_condition("~9.3", "").unwrap());
     }
 
     #[test]
@@ -1172,6 +1433,8 @@ mod tests {
             "--workspace_rc",
             "--home_rc",
             "--nohome_rc",
+            "--ignore_all_rc_files",
+            "--noignore_all_rc_files",
         ] {
             fs.write_file(
                 &ws.get_relative_str(".bazelrc"),
@@ -1197,10 +1460,6 @@ mod tests {
         let home = PathFragment::create("/home/alice");
         fs.create_directory_and_parents(&ws).unwrap();
         fs.create_directory_and_parents(&home).unwrap();
-        fs.create_directory_and_parents(&PathFragment::create("/dev"))
-            .unwrap();
-        fs.write_file(&PathFragment::create("/dev/null"), b"")
-            .unwrap();
         fs.write_file(&home.get_relative_str("my.rc"), b"build --jobs=7\n")
             .unwrap();
         fs.write_file(&ws.get_relative_str("later.rc"), b"build --jobs=99\n")
@@ -1230,5 +1489,274 @@ mod tests {
         let opts = cfg.get_inherited_command_options("build");
         let flags: Vec<String> = opts.into_iter().map(|(o, _)| o).collect();
         assert_eq!(flags, vec!["--jobs=7"]);
+    }
+
+    #[test]
+    fn test_rc_windows_path_escaping_in_imports() {
+        // Per `blaze_util::Tokenize` (`src/main/cpp/util/strings.cc`), `\` is an escape character
+        // in `.bazelrc` on all platforms: Windows drive paths must use `/` or escaped `\\`.
+        assert_eq!(
+            tokenize_rc_line(r"import C:/Users/runner/ws/missing.rc"),
+            vec!["import", "C:/Users/runner/ws/missing.rc"]
+        );
+        assert_eq!(
+            tokenize_rc_line(r"import C:\\Users\\runner\\ws\\missing.rc"),
+            vec!["import", r"C:\Users\runner\ws\missing.rc"]
+        );
+        assert_eq!(
+            tokenize_rc_line(r"import C:\Users\runner\ws\missing.rc"),
+            vec!["import", "C:Usersrunnerwsmissing.rc"]
+        );
+
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("C:/ws");
+        let configs = ws.get_relative_str("configs");
+        fs.create_directory_and_parents(&configs).unwrap();
+        fs.write_file(
+            &configs.get_relative_str("slash.bazelrc"),
+            b"build --jobs=4\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &configs.get_relative_str("escaped.bazelrc"),
+            b"build --jobs=8\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &ws.get_relative_str(".bazelrc"),
+            b"import C:/ws/configs/slash.bazelrc\nimport C:\\\\ws\\\\configs\\\\escaped.bazelrc\n",
+        )
+        .unwrap();
+
+        let mut config = BazelrcConfig::default();
+        config
+            .parse_file(&ws.get_relative_str(".bazelrc"), Some(&ws), &fs, "9.3.2")
+            .unwrap();
+        let flags: Vec<String> = config
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(flags, vec!["--jobs=4", "--jobs=8"]);
+    }
+
+    #[test]
+    fn test_bazelrc_env_skips_empty_comma_slots_without_resolving_cwd() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let cwd = PathFragment::create("/work/cwd");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&cwd).unwrap();
+        fs.write_file(&ws.get_relative_str(".bazelrc"), b"build --jobs=2\n")
+            .unwrap();
+        fs.write_file(&cwd.get_relative_str("a.rc"), b"build --jobs=5\n")
+            .unwrap();
+        fs.write_file(&cwd.get_relative_str("b.rc"), b"build --jobs=9\n")
+            .unwrap();
+
+        let run_with_env = |env_val: &str| -> Vec<String> {
+            let mut startup = StartupOptions {
+                system_rc: false,
+                home_rc: false,
+                ..Default::default()
+            };
+            let cfg = discover_and_load_rc_files_with_env(
+                &mut startup,
+                Some(&ws),
+                None,
+                &cwd,
+                &fs,
+                "9.3.2",
+                Some(env_val),
+            )
+            .unwrap();
+            cfg.get_inherited_command_options("build")
+                .into_iter()
+                .map(|(o, _)| o)
+                .collect()
+        };
+
+        assert_eq!(run_with_env(""), vec!["--jobs=2"]);
+        assert_eq!(run_with_env(",,,"), vec!["--jobs=2"]);
+        assert_eq!(run_with_env("a.rc,"), vec!["--jobs=2", "--jobs=5"]);
+        assert_eq!(
+            run_with_env(",a.rc,,b.rc,"),
+            vec!["--jobs=2", "--jobs=5", "--jobs=9"]
+        );
+        assert_eq!(run_with_env("/dev/null,b.rc"), vec!["--jobs=2", "--jobs=9"]);
+    }
+
+    #[test]
+    fn test_bazelrc_env_preserves_whitespace_around_commas() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let cwd = PathFragment::create("/work/cwd");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&cwd).unwrap();
+        fs.write_file(&cwd.get_relative_str("a.rc"), b"build --jobs=3\n")
+            .unwrap();
+
+        // `blaze_util::Split(GetEnv("BAZELRC"), ',')` does not strip spaces around commas.
+        let mut startup = StartupOptions {
+            system_rc: false,
+            workspace_rc: false,
+            home_rc: false,
+            ..Default::default()
+        };
+        let err = discover_and_load_rc_files_with_env(
+            &mut startup,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            Some(" a.rc , b.rc "),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Error: Unable to read .bazelrc file '/work/cwd/ a.rc '."
+        );
+
+        let err_spaces = discover_and_load_rc_files_with_env(
+            &mut startup,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            Some("   "),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_spaces.message,
+            "Error: Unable to read .bazelrc file '/work/cwd/   '."
+        );
+
+        fs.write_file(&cwd.get_relative_str(" a.rc "), b"build --jobs=11\n")
+            .unwrap();
+        fs.write_file(&cwd.get_relative_str(" b.rc "), b"build --jobs=13\n")
+            .unwrap();
+        let cfg = discover_and_load_rc_files_with_env(
+            &mut startup,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            Some(" a.rc , b.rc "),
+        )
+        .unwrap();
+        let flags: Vec<String> = cfg
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(flags, vec!["--jobs=11", "--jobs=13"]);
+    }
+
+    #[test]
+    fn test_empty_bazelrc_cli_flag_and_directory_targets_rejected_cleanly() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let cwd = PathFragment::create("/work/cwd");
+        let subdir = cwd.get_relative_str("rc_dir");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&subdir).unwrap();
+        // Even if implicit `.bazelrc` is a directory, discovery skips it instead of reading it as a file.
+        fs.create_directory_and_parents(&ws.get_relative_str(".bazelrc"))
+            .unwrap();
+
+        let (mut implicit_only, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        discover_and_load_rc_files_with_env(
+            &mut implicit_only,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap();
+
+        // Explicit `--bazelrc=` resolves `""` via `AbsolutePathFromFlag` to `cwd`, which fails `CanReadFile`.
+        let (mut empty_flag, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "--bazelrc=".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(empty_flag.bazelrc_files, vec![""]);
+        let err = discover_and_load_rc_files_with_env(
+            &mut empty_flag,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message,
+            "Error: Unable to read .bazelrc file '/work/cwd'."
+        );
+
+        let (mut dir_flag, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "--bazelrc=rc_dir".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        let err_dir = discover_and_load_rc_files_with_env(
+            &mut dir_flag,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err_dir.message,
+            "Error: Unable to read .bazelrc file '/work/cwd/rc_dir'."
+        );
+
+        // Unlike `BAZELRC`, CLI `--bazelrc` takes a single path per flag and does not split commas.
+        fs.write_file(&cwd.get_relative_str("has,comma.rc"), b"build --jobs=17\n")
+            .unwrap();
+        let (mut comma_flag, _, _) = crate::startup::split_command_line(&[
+            "--nosystem_rc".to_string(),
+            "--noworkspace_rc".to_string(),
+            "--nohome_rc".to_string(),
+            "--bazelrc=has,comma.rc".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(comma_flag.bazelrc_files, vec!["has,comma.rc"]);
+        let cfg = discover_and_load_rc_files_with_env(
+            &mut comma_flag,
+            Some(&ws),
+            None,
+            &cwd,
+            &fs,
+            "9.3.2",
+            None,
+        )
+        .unwrap();
+        let flags: Vec<String> = cfg
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(flags, vec!["--jobs=17"]);
     }
 }

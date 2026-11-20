@@ -66,6 +66,11 @@ impl TestCase {
         }
     }
 
+    /// Proto2 `[default = true]` accessor for `blaze.TestCase.run`.
+    pub fn run_or_default(&self) -> bool {
+        self.run.unwrap_or(true)
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::new();
         for c in &self.child {
@@ -160,6 +165,16 @@ pub struct TestResultData {
 }
 
 impl TestResultData {
+    /// Proto2 `[default = NO_STATUS]` accessor (`0 = BlazeTestStatus.NO_STATUS`).
+    pub fn status_or_default(&self) -> u64 {
+        self.status.unwrap_or(0)
+    }
+
+    /// Proto2 `[default = FULL]` accessor (`1 = FailedTestCasesStatus.FULL`).
+    pub fn failed_status_or_default(&self) -> u64 {
+        self.failed_status.unwrap_or(FAILED_FULL)
+    }
+
     /// Serializes in field-number order, like protobuf-java.
     pub fn encode(&self) -> Vec<u8> {
         let mut b = Vec::new();
@@ -681,6 +696,12 @@ mod tests {
         assert_eq!(TestResultData::default().encode(), Vec::<u8>::new());
         // Exit code is last (field 17 => tag 0x88 0x01).
         assert_eq!(&b[b.len() - 3..], &[0x88, 0x01, 0]);
+        // Proto2 default accessors on absent wire fields.
+        let empty = TestResultData::decode(&[]).unwrap();
+        assert_eq!(empty.status_or_default(), 0);
+        assert_eq!(empty.failed_status_or_default(), FAILED_FULL);
+        let empty_case = TestCase::decode(&[]).unwrap();
+        assert!(empty_case.run_or_default());
     }
 
     #[test]

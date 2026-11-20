@@ -103,17 +103,46 @@ pub extern "C" fn zel_isatty_stderr() -> i32 {
 }
 
 /// Whether the process `pid` exists.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[no_mangle]
 pub extern "C" fn zel_process_alive(pid: u32) -> i32 {
     native::process::is_alive(pid) as i32
 }
 
 /// System memory pressure: 0 normal, 1 warning, 2 critical.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[no_mangle]
 pub extern "C" fn zel_memory_pressure_level() -> i32 {
     native::system::memory_pressure() as i32
+}
+
+/// Creates a directory symlink (Unix) or NTFS directory junction (Windows). Returns 0 on success.
+#[cfg(any(unix, windows))]
+#[no_mangle]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn zel_create_junction(
+    link_path: *const c_char,
+    target_path: *const c_char,
+) -> i32 {
+    if link_path.is_null() || target_path.is_null() {
+        return -1;
+    }
+    let (Ok(link), Ok(target)) = (
+        unsafe { CStr::from_ptr(link_path) }.to_str(),
+        unsafe { CStr::from_ptr(target_path) }.to_str(),
+    ) else {
+        return -1;
+    };
+    if zel_vfs::create_directory_junction_or_symlink(
+        std::path::Path::new(target),
+        std::path::Path::new(link),
+    )
+    .is_ok()
+    {
+        0
+    } else {
+        -1
+    }
 }
 
 /// Frees a `CString` allocated by `zel_*` FFI functions.
@@ -133,12 +162,22 @@ mod tests {
 
     #[test]
     fn test_ffi_bridge_roundtrip() {
-        let input = CString::new("//src/main/rust/../java:bazel").unwrap();
+        let input = CString::new("///src//main/rust/./../java:bazel").unwrap();
         let out_ptr = unsafe { zel_normalize_path(input.as_ptr()) };
         assert!(!out_ptr.is_null());
         let out_str = unsafe { CStr::from_ptr(out_ptr) }.to_str().unwrap();
         assert_eq!(out_str, "/src/main/java:bazel");
         unsafe { zel_free_string(out_ptr) };
+
+        let two_slash = CString::new("//server/share/rust/../java/Bazel.java").unwrap();
+        let two_slash_ptr = unsafe { zel_normalize_path(two_slash.as_ptr()) };
+        assert!(!two_slash_ptr.is_null());
+        let two_slash_str = unsafe { CStr::from_ptr(two_slash_ptr) }.to_str().unwrap();
+        #[cfg(windows)]
+        assert_eq!(two_slash_str, "//server/share/java/Bazel.java");
+        #[cfg(not(windows))]
+        assert_eq!(two_slash_str, "/server/share/java/Bazel.java");
+        unsafe { zel_free_string(two_slash_ptr) };
 
         let label_in = CString::new("@rules_rs//rs:rust_binary.bzl").unwrap();
         let label_ptr = unsafe { zel_canonicalize_label(label_in.as_ptr()) };

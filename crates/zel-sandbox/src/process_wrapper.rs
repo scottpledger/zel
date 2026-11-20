@@ -30,10 +30,12 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// `SIGALRM` / `SIGTERM` / `SIGKILL` numbers (identical on Linux and macOS).
+/// `SIGINT` / `SIGPIPE` / `SIGALRM` / `SIGTERM` / `SIGKILL` numbers (identical on Linux and macOS).
+pub const SIGINT: i32 = 2;
+pub const SIGKILL: i32 = 9;
+pub const SIGPIPE: i32 = 13;
 pub const SIGALRM: i32 = 14;
 pub const SIGTERM: i32 = 15;
-pub const SIGKILL: i32 = 9;
 
 #[cfg(unix)]
 #[cfg(target_os = "macos")]
@@ -75,12 +77,28 @@ struct Rusage {
 }
 
 #[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SigSet {
+    #[cfg(target_os = "macos")]
+    bits: u32,
+    #[cfg(not(target_os = "macos"))]
+    bits: [usize; 16],
+}
+
+#[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
-    fn signal(sig: i32, handler: usize) -> usize;
+    fn getpid() -> i32;
     fn setsid() -> i32;
     fn umask(mask: u32) -> u32;
+    fn signal(sig: i32, handler: usize) -> usize;
+    fn sigemptyset(set: *mut SigSet) -> i32;
+    fn sigaddset(set: *mut SigSet, signum: i32) -> i32;
+    fn sigprocmask(how: i32, set: *const SigSet, oldset: *mut SigSet) -> i32;
     fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut Rusage) -> i32;
+    #[cfg(target_os = "linux")]
+    fn prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32;
 }
 
 #[cfg(unix)]
@@ -132,6 +150,62 @@ impl Drop for SigtermGuard {
             }
         }
     }
+}
+
+/// Async-signal-safe child reset (`ClearSignalMask` in `process-tools.cc`): restores default
+/// disposition (`SIG_DFL`) for catchable signals (including `SIGPIPE`, which Rust sets to
+/// `SIG_IGN`) and clears the signal mask before `exec`.
+///
+/// # Safety
+/// Intended to be called in a forked child process prior to `exec`.
+#[cfg(unix)]
+pub unsafe fn reset_child_signals_and_mask() {
+    #[cfg(target_os = "macos")]
+    const MAX_SIG: i32 = 31;
+    #[cfg(not(target_os = "macos"))]
+    const MAX_SIG: i32 = 64;
+    #[cfg(target_os = "macos")]
+    const SIGSTOP_NUM: i32 = 17;
+    #[cfg(not(target_os = "macos"))]
+    const SIGSTOP_NUM: i32 = 19;
+    #[cfg(target_os = "macos")]
+    const SIG_SETMASK: i32 = 3;
+    #[cfg(not(target_os = "macos"))]
+    const SIG_SETMASK: i32 = 2;
+
+    for sig in 1..=MAX_SIG {
+        if sig == SIGKILL || sig == SIGSTOP_NUM {
+            continue;
+        }
+        #[cfg(target_os = "linux")]
+        if sig == 32 || sig == 33 {
+            // NPTL internal signals on glibc/musl.
+            continue;
+        }
+        let _ = signal(sig, 0);
+    }
+    let mut empty: SigSet = std::mem::zeroed();
+    let _ = sigemptyset(&mut empty);
+    let _ = sigprocmask(SIG_SETMASK, &empty, std::ptr::null_mut());
+}
+
+/// Restores `SIG_DFL`, unblocks `sig`, and sends `sig` to the current process (`KillMyself`).
+///
+/// # Safety
+/// Must be called with a valid POSIX signal number right before terminating the current process.
+#[cfg(unix)]
+pub unsafe fn reraise_signal_to_self(sig: i32) {
+    #[cfg(target_os = "macos")]
+    const SIG_UNBLOCK: i32 = 2;
+    #[cfg(not(target_os = "macos"))]
+    const SIG_UNBLOCK: i32 = 1;
+
+    let _ = signal(sig, 0);
+    let mut set: SigSet = std::mem::zeroed();
+    let _ = sigemptyset(&mut set);
+    let _ = sigaddset(&mut set, sig);
+    let _ = sigprocmask(SIG_UNBLOCK, &set, std::ptr::null_mut());
+    let _ = kill(getpid(), sig);
 }
 
 /// Sends `sig` to the process group `pgid` (`kill(-pgid, sig)`).
@@ -413,31 +487,31 @@ pub fn parse_args(program: &str, args: &[String]) -> Result<ProcessWrapperOption
                 })?;
             }
             'o' => {
-                if opt.stdout_path.is_some() {
+                if opt.stdout_path.as_deref().is_some_and(|s| !s.is_empty()) {
                     return Err(usage_text(
                         program,
                         "Cannot redirect stdout (-o) to more than one destination.",
                     ));
                 }
-                opt.stdout_path = value;
+                opt.stdout_path = value.filter(|v| !v.is_empty());
             }
             'e' => {
-                if opt.stderr_path.is_some() {
+                if opt.stderr_path.as_deref().is_some_and(|s| !s.is_empty()) {
                     return Err(usage_text(
                         program,
                         "Cannot redirect stderr (-e) to more than one destination.",
                     ));
                 }
-                opt.stderr_path = value;
+                opt.stderr_path = value.filter(|v| !v.is_empty());
             }
             's' => {
-                if opt.stats_path.is_some() {
+                if opt.stats_path.as_deref().is_some_and(|s| !s.is_empty()) {
                     return Err(usage_text(
                         program,
                         "Cannot write stats (-s) to more than one destination.",
                     ));
                 }
-                opt.stats_path = value;
+                opt.stats_path = value.filter(|v| !v.is_empty());
             }
             _ => unreachable!(),
         }
@@ -665,12 +739,236 @@ pub struct WrapperOutcome {
     pub cancelled: bool,
 }
 
-/// Where the wrapped command's output goes when no `-o/-e` redirect is given.
-fn open_redirect(path: &str) -> std::io::Result<std::fs::File> {
-    // O_WRONLY | O_CREAT | O_TRUNC | O_APPEND
-    let f = OpenOptions::new().create(true).append(true).open(path)?;
-    f.set_len(0)?;
-    Ok(f)
+/// Normalizes `-o` / `-e` redirect targets (`Redirect` in `process-wrapper-legacy.cc`):
+/// empty `""` and `"-"` mean "do not redirect".
+pub fn effective_redirect_path(path: Option<&str>) -> Option<&str> {
+    path.filter(|p| !p.is_empty() && *p != "-")
+}
+
+/// Opens a `-o` / `-e` redirect destination (`O_WRONLY | O_CREAT | O_TRUNC`, mode `0666` before
+/// umask), without `O_APPEND` or `ftruncate` so character devices such as `/dev/null` succeed.
+pub fn open_redirect(path: &str) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+}
+
+#[cfg(target_os = "linux")]
+fn linux_reparented_children() -> Vec<i32> {
+    let raw = std::fs::read_to_string("/proc/thread-self/children")
+        .or_else(|_| {
+            std::fs::read_to_string(format!("/proc/self/task/{}/children", unsafe { getpid() }))
+        })
+        .unwrap_or_default();
+    raw.split_whitespace()
+        .filter_map(|tok| tok.parse::<i32>().ok())
+        .filter(|&pid| pid > 0)
+        .collect()
+}
+
+/// Sends `sig` to `-pgid` and (when this process is a Linux subreaper) to any reparented
+/// descendants recorded in `/proc/thread-self/children`.
+#[cfg(unix)]
+fn kill_everything_once(pgid: u32, sig: i32, include_subreaper_children: bool) {
+    signal_process_group(pgid, sig);
+    #[cfg(target_os = "linux")]
+    if include_subreaper_children {
+        for _ in 0..3 {
+            let children = linux_reparented_children();
+            if children.is_empty() {
+                break;
+            }
+            for child_pid in children {
+                unsafe {
+                    let _ = kill(-child_pid, sig);
+                    let _ = kill(child_pid, sig);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = include_subreaper_children;
+}
+
+/// macOS `KERN_PROC_PGRP` sweep (`KillEverything` on Darwin while the leader pins `pgid`).
+#[cfg(target_os = "macos")]
+fn darwin_kill_pgrp_members(pgid: i32, sig: i32) {
+    signal_process_group(pgid as u32, sig);
+}
+
+static STANDALONE_WRAPPER_SIG: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn on_wrapper_signal(sig: i32) {
+    STANDALONE_WRAPPER_SIG.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Runs `process-wrapper` as a standalone supervisor process (`zel-process-wrapper` binary):
+/// inherits live unbuffered stdout/stderr when unredirected, installs `SIGALRM`/`SIGTERM`/`SIGINT`
+/// forwarding, enables `PR_SET_CHILD_SUBREAPER` on Linux to catch double-forked descendants, and
+/// returns `(termination, wrapper_signal)` so `main` can re-raise the signal if needed.
+pub fn run_standalone(opt: &ProcessWrapperOptions) -> std::io::Result<(Termination, Option<i32>)> {
+    STANDALONE_WRAPPER_SIG.store(0, std::sync::atomic::Ordering::SeqCst);
+
+    #[cfg(unix)]
+    unsafe {
+        let _ = signal(SIGALRM, on_wrapper_signal as *const () as usize);
+        let _ = signal(SIGTERM, on_wrapper_signal as *const () as usize);
+        let _ = signal(SIGINT, on_wrapper_signal as *const () as usize);
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        const PR_SET_CHILD_SUBREAPER: i32 = 36;
+        let _ = prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0);
+    }
+
+    let mut cmd = build_wrapped_command(&opt.args);
+    cmd.stdin(Stdio::inherit());
+    match effective_redirect_path(opt.stdout_path.as_deref()) {
+        Some(p) => {
+            cmd.stdout(Stdio::from(open_redirect(p)?));
+        }
+        None => {
+            cmd.stdout(Stdio::inherit());
+        }
+    }
+    match effective_redirect_path(opt.stderr_path.as_deref()) {
+        Some(p) => {
+            cmd.stderr(Stdio::from(open_redirect(p)?));
+        }
+        None => {
+            cmd.stderr(Stdio::inherit());
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                reset_child_signals_and_mask();
+                if setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                umask(0o022);
+                Ok(())
+            });
+        }
+    }
+
+    let started = Instant::now();
+    #[cfg_attr(unix, allow(unused_mut))]
+    let mut child = cmd.spawn()?;
+    let pid = child.id() as i32;
+    let timeout = (opt.timeout_secs > 0.0).then(|| Duration::from_secs_f64(opt.timeout_secs));
+    let kill_delay = Duration::from_secs_f64(opt.kill_delay_secs.max(0.0));
+    let mut term_sent: Option<Instant> = None;
+    let mut killed = false;
+    let mut wrapper_sig: Option<i32> = None;
+
+    #[cfg(unix)]
+    let (termination, usage) = {
+        let mut status: i32 = 0;
+        let mut ru = Rusage::default();
+        loop {
+            let r = unsafe { wait4(pid, &mut status, WNOHANG, &mut ru) };
+            if r == pid {
+                break;
+            }
+            if r < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
+            }
+            let got_sig = STANDALONE_WRAPPER_SIG.swap(0, std::sync::atomic::Ordering::SeqCst);
+            if got_sig != 0 {
+                wrapper_sig = Some(got_sig);
+                let graceful = got_sig == SIGALRM || (got_sig == SIGTERM && opt.graceful_sigterm);
+                if graceful {
+                    if term_sent.is_none() {
+                        kill_everything_once(pid as u32, SIGTERM, true);
+                        term_sent = Some(Instant::now());
+                    }
+                } else if !killed {
+                    kill_everything_once(pid as u32, SIGKILL, true);
+                    killed = true;
+                }
+            }
+            if let Some(t) = timeout {
+                if wrapper_sig.is_none() && started.elapsed() >= t {
+                    wrapper_sig = Some(SIGALRM);
+                    if term_sent.is_none() {
+                        kill_everything_once(pid as u32, SIGTERM, true);
+                        term_sent = Some(Instant::now());
+                    }
+                }
+            }
+            if let Some(at) = term_sent {
+                if !killed && at.elapsed() >= kill_delay {
+                    kill_everything_once(pid as u32, SIGKILL, true);
+                    killed = true;
+                }
+            }
+            std::thread::sleep(Duration::from_micros(500));
+        }
+        let usage = ResourceUsage::from_rusage(&ru);
+        if let Some(p) = opt.stats_path.as_deref().filter(|s| !s.is_empty()) {
+            std::fs::write(p, usage.encode_execution_statistics())?;
+        }
+        #[cfg(target_os = "macos")]
+        darwin_kill_pgrp_members(pid, SIGKILL);
+        kill_everything_once(pid as u32, SIGKILL, true);
+        // Reap any reparented grandchildren adopted via PR_SET_CHILD_SUBREAPER.
+        loop {
+            let mut sub_status: i32 = 0;
+            let mut sub_ru = Rusage::default();
+            let r = unsafe { wait4(-1, &mut sub_status, 0, &mut sub_ru) };
+            if r < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break;
+            }
+            kill_everything_once(pid as u32, SIGKILL, true);
+        }
+        let termination = if status & 0x7f == 0 {
+            Termination::Exited((status >> 8) & 0xff)
+        } else {
+            Termination::Signaled(status & 0x7f)
+        };
+        (termination, usage)
+    };
+    #[cfg(not(unix))]
+    let (termination, usage) = {
+        let _ = (pid, &mut term_sent, kill_delay);
+        let st = loop {
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            if let Some(t) = timeout {
+                if wrapper_sig.is_none() && started.elapsed() >= t {
+                    wrapper_sig = Some(SIGALRM);
+                    let _ = child.kill();
+                    killed = true;
+                }
+            }
+            let _ = killed;
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let usage = ResourceUsage::default();
+        if let Some(p) = opt.stats_path.as_deref().filter(|s| !s.is_empty()) {
+            std::fs::write(p, usage.encode_execution_statistics())?;
+        }
+        (Termination::Exited(st.code().unwrap_or(1)), usage)
+    };
+    let _ = usage;
+    drop(child);
+    Ok((termination, wrapper_sig))
 }
 
 /// Normalizes `argv[0]` for Windows `CreateProcessW`, matching Bazel's
@@ -682,6 +980,31 @@ pub fn normalize_windows_argv0(argv0: &str) -> String {
         argv0.replace('/', "\\")
     } else {
         argv0.to_string()
+    }
+}
+
+fn build_wrapped_command(args: &[String]) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let prog = normalize_windows_argv0(&args[0]);
+        let mut c = Command::new(&prog);
+        // `WindowsSubprocessFactory.escapeArgvRest`: when `argv0.equals("cmd.exe")`, pass
+        // remaining arguments verbatim without `CommandLineToArgvW` backslash-quote escaping.
+        if prog == "cmd.exe" {
+            for arg in &args[1..] {
+                c.raw_arg(arg);
+            }
+        } else {
+            c.args(&args[1..]);
+        }
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = Command::new(&args[0]);
+        c.args(&args[1..]);
+        c
     }
 }
 
@@ -698,28 +1021,7 @@ pub fn run(
         return Err(crate::cancelled_error());
     }
     let started = Instant::now();
-    #[cfg(windows)]
-    let mut cmd = {
-        use std::os::windows::process::CommandExt;
-        let prog = normalize_windows_argv0(&opt.args[0]);
-        let mut c = Command::new(&prog);
-        // `WindowsSubprocessFactory.escapeArgvRest`: when `argv0.equals("cmd.exe")`, pass
-        // remaining arguments verbatim without `CommandLineToArgvW` backslash-quote escaping.
-        if prog == "cmd.exe" {
-            for arg in &opt.args[1..] {
-                c.raw_arg(arg);
-            }
-        } else {
-            c.args(&opt.args[1..]);
-        }
-        c
-    };
-    #[cfg(not(windows))]
-    let mut cmd = {
-        let mut c = Command::new(&opt.args[0]);
-        c.args(&opt.args[1..]);
-        c
-    };
+    let mut cmd = build_wrapped_command(&opt.args);
     if let Some(d) = cwd {
         cmd.current_dir(d);
     }
@@ -731,9 +1033,11 @@ pub fn run(
     } else {
         cmd.stdin(Stdio::inherit());
     }
-    let capture_out = opt.stdout_path.is_none();
-    let capture_err = opt.stderr_path.is_none();
-    match &opt.stdout_path {
+    let stdout_redir = effective_redirect_path(opt.stdout_path.as_deref());
+    let stderr_redir = effective_redirect_path(opt.stderr_path.as_deref());
+    let capture_out = stdout_redir.is_none();
+    let capture_err = stderr_redir.is_none();
+    match stdout_redir {
         Some(p) => {
             cmd.stdout(Stdio::from(open_redirect(p)?));
         }
@@ -741,7 +1045,7 @@ pub fn run(
             cmd.stdout(Stdio::piped());
         }
     }
-    match &opt.stderr_path {
+    match stderr_redir {
         Some(p) => {
             cmd.stderr(Stdio::from(open_redirect(p)?));
         }
@@ -752,9 +1056,10 @@ pub fn run(
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // SAFETY: setsid/umask are async-signal-safe.
+        // SAFETY: reset_child_signals_and_mask, setsid, and umask are async-signal-safe.
         unsafe {
             cmd.pre_exec(|| {
+                reset_child_signals_and_mask();
                 if setsid() < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -878,10 +1183,13 @@ pub fn run(
             }
             std::thread::sleep(Duration::from_micros(500));
         }
+        let usage = ResourceUsage::from_rusage(&ru);
+        if let Some(p) = opt.stats_path.as_deref().filter(|s| !s.is_empty()) {
+            std::fs::write(p, usage.encode_execution_statistics())?;
+        }
         // The child is done for, but may have grandchildren that we still have to kill.
         signal_process_group(pid as u32, SIGKILL);
         let received_sig = take_wrapper_signal();
-        let usage = ResourceUsage::from_rusage(&ru);
         // Decode the wait status (WIFEXITED / WTERMSIG).
         let termination = if timed_out {
             Termination::Signaled(SIGALRM)
@@ -929,7 +1237,11 @@ pub fn run(
         } else {
             Termination::Exited(exit_status.code().unwrap_or(1))
         };
-        (termination, ResourceUsage::default())
+        let usage = ResourceUsage::default();
+        if let Some(p) = opt.stats_path.as_deref().filter(|s| !s.is_empty()) {
+            std::fs::write(p, usage.encode_execution_statistics())?;
+        }
+        (termination, usage)
     };
     let mut outs = readers.into_iter().map(|h| h.join().unwrap_or_default());
     let stdout = if capture_out {
@@ -944,9 +1256,6 @@ pub fn run(
     };
     drop(child);
 
-    if let Some(p) = &opt.stats_path {
-        std::fs::write(p, usage.encode_execution_statistics())?;
-    }
     Ok(WrapperOutcome {
         termination,
         timed_out,
@@ -1133,6 +1442,34 @@ mod tests {
         };
         let r = run(&o, None, None).unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "0022");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_and_dash_redirects_dev_null_and_child_sigpipe_default() {
+        // `-o "" -o real` accepts the second `-o` because empty string means unset.
+        let parsed = parse_args("pw", &s(&["-o", "", "-o", "/dev/null", "--", "true"])).unwrap();
+        assert_eq!(parsed.stdout_path.as_deref(), Some("/dev/null"));
+
+        // Redirecting to `/dev/null` works without `ftruncate` EINVAL, and `-` means no file redirect.
+        let o = ProcessWrapperOptions {
+            stdout_path: Some("-".into()),
+            stderr_path: Some("/dev/null".into()),
+            args: s(&["/bin/sh", "-c", "echo live_out; echo discarded_err >&2"]),
+            ..Default::default()
+        };
+        let r = run(&o, None, None).unwrap();
+        assert_eq!(r.termination, Termination::Exited(0));
+        assert_eq!(r.stdout, b"live_out\n");
+        assert!(r.stderr.is_empty());
+
+        // Child receives SIGPIPE with default disposition instead of inheriting Rust's SIG_IGN.
+        let o = ProcessWrapperOptions {
+            args: s(&["/bin/sh", "-c", "kill -PIPE $$"]),
+            ..Default::default()
+        };
+        let r = run(&o, None, None).unwrap();
+        assert_eq!(r.termination, Termination::Signaled(SIGPIPE));
     }
 
     #[test]

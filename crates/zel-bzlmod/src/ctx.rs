@@ -2686,18 +2686,15 @@ pub fn run_process(
     let code = loop {
         match child.try_wait() {
             Ok(Some(st)) => {
-                break st.code().unwrap_or_else(|| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::process::ExitStatusExt;
-                        // Java reports a signal death as 128 + signal.
-                        st.signal().map(|sg| 128 + sg).unwrap_or(-1)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        -1
-                    }
+                #[cfg(unix)]
+                let exit_code = st.code().unwrap_or_else(|| {
+                    use std::os::unix::process::ExitStatusExt;
+                    // Java reports a signal death as 128 + signal.
+                    st.signal().map(|sg| 128 + sg).unwrap_or(-1)
                 });
+                #[cfg(not(unix))]
+                let exit_code = st.code().unwrap_or(-1);
+                break exit_code;
             }
             Ok(None) => {
                 if start.elapsed().as_secs() as i64 >= timeout_secs {

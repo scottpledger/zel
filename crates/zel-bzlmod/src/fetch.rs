@@ -67,6 +67,7 @@ fn bazel_tools_digest() -> &'static str {
     static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     DIGEST.get_or_init(|| {
         let mut fp = crate::hash::Fingerprint::new();
+        fp.add_string("bazel_tools_v2");
         for (path, bytes) in zel_bazel_tools::files() {
             fp.add_string(path).add_bytes(bytes);
         }
@@ -650,11 +651,14 @@ impl Rt {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         // Bazel's real embedded `@bazel_tools` (//tools, BUILD.tools -> BUILD).
         zel_bazel_tools::materialize(dir)?;
-        std::fs::write(
-            dir.join("BUILD.bazel"),
-            "package(default_visibility = [\"//visibility:public\"])\n",
-        )
-        .map_err(|e| e.to_string())?;
+        let existing_root_build = std::fs::read_to_string(dir.join("BUILD")).unwrap_or_default();
+        let mut root_build =
+            String::from("package(default_visibility = [\"//visibility:public\"])\n");
+        if !existing_root_build.is_empty() {
+            root_build.push('\n');
+            root_build.push_str(&existing_root_build);
+        }
+        std::fs::write(dir.join("BUILD.bazel"), root_build).map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(dir.join("BUILD"));
         let _ = std::fs::write(&marker, format!("{digest}\n"));
         Ok(())

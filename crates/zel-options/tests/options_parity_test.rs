@@ -350,9 +350,9 @@ fn test_rc_imports_and_loop_detection() {
     )
     .unwrap();
 
-    // Nested relative import (resolved relative to `configs/` directory)
+    // Non-`%workspace%/` relative imports resolve literally against `cwd` (`/workspace`), not `configs/`.
     fs.write_file(
-        &configs_dir.get_relative_str("nested.bazelrc"),
+        &ws.get_relative_str("nested.bazelrc"),
         b"common --subcommands\n",
     )
     .unwrap();
@@ -1302,4 +1302,64 @@ fn test_comma_separated_list_converter_and_execution_info_modifier() {
         ExecutionInfoModifier::from_flag_values(["OtherAction=+o", "Genrule=+g"], false).unwrap();
     assert!(!non_add.matches("OtherAction"));
     assert!(non_add.matches("Genrule"));
+}
+
+#[test]
+fn test_startup_help_flags_empty_command_and_absolute_paths() {
+    // `-help`, `--help`, and `-h` all dispatch to `help` and preserve trailing arguments.
+    for flag in ["-help", "--help", "-h"] {
+        let (_, cmd, args) = split_command_line(&[flag.to_string(), "build".to_string()]).unwrap();
+        assert_eq!(cmd, "help");
+        assert_eq!(args, vec!["build"]);
+    }
+
+    // Explicit empty command token fails during `split_command_line` before rc loading.
+    let err = split_command_line(&[String::new()]).unwrap_err();
+    assert!(
+        err.message.contains("Command cannot be the empty string."),
+        "{}",
+        err.message
+    );
+
+    // `absolute_path_from_flag` handles `""`, `~`, `~/...`, `~sub`, and relative paths.
+    let cwd = PathFragment::create("/work/sub");
+    assert_eq!(
+        absolute_path_from_flag("", &cwd, Some("/home/u")),
+        PathFragment::create("/work/sub")
+    );
+    assert_eq!(
+        absolute_path_from_flag("~", &cwd, Some("/home/u")),
+        PathFragment::create("/home/u")
+    );
+    assert_eq!(
+        absolute_path_from_flag("~/ob", &cwd, Some("/home/u")),
+        PathFragment::create("/home/u/ob")
+    );
+    assert_eq!(
+        absolute_path_from_flag("rel/ob", &cwd, Some("/home/u")),
+        PathFragment::create("/work/sub/rel/ob")
+    );
+
+    // CLI startup options outrank `.bazelrc` startup options (`startup` and `startup:<os>`).
+    let fs = InMemoryFileSystem::default();
+    let ws = PathFragment::create("/workspace");
+    fs.create_directory_and_parents(&ws).unwrap();
+    let plat = get_platform_name();
+    fs.write_file(
+        &ws.get_relative_str(".bazelrc"),
+        format!("startup --max_idle_secs=999 --output_base rel_ob\nstartup:{plat} --quiet\n")
+            .as_bytes(),
+    )
+    .unwrap();
+    let (mut startup, cmd, _) =
+        split_command_line(&["--max_idle_secs=42".to_string(), "build".to_string()]).unwrap();
+    assert_eq!(cmd, "build");
+    discover_and_load_rc_files(&mut startup, Some(&ws), Some("/home/u"), &cwd, &fs, "9.3.2")
+        .unwrap();
+    assert_eq!(startup.max_idle_secs, 42);
+    assert!(startup.quiet);
+    assert_eq!(
+        startup.output_base,
+        Some(PathFragment::create("/work/sub/rel_ob"))
+    );
 }

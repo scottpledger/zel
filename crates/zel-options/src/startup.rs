@@ -32,6 +32,9 @@ pub struct StartupOptions {
     pub output_base: Option<PathFragment>,
     pub output_user_root: Option<PathFragment>,
     pub install_base: Option<PathFragment>,
+    pub server_jvm_out: Option<PathFragment>,
+    pub failure_detail_out: Option<PathFragment>,
+    pub server_javabase: Option<PathFragment>,
     pub batch: bool,
     pub block_for_lock: bool,
     pub quiet: bool,
@@ -58,6 +61,9 @@ impl Default for StartupOptions {
             output_base: None,
             output_user_root: None,
             install_base: None,
+            server_jvm_out: None,
+            failure_detail_out: None,
+            server_javabase: None,
             batch: false,
             block_for_lock: true,
             quiet: false,
@@ -74,6 +80,46 @@ impl Default for StartupOptions {
             parsed_options: BTreeMap::new(),
             deferred_error: None,
         }
+    }
+}
+
+/// Converts a flag path value into an absolute `PathFragment` matching `blaze::AbsolutePathFromFlag`
+/// (`src/main/cpp/blaze_util.cc`):
+/// - `""` resolves to `cwd`.
+/// - A leading `~` joins `home` with `&value[1..]` (`blaze_util::JoinPath(GetHomeDir(), value.substr(1))`).
+/// - Relative paths are joined onto `cwd`.
+pub fn absolute_path_from_flag(
+    value: &str,
+    cwd: &PathFragment,
+    home: Option<&str>,
+) -> PathFragment {
+    if value.is_empty() {
+        return cwd.clone();
+    }
+    if let Some(rest) = value.strip_prefix('~') {
+        let h = home.unwrap_or("");
+        let joined = if h.is_empty() {
+            rest.to_string()
+        } else if rest.is_empty() {
+            h.to_string()
+        } else {
+            format!(
+                "{}/{}",
+                h.trim_end_matches(['/', '\\']),
+                rest.trim_start_matches(['/', '\\'])
+            )
+        };
+        let pf = PathFragment::create(&joined);
+        if pf.is_absolute() || h.is_empty() && joined.is_empty() {
+            return pf;
+        }
+        return cwd.get_relative(&pf);
+    }
+    let pf = PathFragment::create(value);
+    if pf.is_absolute() {
+        pf
+    } else {
+        cwd.get_relative(&pf)
     }
 }
 
@@ -103,6 +149,49 @@ impl StartupOptions {
         }
     }
 
+    /// Lowercased product name (`StartupOptions::GetLowercaseProductName`), defaulting to `"bazel"`.
+    pub fn lowercase_product_name(&self) -> String {
+        if self.product_name.is_empty() {
+            "bazel".to_string()
+        } else {
+            self.product_name.to_ascii_lowercase()
+        }
+    }
+
+    /// Resolves all path-valued startup flags (`output_base`, `output_user_root`, `install_base`,
+    /// `server_jvm_out`, `failure_detail_out`, `server_javabase`) via [`absolute_path_from_flag`].
+    pub fn absolutize_paths(&mut self, cwd: &PathFragment, home: Option<&str>) {
+        let resolve_opt = |opts: &BTreeMap<String, OptionValueDescription>, name: &str| {
+            opts.get(name)
+                .and_then(|d| d.raw_values.last())
+                .map(|raw| absolute_path_from_flag(raw, cwd, home))
+        };
+        if let Some(p) = resolve_opt(&self.parsed_options, "output_base") {
+            self.output_base = Some(p);
+        } else if let Some(ref ob) = self.output_base {
+            self.output_base = Some(absolute_path_from_flag(ob.path_string(), cwd, home));
+        }
+        if let Some(p) = resolve_opt(&self.parsed_options, "output_user_root") {
+            self.output_user_root = Some(p);
+        } else if let Some(ref our) = self.output_user_root {
+            self.output_user_root = Some(absolute_path_from_flag(our.path_string(), cwd, home));
+        }
+        if let Some(p) = resolve_opt(&self.parsed_options, "install_base") {
+            self.install_base = Some(p);
+        } else if let Some(ref ib) = self.install_base {
+            self.install_base = Some(absolute_path_from_flag(ib.path_string(), cwd, home));
+        }
+        if let Some(p) = resolve_opt(&self.parsed_options, "server_jvm_out") {
+            self.server_jvm_out = Some(p);
+        }
+        if let Some(p) = resolve_opt(&self.parsed_options, "failure_detail_out") {
+            self.failure_detail_out = Some(p);
+        }
+        if let Some(p) = resolve_opt(&self.parsed_options, "server_javabase") {
+            self.server_javabase = Some(p);
+        }
+    }
+
     /// Resolves output user root checking environment variables (TEST_TMPDIR, XDG_CACHE_HOME).
     pub fn resolve_output_user_root(&self, user: &str, home: Option<&str>) -> PathFragment {
         let xdg = std::env::var("XDG_CACHE_HOME").ok();
@@ -111,10 +200,10 @@ impl StartupOptions {
     }
 
     /// Resolves output user root according to OS and explicit environment overrides:
-    /// - `TEST_TMPDIR`: `<TEST_TMPDIR>/_bazel_{user}`
-    /// - macOS: `$HOME/Library/Caches/bazel/_bazel_{user}` (or `/var/tmp/_bazel_{user}`)
-    /// - Linux: `$XDG_CACHE_HOME/bazel/_bazel_{user}` or `$HOME/.cache/bazel/_bazel_{user}`
-    /// - Windows: `%LOCALAPPDATA%\bazel\_bazel_{user}` or `%USERPROFILE%\AppData\Local\bazel\_bazel_{user}`
+    /// - `TEST_TMPDIR`: `<TEST_TMPDIR>/_<product>_{user}`
+    /// - macOS: `$XDG_CACHE_HOME/<product>/_<product>_{user}` or `$HOME/Library/Caches/<product>/_<product>_{user}` (or `/var/tmp/_<product>_{user}`)
+    /// - Linux/BSD: `$XDG_CACHE_HOME/<product>/_<product>_{user}` or `$HOME/.cache/<product>/_<product>_{user}` (or `/tmp/_<product>_{user}`)
+    /// - Windows: `<HOME_OR_USERPROFILE>/_<product>_{user}`
     pub fn resolve_output_user_root_full(
         &self,
         user: &str,
@@ -126,42 +215,48 @@ impl StartupOptions {
             return root.clone();
         }
 
+        let prod = self.lowercase_product_name();
+
         if let Some(tmp) = test_tmpdir {
             if !tmp.is_empty() {
-                return PathFragment::create(&format!("{tmp}/_bazel_{user}"));
+                return PathFragment::create(&format!("{tmp}/_{prod}_{user}"));
             }
         }
 
         match Os::current() {
             Os::Darwin => {
-                if let Some(h) = home {
-                    PathFragment::create(&format!("{h}/Library/Caches/bazel/_bazel_{user}"))
+                if let Some(xdg) = xdg_cache_home {
+                    if !xdg.is_empty() {
+                        return PathFragment::create(&format!("{xdg}/{prod}/_{prod}_{user}"));
+                    }
+                }
+                if let Some(h) = home.filter(|s| !s.is_empty()) {
+                    PathFragment::create(&format!("{h}/Library/Caches/{prod}/_{prod}_{user}"))
                 } else {
-                    PathFragment::create(&format!("/var/tmp/_bazel_{user}"))
+                    PathFragment::create(&format!("/var/tmp/_{prod}_{user}"))
                 }
             }
             Os::Windows => {
-                if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-                    PathFragment::create(&format!(
-                        "{}/bazel/_bazel_{user}",
-                        local_app_data.to_string_lossy()
-                    ))
-                } else if let Some(h) = home {
-                    PathFragment::create(&format!("{h}/AppData/Local/bazel/_bazel_{user}"))
+                let win_home = home
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty()));
+                if let Some(h) = win_home {
+                    PathFragment::create(&format!("{h}/_{prod}_{user}"))
                 } else {
-                    PathFragment::create(&format!("C:/temp/_bazel_{user}"))
+                    PathFragment::create(&format!("C:/temp/_{prod}_{user}"))
                 }
             }
             _ => {
                 if let Some(xdg) = xdg_cache_home {
                     if !xdg.is_empty() {
-                        return PathFragment::create(&format!("{xdg}/bazel/_bazel_{user}"));
+                        return PathFragment::create(&format!("{xdg}/{prod}/_{prod}_{user}"));
                     }
                 }
-                if let Some(h) = home {
-                    PathFragment::create(&format!("{h}/.cache/bazel/_bazel_{user}"))
+                if let Some(h) = home.filter(|s| !s.is_empty()) {
+                    PathFragment::create(&format!("{h}/.cache/{prod}/_{prod}_{user}"))
                 } else {
-                    PathFragment::create(&format!("/tmp/_bazel_{user}"))
+                    PathFragment::create(&format!("/tmp/_{prod}_{user}"))
                 }
             }
         }
@@ -219,11 +314,12 @@ impl StartupOptions {
             source: source.as_bytes().to_vec(),
         });
 
+        let prod = self.lowercase_product_name();
         let startup_map = get_startup_options_map();
         let (flag_name, flag_val) = parse_startup_flag_token(flag);
 
         let Some(def) = startup_map.get(flag_name.as_str()) else {
-            return Err(OptionsParsingError::unknown_startup_option(flag, "bazel"));
+            return Err(OptionsParsingError::unknown_startup_option(flag, &prod));
         };
 
         // Convert value according to schema
@@ -236,21 +332,32 @@ impl StartupOptions {
                     ""
                 } else {
                     return Err(OptionsParsingError::startup_option_missing_value(
-                        flag, "bazel",
+                        flag, &prod,
                     ));
                 }
             }
         };
+
+        if def.name == "invocation_policy" && self.parsed_options.contains_key("invocation_policy")
+        {
+            return Err(OptionsParsingError::new(
+                "The startup flag --invocation_policy cannot be specified multiple times.",
+            ));
+        }
 
         // `StartupOptions::ProcessArg` range checks (`startup_options.cc`) with their exact messages; they use
         // `blaze_util::safe_strto32` (base 10) rather than `Integer.decode`.
         if let Some(msg) = startup_range_error(def.name, val_str) {
             return Err(OptionsParsingError::new(msg));
         }
-        // `--digest_function` is a plain string for the C++ client (`StartupOptions::ProcessArg`); the server
-        // validates it with `DigestFunctionConverter`.
+        // `--digest_function`, `--bazelrc`, and `--host_jvm_args` take raw unary strings in the C++
+        // client (`StartupOptions::ProcessArg` / `GetAllUnaryOptionValues`), not comma-split lists.
         let converted = match if def.name == "digest_function" {
             Ok(OptionValue::String(val_str.to_string()))
+        } else if matches!(def.name, "bazelrc" | "host_jvm_args") {
+            Ok(OptionValue::List(vec![OptionValue::String(
+                val_str.to_string(),
+            )]))
         } else {
             convert_option(val_str, def)
         } {
@@ -263,35 +370,13 @@ impl StartupOptions {
             }
         };
 
-        // Update known typed fields
+        let should_override = self
+            .parsed_options
+            .get(def.name)
+            .is_none_or(|existing| priority >= existing.priority);
+
+        // Update known typed fields when priority permits (or always for allow_multiple list flags).
         match def.name {
-            "batch" => self.batch = converted.as_bool().unwrap_or(true),
-            "block_for_lock" => self.block_for_lock = converted.as_bool().unwrap_or(true),
-            "quiet" => self.quiet = converted.as_bool().unwrap_or(true),
-            "ignore_all_rc_files" => self.ignore_all_rc_files = converted.as_bool().unwrap_or(true),
-            "system_rc" => self.system_rc = converted.as_bool().unwrap_or(true),
-            "workspace_rc" => self.workspace_rc = converted.as_bool().unwrap_or(true),
-            "home_rc" => self.home_rc = converted.as_bool().unwrap_or(true),
-            "output_base" => {
-                if let Some(s) = converted.as_str() {
-                    self.output_base = Some(Self::expand_startup_path(s));
-                }
-            }
-            "output_user_root" => {
-                if let Some(s) = converted.as_str() {
-                    self.output_user_root = Some(Self::expand_startup_path(s));
-                }
-            }
-            "install_base" => {
-                if let Some(s) = converted.as_str() {
-                    self.install_base = Some(Self::expand_startup_path(s));
-                }
-            }
-            "max_idle_secs" => {
-                if let Some(i) = converted.as_long() {
-                    self.max_idle_secs = i as u64;
-                }
-            }
             "bazelrc" => {
                 if let Some(list) = converted.as_list() {
                     for item in list {
@@ -314,16 +399,63 @@ impl StartupOptions {
                     self.host_jvm_args.push(s.to_string());
                 }
             }
-            "product_name" => {
-                if let Some(s) = converted.as_str() {
-                    self.product_name = s.to_string();
+            _ if should_override => match def.name {
+                "batch" => self.batch = converted.as_bool().unwrap_or(true),
+                "block_for_lock" => self.block_for_lock = converted.as_bool().unwrap_or(true),
+                "quiet" => self.quiet = converted.as_bool().unwrap_or(true),
+                "ignore_all_rc_files" => {
+                    self.ignore_all_rc_files = converted.as_bool().unwrap_or(true)
                 }
-            }
-            "invocation_policy" => {
-                if let Some(s) = converted.as_str() {
-                    self.invocation_policy = s.to_string();
+                "system_rc" => self.system_rc = converted.as_bool().unwrap_or(true),
+                "workspace_rc" => self.workspace_rc = converted.as_bool().unwrap_or(true),
+                "home_rc" => self.home_rc = converted.as_bool().unwrap_or(true),
+                "output_base" => {
+                    if let Some(s) = converted.as_str() {
+                        self.output_base = Some(Self::expand_startup_path(s));
+                    }
                 }
-            }
+                "output_user_root" => {
+                    if let Some(s) = converted.as_str() {
+                        self.output_user_root = Some(Self::expand_startup_path(s));
+                    }
+                }
+                "install_base" => {
+                    if let Some(s) = converted.as_str() {
+                        self.install_base = Some(Self::expand_startup_path(s));
+                    }
+                }
+                "server_jvm_out" => {
+                    if let Some(s) = converted.as_str() {
+                        self.server_jvm_out = Some(Self::expand_startup_path(s));
+                    }
+                }
+                "failure_detail_out" => {
+                    if let Some(s) = converted.as_str() {
+                        self.failure_detail_out = Some(Self::expand_startup_path(s));
+                    }
+                }
+                "server_javabase" => {
+                    if let Some(s) = converted.as_str() {
+                        self.server_javabase = Some(Self::expand_startup_path(s));
+                    }
+                }
+                "max_idle_secs" => {
+                    if let Some(i) = converted.as_long() {
+                        self.max_idle_secs = i as u64;
+                    }
+                }
+                "product_name" => {
+                    if let Some(s) = converted.as_str() {
+                        self.product_name = s.to_string();
+                    }
+                }
+                "invocation_policy" => {
+                    if let Some(s) = converted.as_str() {
+                        self.invocation_policy = s.to_string();
+                    }
+                }
+                _ => {}
+            },
             _ => {}
         }
 
@@ -332,7 +464,11 @@ impl StartupOptions {
             if def.allow_multiple {
                 existing.raw_values.push(val_str.to_string());
                 if let OptionValue::List(ref mut list) = existing.value {
-                    list.push(converted);
+                    if let OptionValue::List(items) = converted {
+                        list.extend(items);
+                    } else {
+                        list.push(converted);
+                    }
                 }
             } else if priority >= existing.priority {
                 existing.raw_values = vec![val_str.to_string()];
@@ -359,7 +495,7 @@ impl StartupOptions {
 
 /// Helper to parse a startup flag token into `(canonical_flag_name, value)`.
 /// Handles `--flag`, `--noflag`, `--flag=val`.
-fn parse_startup_flag_token(token: &str) -> (String, Option<String>) {
+pub(crate) fn parse_startup_flag_token(token: &str) -> (String, Option<String>) {
     let startup_map = get_startup_options_map();
 
     if let Some((k, v)) = token.strip_prefix("--").and_then(|s| s.split_once('=')) {
@@ -397,13 +533,19 @@ pub fn split_command_line(
         let arg = &args[i];
 
         if !arg.starts_with('-') || arg == "-" {
+            if arg.is_empty() {
+                let prod = startup.lowercase_product_name();
+                return Err(OptionsParsingError::new(format!(
+                    "Command cannot be the empty string.\n  For more info, run '{prod} help'."
+                )));
+            }
             let command = arg.clone();
             let command_args = args[i + 1..].to_vec();
             return Ok((startup, command, command_args));
         }
 
-        if arg == "--help" || arg == "-h" {
-            return Ok((startup, "help".to_string(), Vec::new()));
+        if arg == "--help" || arg == "-help" || arg == "-h" {
+            return Ok((startup, "help".to_string(), args[i + 1..].to_vec()));
         }
 
         if arg == "--version" {
@@ -414,12 +556,8 @@ pub fn split_command_line(
                     vec!["--startup_version".to_string()],
                 ));
             } else {
-                let prod = if startup.product_name.is_empty() {
-                    "bazel"
-                } else {
-                    &startup.product_name
-                };
-                return Err(OptionsParsingError::unknown_startup_option(arg, prod));
+                let prod = startup.lowercase_product_name();
+                return Err(OptionsParsingError::unknown_startup_option(arg, &prod));
             }
         }
 
@@ -446,13 +584,19 @@ pub fn split_command_line(
         let (flag_name, inline_val) = parse_startup_flag_token(arg);
 
         let Some(def) = startup_map.get(flag_name.as_str()) else {
-            return Err(OptionsParsingError::unknown_startup_option(arg, "bazel"));
+            let prod = startup.lowercase_product_name();
+            return Err(OptionsParsingError::unknown_startup_option(arg, &prod));
+        };
+
+        let deferrable = |msg: &str| {
+            msg.starts_with("Invalid argument to")
+                || msg.starts_with("The startup flag --invocation_policy")
         };
 
         if inline_val.is_some() || !def.requires_value() {
             if let Err(e) = startup.apply_flag_with_priority(arg, "command line", priority.clone())
             {
-                if !e.message.starts_with("Invalid argument to") {
+                if !deferrable(&e.message) {
                     return Err(e);
                 }
                 startup.deferred_error.get_or_insert(e);
@@ -462,15 +606,16 @@ pub fn split_command_line(
         } else {
             // Unary option with next arg value: e.g. `--output_base /tmp/ob`
             if i + 1 >= args.len() {
+                let prod = startup.lowercase_product_name();
                 return Err(OptionsParsingError::startup_option_missing_value(
-                    arg, "bazel",
+                    arg, &prod,
                 ));
             }
             let combined = format!("{}={}", arg, args[i + 1]);
             if let Err(e) =
                 startup.apply_flag_with_priority(&combined, "command line", priority.clone())
             {
-                if !e.message.starts_with("Invalid argument to") {
+                if !deferrable(&e.message) {
                     return Err(e);
                 }
                 startup.deferred_error.get_or_insert(e);

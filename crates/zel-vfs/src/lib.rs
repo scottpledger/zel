@@ -19,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-#[cfg(unix)]
 use std::path::Path as StdPath;
 use std::path::PathBuf as StdPathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -147,24 +146,55 @@ impl PathFragment {
         }
     }
 
-    /// Creates a new normalized `PathFragment` from a raw string.
+    /// Creates a new normalized `PathFragment` from a raw string using host path semantics.
+    ///
+    /// On Windows (`OsPathPolicy::Windows`), both backslash (`\\server\share\...`) and
+    /// forward-slash (`//server/share/...`) UNC paths normalize to `//server/share/...` with
+    /// `drive_str_len == 2`, preserving `PathFragment::create(pf.path_string()) == pf`
+    /// idempotence (`PathFragment.java:133-144`) as well as forward-slash UNC paths from
+    /// `.bazelrc` and CLI options. On Unix (`UnixOsPathPolicy.java:62-92`), leading `//foo/bar`
+    /// collapses to `/foo/bar` (`drive_str_len == 1`).
     pub fn create(raw: &str) -> Self {
+        Self::create_internal(raw, cfg!(windows))
+    }
+
+    fn create_internal(raw: &str, allow_forward_slash_unc: bool) -> Self {
         if raw.is_empty() {
             return Self::empty();
         }
-        let mut replaced: String = raw
+        let is_nt_unc = raw
+            .strip_prefix(r"\\?\")
+            .or_else(|| raw.strip_prefix(r"\??\"))
+            .or_else(|| raw.strip_prefix("//?/"))
+            .is_some_and(|rest| {
+                rest.len() >= 4
+                    && rest[..3].eq_ignore_ascii_case("UNC")
+                    && matches!(rest.as_bytes()[3], b'\\' | b'/')
+            });
+        let unprefixed =
+            if raw.starts_with(r"\\?\") || raw.starts_with(r"\??\") || raw.starts_with("//?/") {
+                strip_windows_nt_prefix(raw)
+            } else {
+                std::borrow::Cow::Borrowed(raw)
+            };
+        let has_backslash_unc_prefix =
+            unprefixed.starts_with(r"\\") && !unprefixed.starts_with(r"\\\");
+        let replaced: String = unprefixed
             .chars()
             .map(|c| if c == '\\' { '/' } else { c })
             .collect();
-        if let Some(rest) = replaced.strip_prefix("//?/") {
-            let rb = rest.as_bytes();
-            if rb.len() >= 2 && rb[0].is_ascii_alphabetic() && rb[1] == b':' {
-                replaced = rest.to_string();
-            }
-        }
+        let is_valid_unc_shape = replaced == "//"
+            || (replaced.starts_with("//") && !replaced.starts_with("///") && {
+                let first_seg = replaced[2..].split('/').next().unwrap_or("");
+                !first_seg.is_empty() && first_seg != "." && first_seg != ".."
+            });
+        let is_windows_unc = is_valid_unc_shape
+            && (allow_forward_slash_unc || has_backslash_unc_prefix || is_nt_unc);
         let bytes = replaced.as_bytes();
 
-        let (prefix, drive_str_len, rest) = if bytes.len() >= 3
+        let (prefix, drive_str_len, rest) = if is_windows_unc {
+            ("//".to_string(), 2u8, &replaced[2..])
+        } else if bytes.len() >= 3
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
             && bytes[2] == b'/'
@@ -220,6 +250,8 @@ impl PathFragment {
             && bytes[2] == b'/'
         {
             3
+        } else if s.starts_with("//") && (s.len() == 2 || bytes.get(2) != Some(&b'/')) {
+            2
         } else if s.starts_with('/') {
             1
         } else {
@@ -349,10 +381,17 @@ impl PathFragment {
         if other.is_empty() {
             return self.clone();
         }
+        let allow_forward_slash_unc = cfg!(windows) || self.drive_str_len == 2;
         if self.normalized.ends_with('/') {
-            Self::create(&format!("{}{}", self.normalized, other.normalized))
+            Self::create_internal(
+                &format!("{}{}", self.normalized, other.normalized),
+                allow_forward_slash_unc,
+            )
         } else {
-            Self::create(&format!("{}/{}", self.normalized, other.normalized))
+            Self::create_internal(
+                &format!("{}/{}", self.normalized, other.normalized),
+                allow_forward_slash_unc,
+            )
         }
     }
 
@@ -434,7 +473,7 @@ impl PathFragment {
     /// On `OsPathPolicy::Unix`, `\` is a regular segment character and `c:/foo` is relative.
     pub fn create_for_os(raw: &str, policy: OsPathPolicy) -> Self {
         if policy == OsPathPolicy::Windows {
-            return Self::create(raw);
+            return Self::create_internal(raw, true);
         }
         if raw.is_empty() {
             return Self::empty();
@@ -1034,11 +1073,12 @@ impl FileSystem for LocalFileSystem {
                 (mtime, perms, 0)
             }
         };
+        let is_link = !follow_symlinks && is_metadata_junction_or_symlink(&meta);
         Ok(FileStatus {
-            is_file: ft.is_file(),
-            is_directory: ft.is_dir(),
-            is_symlink: ft.is_symlink(),
-            is_special_file: !ft.is_file() && !ft.is_dir() && !ft.is_symlink(),
+            is_file: !is_link && ft.is_file(),
+            is_directory: !is_link && ft.is_dir(),
+            is_symlink: is_link,
+            is_special_file: !is_link && !ft.is_file() && !ft.is_dir() && !ft.is_symlink(),
             size: meta.len(),
             last_modified_time_ms: mtime,
             last_change_time_ms: ctime,
@@ -1052,7 +1092,12 @@ impl FileSystem for LocalFileSystem {
     }
 
     fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
-        fs::write(Self::to_std_path(path), content)
+        let p = Self::to_std_path(path);
+        // `blaze_util::WriteFile` (`file_posix.cc` / `file_windows.cc`): unlink any existing
+        // regular file, symlink, or Windows directory junction/reparse point before opening so
+        // links are replaced rather than followed while real directories are left untouched.
+        unlink_path_for_write(&p);
+        fs::write(&p, content)
     }
 
     fn append_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
@@ -1086,7 +1131,7 @@ impl FileSystem for LocalFileSystem {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             let ft = entry.file_type()?;
-            let dirent_type = if ft.is_symlink() {
+            let dirent_type = if is_dirent_junction_or_symlink(&entry, &ft) {
                 DirentType::Symlink
             } else if ft.is_dir() {
                 DirentType::Directory
@@ -1105,6 +1150,10 @@ impl FileSystem for LocalFileSystem {
         let p = Self::to_std_path(path);
         match fs::symlink_metadata(&p) {
             Ok(meta) => {
+                if is_metadata_junction_or_symlink(&meta) {
+                    remove_junction_or_symlink(&p)?;
+                    return Ok(true);
+                }
                 if meta.is_dir() {
                     fs::remove_dir(&p)?;
                 } else {
@@ -1138,7 +1187,24 @@ impl FileSystem for LocalFileSystem {
                 Self::to_std_path(link_path),
             )
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let link = Self::to_std_path(link_path);
+            let raw_target = StdPath::new(target_fragment.path_string());
+            let resolved_target = if raw_target.is_absolute() {
+                raw_target.to_path_buf()
+            } else {
+                link.parent()
+                    .unwrap_or_else(|| StdPath::new("."))
+                    .join(raw_target)
+            };
+            if resolved_target.is_dir() {
+                create_directory_junction_or_symlink(&resolved_target, &link)
+            } else {
+                std::os::windows::fs::symlink_file(raw_target, &link)
+            }
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             let _ = (link_path, target_fragment);
             Err(io::Error::new(
@@ -1150,7 +1216,8 @@ impl FileSystem for LocalFileSystem {
 
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
         let target = fs::read_link(Self::to_std_path(link_path))?;
-        Ok(PathFragment::create(&target.to_string_lossy()))
+        let raw = target.to_string_lossy();
+        Ok(PathFragment::create(&strip_windows_nt_prefix(&raw)))
     }
 
     fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
@@ -1199,6 +1266,370 @@ impl FileSystem for LocalFileSystem {
         }
         fs::hard_link(canon_orig, dst)
     }
+}
+
+/// Windows attribute classification for `blaze_util::UnlinkPathW` (`file_windows.cc:372-389`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsUnlinkAction {
+    /// Non-reparse directory: never unlink before `WriteFile`.
+    SkipDirectory,
+    /// Directory junction or directory symlink (`FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT`):
+    /// remove the link itself via `RemoveDirectoryW` (`std::fs::remove_dir`).
+    RemoveDirReparsePoint,
+    /// Regular file or file symlink: remove via `DeleteFileW` (`std::fs::remove_file`).
+    RemoveFile,
+}
+
+/// Returns `true` when Win32 `dwFileAttributes` or `FileType::is_symlink()` indicates a reparse
+/// point or symlink (`IsSymlinkOrJunction` in `src/main/native/windows/file.cc:99-125`).
+pub fn is_windows_reparse_or_symlink(file_attributes: u32, is_symlink: bool) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    is_symlink || (file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+}
+
+/// Classifies how `UnlinkPathW` handles a path with Win32 `dwFileAttributes` and `FileType::is_symlink()`.
+pub fn classify_windows_unlink(file_attributes: u32, is_symlink: bool) -> WindowsUnlinkAction {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+    if (file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        if is_windows_reparse_or_symlink(file_attributes, is_symlink) {
+            WindowsUnlinkAction::RemoveDirReparsePoint
+        } else {
+            WindowsUnlinkAction::SkipDirectory
+        }
+    } else {
+        WindowsUnlinkAction::RemoveFile
+    }
+}
+
+/// Unlinks `path` if it is a regular file, symlink, or Windows directory junction/reparse point,
+/// leaving real directories untouched (`blaze_util::UnlinkPath` in `file_posix.cc` / `file_windows.cc`).
+pub fn unlink_path_for_write(path: &StdPath) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        let attrs = meta.file_attributes();
+        match classify_windows_unlink(attrs, meta.file_type().is_symlink()) {
+            WindowsUnlinkAction::SkipDirectory => false,
+            WindowsUnlinkAction::RemoveDirReparsePoint => fs::remove_dir(path)
+                .or_else(|_| fs::remove_file(path))
+                .is_ok(),
+            WindowsUnlinkAction::RemoveFile => {
+                if meta.permissions().readonly()
+                    && !meta.file_type().is_symlink()
+                    && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+                {
+                    let mut perms = meta.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                    let _ = fs::set_permissions(path, perms);
+                }
+                fs::remove_file(path)
+                    .or_else(|e| {
+                        if meta.file_type().is_symlink()
+                            || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                        {
+                            fs::remove_dir(path)
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .is_ok()
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if meta.is_dir() {
+            false
+        } else {
+            fs::remove_file(path).is_ok()
+        }
+    }
+}
+
+/// Strips Windows NT object (`\??\`) or extended-length (`\\?\`, `//?/`) prefixes returned by
+/// `std::fs::canonicalize` and `std::fs::read_link`, converting `\\?\UNC\server\share\...`,
+/// `\??\UNC\server\share\...`, and `//?/UNC/server/share/...` (case-insensitive `UNC`) back to a
+/// two-slash UNC prefix while turning `\\?\C:\...` into `C:\...`.
+pub fn strip_windows_nt_prefix(raw: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix(r"\??\"))
+        .or_else(|| raw.strip_prefix("//?/"))
+    {
+        if rest.len() >= 4
+            && rest[..3].eq_ignore_ascii_case("UNC")
+            && matches!(rest.as_bytes()[3], b'\\' | b'/')
+        {
+            let sep = if raw.starts_with("//?/") {
+                '/'
+            } else {
+                rest.as_bytes()[3] as char
+            };
+            return std::borrow::Cow::Owned(format!("{sep}{sep}{}", &rest[4..]));
+        }
+        return std::borrow::Cow::Borrowed(rest);
+    }
+    std::borrow::Cow::Borrowed(raw)
+}
+
+/// Compares a raw `read_link` target string against an expected path string, accounting for
+/// Windows `\??\` / `\\?\` junction prefixes, `/` vs `\` separators, trailing slashes, and
+/// case-insensitivity when `windows_semantics` is true (`CompareAbsolutePaths` parity).
+pub fn link_target_matches_str(
+    actual_link_target: &str,
+    expected_target: &str,
+    windows_semantics: bool,
+) -> bool {
+    if !windows_semantics {
+        return actual_link_target == expected_target;
+    }
+    let norm = |s: &str| -> String {
+        let stripped = strip_windows_nt_prefix(s).replace('\\', "/");
+        let trimmed = if stripped.len() > 3 && stripped.ends_with('/') {
+            stripped.trim_end_matches('/')
+        } else {
+            &stripped
+        };
+        trimmed.to_ascii_lowercase()
+    };
+    norm(actual_link_target) == norm(expected_target)
+}
+
+fn is_dirent_junction_or_symlink(entry: &fs::DirEntry, ft: &fs::FileType) -> bool {
+    if ft.is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        entry
+            .metadata()
+            .is_ok_and(|meta| is_metadata_junction_or_symlink(&meta))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entry;
+        false
+    }
+}
+
+fn is_metadata_junction_or_symlink(meta: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        is_windows_reparse_or_symlink(meta.file_attributes(), meta.file_type().is_symlink())
+    }
+    #[cfg(not(windows))]
+    {
+        meta.file_type().is_symlink()
+    }
+}
+
+/// Returns `true` if `path` is a symbolic link or Windows NTFS reparse point / junction without
+/// following the link (`IsSymlinkOrJunction` in `src/main/native/windows/file.cc:99-125`).
+pub fn is_junction_or_symlink(path: &StdPath) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| is_metadata_junction_or_symlink(&meta))
+}
+
+/// Removes a symbolic link or Windows NTFS directory junction without following it or modifying
+/// its target directory (`RemoveDirectoryW` before `DeleteFileW` on Windows).
+pub fn remove_junction_or_symlink(path: &StdPath) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        fs::remove_dir(path).or_else(|_| fs::remove_file(path))
+    }
+    #[cfg(not(windows))]
+    {
+        fs::remove_file(path)
+    }
+}
+
+/// Returns `true` if `link` is a symlink or NTFS junction whose target matches `expected_target`.
+pub fn junction_or_symlink_points_to(link: &StdPath, expected_target: &StdPath) -> bool {
+    let Ok(actual) = fs::read_link(link) else {
+        return false;
+    };
+    #[cfg(not(windows))]
+    {
+        actual == expected_target
+    }
+    #[cfg(windows)]
+    {
+        let abs_expected = if expected_target.is_absolute() {
+            expected_target.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(expected_target))
+                .unwrap_or_else(|_| expected_target.to_path_buf())
+        };
+        let actual_s = actual.to_string_lossy();
+        if link_target_matches_str(&actual_s, &expected_target.to_string_lossy(), true)
+            || link_target_matches_str(&actual_s, &abs_expected.to_string_lossy(), true)
+        {
+            return true;
+        }
+        let actual_clean = strip_windows_nt_prefix(&actual_s);
+        match (
+            fs::canonicalize(StdPath::new(actual_clean.as_ref())),
+            fs::canonicalize(&abs_expected),
+        ) {
+            (Ok(ca), Ok(ce)) => {
+                link_target_matches_str(&ca.to_string_lossy(), &ce.to_string_lossy(), true)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Creates a directory symlink on Unix, or an NTFS directory junction (with `symlink_dir` fallback)
+/// on Windows (`CreateJunction` in `src/main/native/windows/file.cc`).
+pub fn create_directory_junction_or_symlink(target: &StdPath, link: &StdPath) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        create_windows_junction(target, link)
+            .or_else(|_| std::os::windows::fs::symlink_dir(target, link))
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = (target, link);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "directory links not supported on this platform",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_junction(target: &StdPath, link: &StdPath) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: *mut core::ffi::c_void,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+        fn DeviceIoControl(
+            h_device: *mut core::ffi::c_void,
+            dw_io_control_code: u32,
+            lp_in_buffer: *const core::ffi::c_void,
+            n_in_buffer_size: u32,
+            lp_out_buffer: *mut core::ffi::c_void,
+            n_out_buffer_size: u32,
+            lp_bytes_returned: *mut u32,
+            lp_overlapped: *mut core::ffi::c_void,
+        ) -> i32;
+        fn CloseHandle(h_object: *mut core::ffi::c_void) -> i32;
+    }
+
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+    let abs_target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(target)
+    };
+    let raw_target = abs_target.to_string_lossy().replace('/', "\\");
+    let win32_target = strip_windows_nt_prefix(&raw_target);
+    let subst = if let Some(unc_rest) = win32_target.strip_prefix(r"\\") {
+        format!(r"\??\UNC\{unc_rest}")
+    } else {
+        format!(r"\??\{win32_target}")
+    };
+    let subst_utf16: Vec<u16> = std::ffi::OsStr::new(&subst).encode_wide().collect();
+    let print_utf16: Vec<u16> = std::ffi::OsStr::new(win32_target.as_ref())
+        .encode_wide()
+        .collect();
+
+    let subst_bytes = (subst_utf16.len() * 2) as u16;
+    let print_offset = subst_bytes + 2;
+    let print_bytes = (print_utf16.len() * 2) as u16;
+    let data_len = 8u16
+        .checked_add(subst_bytes)
+        .and_then(|n| n.checked_add(2))
+        .and_then(|n| n.checked_add(print_bytes))
+        .and_then(|n| n.checked_add(2))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "junction target too long"))?;
+
+    fs::create_dir(link)?;
+
+    let mut link_wide: Vec<u16> = link.as_os_str().encode_wide().collect();
+    link_wide.push(0);
+    let invalid = (-1isize) as *mut core::ffi::c_void;
+    let handle = unsafe {
+        CreateFileW(
+            link_wide.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == invalid {
+        let err = io::Error::last_os_error();
+        let _ = fs::remove_dir(link);
+        return Err(err);
+    }
+
+    let mut buf: Vec<u8> = Vec::with_capacity(8 + data_len as usize);
+    buf.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+    buf.extend_from_slice(&subst_bytes.to_le_bytes()); // SubstituteNameLength
+    buf.extend_from_slice(&print_offset.to_le_bytes()); // PrintNameOffset
+    buf.extend_from_slice(&print_bytes.to_le_bytes()); // PrintNameLength
+    for w in &subst_utf16 {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    for w in &print_utf16 {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr() as *const _,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let ioctl_err = io::Error::last_os_error();
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if ok == 0 {
+        let _ = fs::remove_dir(link);
+        return Err(ioctl_err);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1464,7 +1895,7 @@ impl FileSystem for InMemoryFileSystem {
     fn create_directory_and_parents(&self, path: &PathFragment) -> io::Result<()> {
         let segs = path.segments();
         let prefix = &path.path_string()[..path.drive_str_length()];
-        let mut curr = PathFragment::create(prefix);
+        let mut curr = PathFragment::create_already_normalized(prefix);
         self.create_directory(&curr)?;
         for seg in segs {
             curr = curr.get_relative_str(seg);
@@ -2380,5 +2811,277 @@ mod tests {
         lfs.delete(&l_orig).unwrap();
         assert_eq!(lfs.read_file(&l_link).unwrap(), b"world");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn local_fs_write_file_replaces_symlink_and_junction_helper_works() {
+        let dir = std::env::temp_dir().join(format!("zel-vfs-sym-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("target_dir")).unwrap();
+        fs::write(dir.join("target_dir/inside"), b"ok").unwrap();
+        fs::write(dir.join("protected"), b"keep").unwrap();
+
+        let dir_link = dir.join("dir_link");
+        create_directory_junction_or_symlink(&dir.join("target_dir"), &dir_link).unwrap();
+        assert_eq!(fs::read(dir_link.join("inside")).unwrap(), b"ok");
+        assert!(is_junction_or_symlink(&dir_link));
+        assert!(!is_junction_or_symlink(&dir.join("target_dir")));
+        assert!(!is_junction_or_symlink(&dir.join("protected")));
+        assert!(junction_or_symlink_points_to(
+            &dir_link,
+            &dir.join("target_dir")
+        ));
+        assert!(!junction_or_symlink_points_to(
+            &dir_link,
+            &dir.join("other_dir")
+        ));
+        assert!(!junction_or_symlink_points_to(
+            &dir.join("target_dir"),
+            &dir.join("target_dir")
+        ));
+
+        let lfs = LocalFileSystem::default();
+        let dir_link_frag = PathFragment::create(&dir_link.to_string_lossy());
+        let st_nofollow = lfs.stat(&dir_link_frag, false).unwrap();
+        assert!(st_nofollow.is_symlink && !st_nofollow.is_directory);
+        let st_follow = lfs.stat(&dir_link_frag, true).unwrap();
+        assert!(!st_follow.is_symlink && st_follow.is_directory);
+
+        let dir_link2 = dir.join("dir_link2");
+        create_directory_junction_or_symlink(&dir.join("target_dir"), &dir_link2).unwrap();
+        remove_junction_or_symlink(&dir_link2).unwrap();
+        assert!(!is_junction_or_symlink(&dir_link2));
+        assert!(fs::symlink_metadata(&dir_link2).is_err());
+        assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");
+
+        // Writing to a directory junction/symlink replaces the link itself without touching target_dir.
+        lfs.write_file(&dir_link_frag, b"replaced_dir_link")
+            .unwrap();
+        assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");
+        assert_eq!(fs::read(&dir_link).unwrap(), b"replaced_dir_link");
+        assert!(!fs::symlink_metadata(&dir_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // Writing to a real directory fails and never deletes the directory or its children.
+        let real_dir_frag = PathFragment::create(&dir.join("target_dir").to_string_lossy());
+        assert!(lfs.write_file(&real_dir_frag, b"bad").is_err());
+        assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");
+
+        #[cfg(unix)]
+        {
+            let file_link = dir.join("file_link");
+            std::os::unix::fs::symlink(dir.join("protected"), &file_link).unwrap();
+            let frag = PathFragment::create(&file_link.to_string_lossy());
+            lfs.write_file(&frag, b"replaced").unwrap();
+            assert_eq!(fs::read(dir.join("protected")).unwrap(), b"keep");
+            assert_eq!(fs::read(&file_link).unwrap(), b"replaced");
+            assert!(!fs::symlink_metadata(&file_link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+
+        // Verify `IsSymlinkOrJunction` and `UnlinkPathW` Windows attribute classification across
+        // reparse points (without requiring `read_link`), junctions, real dirs, and files.
+        assert!(!is_windows_reparse_or_symlink(0x0010, false));
+        assert!(!is_windows_reparse_or_symlink(0x0080, false));
+        assert!(is_windows_reparse_or_symlink(0x0010 | 0x0400, false));
+        assert!(is_windows_reparse_or_symlink(0x0400, false));
+        assert!(is_windows_reparse_or_symlink(0x0010, true));
+        assert_eq!(
+            classify_windows_unlink(0x0010, false),
+            WindowsUnlinkAction::SkipDirectory
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0010 | 0x0400, false),
+            WindowsUnlinkAction::RemoveDirReparsePoint
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0010 | 0x0400, true),
+            WindowsUnlinkAction::RemoveDirReparsePoint
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0080, false),
+            WindowsUnlinkAction::RemoveFile
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0400, true),
+            WindowsUnlinkAction::RemoveFile
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_nt_junction_prefix_and_link_target_matching() {
+        assert_eq!(
+            strip_windows_nt_prefix(r"\??\C:\Users\runner\install_base").as_ref(),
+            r"C:\Users\runner\install_base"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\C:\Users\runner\install_base").as_ref(),
+            r"C:\Users\runner\install_base"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\UNC\fileserver\share\ws").as_ref(),
+            r"\\fileserver\share\ws"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\unc\fileserver\share\ws").as_ref(),
+            r"\\fileserver\share\ws"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\??\UNC\fileserver\share\ws").as_ref(),
+            r"\\fileserver\share\ws"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\UNC_folder\sub").as_ref(),
+            r"UNC_folder\sub"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix("/tmp/install").as_ref(),
+            "/tmp/install"
+        );
+
+        let unc_frag = PathFragment::create(&strip_windows_nt_prefix(
+            r"\\?\UNC\fileserver\share\repo\sub",
+        ));
+        assert!(unc_frag.is_absolute());
+        assert_eq!(unc_frag.path_string(), "//fileserver/share/repo/sub");
+        assert_eq!(
+            unc_frag.parent_directory().unwrap().path_string(),
+            "//fileserver/share/repo"
+        );
+        assert_eq!(
+            unc_frag.get_relative_str("MODULE.bazel").path_string(),
+            "//fileserver/share/repo/sub/MODULE.bazel"
+        );
+        assert!(unc_frag.starts_with(&PathFragment::create(r"\\fileserver\share\repo")));
+
+        assert!(link_target_matches_str(
+            r"\??\C:\Users\Runner\AppData\Local\zel\install\abc123",
+            r"C:\Users\Runner\AppData\Local\zel\install\abc123",
+            true,
+        ));
+        assert!(link_target_matches_str(
+            r"\\?\c:\users\runner\install\abc123\",
+            "C:/Users/Runner/install/abc123",
+            true,
+        ));
+        assert!(link_target_matches_str(
+            r"\??\UNC\fileserver\share\install",
+            r"\\fileserver\share\install\",
+            true,
+        ));
+        assert!(link_target_matches_str(
+            r"\\?\UNC\fileserver\share\install",
+            r"\\fileserver\share\install\",
+            true,
+        ));
+        assert!(!link_target_matches_str(
+            r"\??\C:\Users\Runner\install\abc123",
+            r"C:\Users\Runner\install\def456",
+            true,
+        ));
+        assert!(!link_target_matches_str(
+            "/tmp/InstallBase",
+            "/tmp/installbase",
+            false,
+        ));
+    }
+
+    #[test]
+    fn unc_path_fragment_reparse_idempotence_and_os_slash_policies() {
+        let expected_unc = "//server/share/ws/pkg";
+        for raw in [
+            r"\\server\share\ws\pkg",
+            r"\\?\UNC\server\share\ws\pkg",
+            r"\??\UNC\server\share\ws\pkg",
+            "//?/UNC/server/share/ws/pkg",
+            "//server/share/ws/pkg",
+            "//server/share/ws/./sub/../pkg/",
+        ] {
+            let pf = PathFragment::create_for_os(raw, OsPathPolicy::Windows);
+            assert!(pf.is_absolute(), "expected absolute UNC for {raw}");
+            assert_eq!(
+                pf.drive_str_length(),
+                2,
+                "expected UNC root len 2 for {raw}"
+            );
+            assert_eq!(pf.path_string(), expected_unc, "unexpected path for {raw}");
+            assert_eq!(
+                PathFragment::create_for_os(pf.path_string(), OsPathPolicy::Windows),
+                pf,
+                "reparse must be idempotent for {raw}"
+            );
+        }
+
+        let mut cursor = Some(PathFragment::create_for_os(
+            "//server/share/ws/pkg",
+            OsPathPolicy::Windows,
+        ));
+        let mut chain = Vec::new();
+        while let Some(cur) = cursor {
+            assert_eq!(
+                PathFragment::create_for_os(cur.path_string(), OsPathPolicy::Windows),
+                cur
+            );
+            chain.push(cur.path_string().to_string());
+            cursor = cur.parent_directory();
+        }
+        assert_eq!(
+            chain,
+            vec![
+                "//server/share/ws/pkg",
+                "//server/share/ws",
+                "//server/share",
+                "//server",
+                "//",
+            ]
+        );
+
+        let unc_root = PathFragment::create_for_os("//", OsPathPolicy::Windows);
+        assert_eq!(
+            unc_root
+                .get_relative_for_os("server/share", OsPathPolicy::Windows)
+                .get_relative_str("ws")
+                .path_string(),
+            "//server/share/ws"
+        );
+
+        // Three or more leading slashes and dot-prefixed segments are not UNC shares even on Windows.
+        let triple = PathFragment::create_for_os("///a//b/./c/", OsPathPolicy::Windows);
+        assert_eq!(triple.path_string(), "/a/b/c");
+        assert_eq!(triple.drive_str_length(), 1);
+        let dot_seg = PathFragment::create_for_os("//./a/b", OsPathPolicy::Windows);
+        assert_eq!(dot_seg.path_string(), "/a/b");
+        assert_eq!(dot_seg.drive_str_length(), 1);
+
+        // Unix policy always collapses leading `//+` to a single `/` (`UnixOsPathPolicy.java`).
+        let unix_double = PathFragment::create_for_os("//foo/bar", OsPathPolicy::Unix);
+        assert_eq!(unix_double.path_string(), "/foo/bar");
+        assert_eq!(unix_double.drive_str_length(), 1);
+        assert_eq!(
+            PathFragment::create_for_os(unix_double.path_string(), OsPathPolicy::Unix),
+            unix_double
+        );
+
+        #[cfg(windows)]
+        {
+            let host_unc = PathFragment::create("//server/share/ws/pkg");
+            assert_eq!(host_unc.path_string(), "//server/share/ws/pkg");
+            assert_eq!(host_unc.drive_str_length(), 2);
+            assert_eq!(PathFragment::create(host_unc.path_string()), host_unc);
+        }
+
+        #[cfg(not(windows))]
+        {
+            let host_posix = PathFragment::create("//foo/bar");
+            assert_eq!(host_posix.path_string(), "/foo/bar");
+            assert_eq!(host_posix.drive_str_length(), 1);
+            assert_eq!(PathFragment::create(host_posix.path_string()), host_posix);
+        }
     }
 }

@@ -410,6 +410,7 @@ impl BuildObserver {
         let out = Arc::new(BufferOutErr::default());
         crate::live::register(out.clone());
         let ui = Arc::new(UiEventHandler::new(out.clone(), ui_opts));
+        crate::live::register_ui(ui.clone());
         let reporter = Arc::new(Reporter::new());
         reporter.add_handler(ui.clone());
         if let Some(pat) = get("output_filter") {

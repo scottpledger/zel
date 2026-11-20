@@ -27,6 +27,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 use zel_proto::command_server::{
     CancelRequest, CancelResponse, PingRequest, PingResponse, RunRequest, RunResponse,
+    TerminalSizeRequest, TerminalSizeResponse,
 };
 use zel_proto::failure_details::{
     Category, CommandCode, FailureDetail, GrpcServerCode, InterruptedCode,
@@ -63,6 +64,7 @@ struct Daemon {
     current: Mutex<Option<String>>,
     cv: Condvar,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    sinks: Mutex<HashMap<String, Arc<crate::live::LiveSink>>>,
     next_id: AtomicU64,
     last_activity: Mutex<Instant>,
     running: Mutex<usize>,
@@ -153,6 +155,7 @@ fn handle_stream(d: &Arc<Daemon>, st: Stream) -> io::Result<()> {
     let r = match path.strip_prefix(SERVICE) {
         Some("Ping") => handle_ping(d, &st, &first),
         Some("Cancel") => handle_cancel(d, &st, &first),
+        Some("UpdateTerminalSize") => handle_update_terminal_size(d, &st, &first),
         Some("Run") => handle_run(d, &st, &first),
         _ => finish_err(&st, 12, &format!("unknown method {path}")),
     };
@@ -192,6 +195,41 @@ fn handle_cancel(d: &Daemon, st: &Stream, payload: &[u8]) -> io::Result<()> {
     send_msg(
         st,
         &CancelResponse {
+            cookie: d.cfg.response_cookie.clone(),
+        }
+        .encode_to_vec(),
+    )?;
+    finish_ok(st)
+}
+
+fn handle_update_terminal_size(d: &Daemon, st: &Stream, payload: &[u8]) -> io::Result<()> {
+    let Ok(req) = TerminalSizeRequest::decode(payload) else {
+        return finish_err(st, 3, "bad TerminalSizeRequest");
+    };
+    if req.cookie != d.cfg.request_cookie {
+        return finish_err(st, 7, "bad cookie");
+    }
+    if req.columns > 0 {
+        let cols = req.columns as usize;
+        let rows = req.rows.max(0) as usize;
+        let sink = d.sinks.lock().unwrap().get(&req.command_id).cloned();
+        let ui_width = if let Some(sink) = sink {
+            sink.notify_terminal_size_changed(cols, rows);
+            sink.ui_terminal_width()
+        } else {
+            None
+        };
+        *d.rt.last_terminal_size.lock().unwrap() = Some(crate::TerminalSizeUpdate {
+            command_id: req.command_id,
+            columns: cols,
+            rows,
+            ui_width,
+        });
+    }
+    send_ok_headers(st)?;
+    send_msg(
+        st,
+        &TerminalSizeResponse {
             cookie: d.cfg.response_cookie.clone(),
         }
         .encode_to_vec(),
@@ -243,16 +281,26 @@ fn handle_run(d: &Arc<Daemon>, st: &Stream, payload: &[u8]) -> io::Result<()> {
         d.next_id.fetch_add(1, Ordering::SeqCst)
     );
     let cancel = Arc::new(AtomicBool::new(false));
+    let sink = Arc::new(crate::live::LiveSink::default());
     d.cancels
         .lock()
         .unwrap()
         .insert(id.clone(), Arc::clone(&cancel));
+    d.sinks
+        .lock()
+        .unwrap()
+        .insert(id.clone(), Arc::clone(&sink));
     // First message announces the command id (`GrpcServerImpl.run`).
-    send_msg(st, &run_response(d, &id).encode_to_vec())?;
+    if let Err(e) = send_msg(st, &run_response(d, &id).encode_to_vec()) {
+        d.cancels.lock().unwrap().remove(&id);
+        d.sinks.lock().unwrap().remove(&id);
+        return Err(e);
+    }
 
     *d.running.lock().unwrap() += 1;
-    let result = run_locked(d, st, &req, &id, &cancel);
+    let result = run_locked(d, st, &req, &id, &cancel, &sink);
     d.cancels.lock().unwrap().remove(&id);
+    d.sinks.lock().unwrap().remove(&id);
     *d.running.lock().unwrap() -= 1;
     let (final_resp, shut) = match result {
         Ok(v) => v,
@@ -277,6 +325,7 @@ fn run_locked(
     req: &RunRequest,
     id: &str,
     cancel: &Arc<AtomicBool>,
+    sink: &Arc<crate::live::LiveSink>,
 ) -> io::Result<(RunResponse, bool)> {
     let desc = if req.client_description.is_empty() {
         "unknown".to_string()
@@ -347,9 +396,8 @@ fn run_locked(
     }
 
     let (tx, rx) = mpsc::channel::<RunResponse>();
-    let sink = Arc::new(crate::live::LiveSink::default());
     {
-        let sink = Arc::clone(&sink);
+        let sink = Arc::clone(sink);
         let d2 = Arc::clone(d);
         let req2 = req.clone();
         // Starlark analysis (e.g. `@rules_shell` under `--instrument_test_targets`) recurses deeply: the command
@@ -525,6 +573,7 @@ pub fn serve_grpc(
         current: Mutex::new(None),
         cv: Condvar::new(),
         cancels: Mutex::new(HashMap::new()),
+        sinks: Mutex::new(HashMap::new()),
         next_id: AtomicU64::new(1),
         last_activity: Mutex::new(Instant::now()),
         running: Mutex::new(0),

@@ -14,16 +14,23 @@
 
 use std::io;
 use std::sync::Arc;
-use zel_client::{execute_cli_with_exec, perform_exec_request};
+use zel_client::{execute_cli_with_exec, normalize_canonical_path, perform_exec_request};
 use zel_vfs::{LocalFileSystem, PathFragment};
 
+fn canonical_cwd() -> String {
+    let Ok(cur) = std::env::current_dir() else {
+        return "/".to_string();
+    };
+    let resolved = std::fs::canonicalize(&cur).unwrap_or(cur);
+    normalize_canonical_path(&resolved)
+}
+
 fn main() {
+    zel_server::sys::setup_std_streams();
     zel_server::sys::unlimit_resources();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let cwd_str = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "/".to_string());
-    let cwd = PathFragment::create(&cwd_str);
+    let cwd = PathFragment::create(&canonical_cwd());
     let fs = Arc::new(LocalFileSystem::default());
 
     let mut stdout = io::stdout();
