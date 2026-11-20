@@ -27,6 +27,29 @@ pub const BAZEL_COMPAT_VERSION: &str = "9.3.2";
 /// `BlazeVersionInfo.getReleaseName()` of [`BAZEL_COMPAT_VERSION`].
 pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
 
+/// The Bazel version string exposed to `native.bazel_version` and Bzlmod `bazel_compatibility`
+/// checks. Honors `BAZEL_DEV_VERSION_OVERRIDE`, `ZEL_EMBED_LABEL`, and `BAZEL_EMBED_LABEL` (in
+/// that order, ignoring empty values), falling back to compile-time `ZEL_EMBED_LABEL` /
+/// `BAZEL_EMBED_LABEL` or [`BAZEL_COMPAT_VERSION`].
+pub fn default_bazel_version() -> String {
+    for var in [
+        "BAZEL_DEV_VERSION_OVERRIDE",
+        "ZEL_EMBED_LABEL",
+        "BAZEL_EMBED_LABEL",
+    ] {
+        if let Ok(val) = std::env::var(var) {
+            if !val.is_empty() {
+                return val;
+            }
+        }
+    }
+    option_env!("ZEL_EMBED_LABEL")
+        .or(option_env!("BAZEL_EMBED_LABEL"))
+        .filter(|s| !s.is_empty())
+        .unwrap_or(BAZEL_COMPAT_VERSION)
+        .to_string()
+}
+
 pub mod action_env;
 pub mod classfile;
 pub mod deflate;

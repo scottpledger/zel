@@ -2565,3 +2565,65 @@ fn bzl_load_visibility_enforced_across_build_bzl_and_repos() {
             .message
             .contains("requires `--experimental_bzl_visibility`")));
 }
+
+#[test]
+fn native_bazel_version_in_bzl_files() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+TOP_LEVEL_VERSION = native.bazel_version
+HAS_ATTR = hasattr(native, "bazel_version")
+GET_ATTR = getattr(native, "bazel_version")
+GET_ATTR_DEFAULT = getattr(native, "bazel_version", "fallback")
+IN_DIR = "bazel_version" in dir(native)
+
+def _bazel_version():
+    return native.bazel_version
+
+def emit_version(name):
+    if not HAS_ATTR or not IN_DIR:
+        fail("expected bazel_version on native")
+    if GET_ATTR != TOP_LEVEL_VERSION or GET_ATTR_DEFAULT != TOP_LEVEL_VERSION:
+        fail("getattr mismatch")
+    native.genrule(
+        name = name,
+        outs = [name + ".txt"],
+        cmd = "echo " + TOP_LEVEL_VERSION + "|" + _bazel_version() + "|" + str(HAS_ATTR) + "|" + str(IN_DIR),
+    )
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "emit_version")
+emit_version(name = "check")
+"#,
+        ),
+    ]);
+
+    let default_ver = zel_util::default_bazel_version();
+    let p = ws.load("");
+    assert!(!p.contains_errors, "{:?}", errors(&p));
+    assert_eq!(
+        rule(&p, "check").cmd.as_deref(),
+        Some(format!("echo {default_ver}|{default_ver}|True|True").as_str())
+    );
+
+    // LoaderConfig::bazel_version overrides native.bazel_version.
+    let custom_loader = ws.loader_with(|cfg| {
+        cfg.bazel_version = "8.2.1".to_string();
+    });
+    let p_custom = custom_loader
+        .load_package(&PackageIdentifier::create_in_main_repo("").unwrap())
+        .unwrap();
+    assert!(!p_custom.contains_errors, "{:?}", errors(&p_custom));
+    assert_eq!(
+        rule(&p_custom, "check").cmd.as_deref(),
+        Some("echo 8.2.1|8.2.1|True|True")
+    );
+
+    // BUILD files still do not expose `native`.
+    let ws_bad = Ws::new(&[("BUILD", "x = native.bazel_version\n")]);
+    assert!(ws_bad.load("").contains_errors);
+}

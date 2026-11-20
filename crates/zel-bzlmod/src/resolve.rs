@@ -154,18 +154,7 @@ pub struct ResolveOptions {
 }
 
 pub fn default_bazel_version() -> String {
-    for var in [
-        "BAZEL_DEV_VERSION_OVERRIDE",
-        "ZEL_EMBED_LABEL",
-        "BAZEL_EMBED_LABEL",
-    ] {
-        if let Ok(val) = std::env::var(var) {
-            if !val.is_empty() {
-                return val;
-            }
-        }
-    }
-    zel_util::BAZEL_COMPAT_VERSION.to_string()
+    zel_util::default_bazel_version()
 }
 
 impl ResolveOptions {
