@@ -1074,10 +1074,18 @@ impl SkyFunction for PackageLookupFunction {
             match self
                 .repo_resolver
                 .get()
-                .and_then(|r| r.repo_root(pkg_id.repository()))
+                .map(|r| r.resolve_repo_root(pkg_id.repository()))
             {
-                Some(root) => root,
-                None => {
+                Some(Ok(root)) => root,
+                Some(Err(zel_packages::lookup::RepoRootError::FetchFailed(err))) => {
+                    let short = zel_packages::lookup::short_repo_fetch_error(&err.message);
+                    return Err(SkyFunctionError::transient(format!(
+                        "no such package '{}//{}': {short}",
+                        pkg_id.repository().canonical_form(),
+                        pkg_frag,
+                    )));
+                }
+                None | Some(Err(zel_packages::lookup::RepoRootError::NotFound)) => {
                     let repo = pkg_id.repository();
                     let dym = self
                         .repo_resolver

@@ -10,6 +10,68 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zel_starlark::Value;
 
+/// Structured failure returned by [`Rt::fetch_repo_detailed`] and [`Rt::repo_spec_for_detailed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchRepoError {
+    /// The canonical repository name is not defined by any module or module extension.
+    NotDefined(String),
+    /// Evaluating the owning Bzlmod module extension (or validating its imports/return value)
+    /// failed.
+    ModuleExtension(String),
+    /// Fetching/evaluating the repository rule (or `--nofetch`, `--override_repository`, etc.)
+    /// failed.
+    RepoRule(String),
+}
+
+impl FetchRepoError {
+    pub fn into_message(self) -> String {
+        match self {
+            Self::NotDefined(m) | Self::ModuleExtension(m) | Self::RepoRule(m) => m,
+        }
+    }
+}
+
+thread_local! {
+    /// Captures a `ModuleExtension` failure raised during a nested `fetch_repo_detailed` call
+    /// inside Starlark execution (e.g. `rctx.path(Label(...))` or `.bzl` `load()`), so the
+    /// enclosing `fetch_repo_inner_detailed` preserves `FetchRepoError::ModuleExtension` instead
+    /// of downgrading it to `FetchRepoError::RepoRule`.
+    static NESTED_EXT_ERROR: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn record_nested_extension_error(msg: &str) {
+    NESTED_EXT_ERROR.with(|slot| {
+        let mut g = slot.borrow_mut();
+        if g.is_none() {
+            *g = Some(msg.to_string());
+        }
+    });
+}
+
+struct NestedExtErrorScope {
+    prev: Option<String>,
+}
+
+impl NestedExtErrorScope {
+    fn enter() -> Self {
+        let prev = NESTED_EXT_ERROR.with(|slot| slot.borrow_mut().take());
+        Self { prev }
+    }
+
+    fn take(&self) -> Option<String> {
+        NESTED_EXT_ERROR.with(|slot| slot.borrow_mut().take())
+    }
+}
+
+impl Drop for NestedExtErrorScope {
+    fn drop(&mut self) {
+        NESTED_EXT_ERROR.with(|slot| {
+            *slot.borrow_mut() = self.prev.take();
+        });
+    }
+}
+
 /// Gson representation used by Bazel's `AttributeValues` marker fingerprint.
 ///
 /// This intentionally differs from lockfile JSON: Gson serializes `StarlarkInt` through its
@@ -393,8 +455,12 @@ impl Rt {
             .to_string()
     }
 
-    /// Finds the spec for `canonical`: module repo, extension-generated repo, or innate repo.
-    pub fn repo_spec_for(self: &Arc<Self>, canonical: &str) -> Result<Option<RepoSpec>, String> {
+    /// Structured failure returned by [`fetch_repo_detailed`](Self::fetch_repo_detailed) and
+    /// [`repo_spec_for_detailed`](Self::repo_spec_for_detailed).
+    pub fn repo_spec_for_detailed(
+        self: &Arc<Self>,
+        canonical: &str,
+    ) -> Result<Option<RepoSpec>, FetchRepoError> {
         let res = &self.resolution;
         if canonical.is_empty() {
             return Ok(None);
@@ -405,12 +471,22 @@ impl Rt {
         }
         // Extension-generated: check matching `{unique}+` prefixes longest-first for actual ownership.
         for (id, exported) in res.extension_candidates_for_canonical(canonical) {
-            let result = self.eval_extension(&id)?;
+            let result = self
+                .eval_extension(&id)
+                .map_err(FetchRepoError::ModuleExtension)?;
             if let Some((_, spec)) = result.generated.iter().find(|(n, _)| n == exported) {
                 return Ok(Some(spec.clone()));
             }
         }
-        Err(format!("Repository '@@{canonical}' is not defined"))
+        Err(FetchRepoError::NotDefined(format!(
+            "Repository '@@{canonical}' is not defined"
+        )))
+    }
+
+    /// Finds the spec for `canonical`: module repo, extension-generated repo, or innate repo.
+    pub fn repo_spec_for(self: &Arc<Self>, canonical: &str) -> Result<Option<RepoSpec>, String> {
+        self.repo_spec_for_detailed(canonical)
+            .map_err(FetchRepoError::into_message)
     }
 
     /// The repo in whose context label-valued attributes of `canonical`'s rule are resolved:
@@ -443,8 +519,12 @@ impl Rt {
         canonical.to_string()
     }
 
-    /// Ensures `canonical` is fetched; returns its directory.
-    pub fn fetch_repo(self: &Arc<Self>, canonical: &str) -> Result<PathBuf, String> {
+    /// Ensures `canonical` is fetched; returns its directory or a structured fetch error
+    /// distinguishing undefined repositories, module extension failures, and repo-rule failures.
+    pub fn fetch_repo_detailed(
+        self: &Arc<Self>,
+        canonical: &str,
+    ) -> Result<PathBuf, FetchRepoError> {
         if canonical.is_empty() {
             return Ok(self.opts.workspace_root.clone());
         }
@@ -457,14 +537,14 @@ impl Rt {
             if st.fetching.iter().any(|f| f == canonical) {
                 let mut chain = st.fetching.clone();
                 chain.push(canonical.to_string());
-                return Err(format!(
+                return Err(FetchRepoError::RepoRule(format!(
                     "Circular repository dependency while fetching: {}",
                     chain
                         .iter()
                         .map(|c| format!("@@{c}"))
                         .collect::<Vec<_>>()
                         .join(" -> ")
-                ));
+                )));
             }
         }
         self.state
@@ -472,7 +552,7 @@ impl Rt {
             .unwrap()
             .fetching
             .push(canonical.to_string());
-        let r = self.fetch_repo_inner(canonical, &dir);
+        let r = self.fetch_repo_inner_detailed(canonical, &dir);
         self.state
             .lock()
             .unwrap()
@@ -487,36 +567,50 @@ impl Rt {
         Ok(dir)
     }
 
-    fn fetch_repo_inner(self: &Arc<Self>, canonical: &str, dir: &Path) -> Result<(), String> {
+    /// Ensures `canonical` is fetched; returns its directory.
+    pub fn fetch_repo(self: &Arc<Self>, canonical: &str) -> Result<PathBuf, String> {
+        self.fetch_repo_detailed(canonical)
+            .map_err(FetchRepoError::into_message)
+    }
+
+    fn fetch_repo_inner_detailed(
+        self: &Arc<Self>,
+        canonical: &str,
+        dir: &Path,
+    ) -> Result<(), FetchRepoError> {
         let _ = std::fs::create_dir_all(self.external_dir());
         let marker = self.marker_path(canonical);
         let spec: Option<RepoSpec>;
-        if let Some(p) = self.repo_override_for(canonical)? {
+        if let Some(p) = self
+            .repo_override_for(canonical)
+            .map_err(FetchRepoError::RepoRule)?
+        {
             // `RepositoryFetchFunction.symlinkRepoRoot`: the override target must be a directory.
             if !p.is_dir() {
-                return Err(format!(
+                return Err(FetchRepoError::RepoRule(format!(
                     "The repository's path is \"{canonical}\" (absolute: \"{}\") but it does not exist or is not a directory.",
                     p.display()
-                ));
+                )));
             }
             if !["MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel"]
                 .iter()
                 .any(|name| p.join(name).exists())
             {
-                return Err(format!(
+                return Err(FetchRepoError::RepoRule(format!(
                     "No MODULE.bazel, REPO.bazel, or WORKSPACE file found in {}",
                     p.display()
-                ));
+                )));
             }
             if canonical == "bazel_tools" {
                 let _ = remove_any(dir);
                 #[cfg(unix)]
                 {
-                    std::os::unix::fs::symlink(&p, dir).map_err(|e| e.to_string())?;
+                    std::os::unix::fs::symlink(&p, dir)
+                        .map_err(|e| FetchRepoError::RepoRule(e.to_string()))?;
                 }
                 #[cfg(not(unix))]
                 {
-                    copy_tree(&p, dir)?;
+                    copy_tree(&p, dir).map_err(FetchRepoError::RepoRule)?;
                 }
                 let fp = crate::hash::sha256_hex(format!("override:{}", p.display()).as_bytes());
                 let _ = std::fs::write(&marker, format!("{fp}\n"));
@@ -535,10 +629,30 @@ impl Rt {
             );
             spec = Some(s);
         } else if canonical == "bazel_tools" {
-            return self.make_bazel_tools(dir);
+            return self.make_bazel_tools(dir).map_err(FetchRepoError::RepoRule);
         } else {
-            spec = self.repo_spec_for(canonical)?;
+            spec = self.repo_spec_for_detailed(canonical)?;
         }
+        let scope = NestedExtErrorScope::enter();
+        match self.fetch_repo_with_spec(canonical, dir, marker, spec) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Some(ext_err) = scope.take() {
+                    Err(FetchRepoError::ModuleExtension(ext_err))
+                } else {
+                    Err(FetchRepoError::RepoRule(e))
+                }
+            }
+        }
+    }
+
+    fn fetch_repo_with_spec(
+        self: &Arc<Self>,
+        canonical: &str,
+        dir: &Path,
+        marker: PathBuf,
+        spec: Option<RepoSpec>,
+    ) -> Result<(), String> {
         let Some(spec) = spec else {
             return Err(format!("Repository '@@{canonical}' has no repo spec (is the module a non-registry override with a missing source?)"));
         };
@@ -1040,6 +1154,7 @@ impl Rt {
         id: &ExtensionId,
         verify_imports: bool,
     ) -> Result<ExtensionResult, String> {
+        let _nested_ext_scope = NestedExtErrorScope::enter();
         let res = self.resolution.clone();
         let usages = res.usages_of(id);
         let cached = self.state.lock().unwrap().ext_results.get(id).cloned();

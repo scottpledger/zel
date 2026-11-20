@@ -212,6 +212,24 @@ pub struct PatternError {
     /// Set when the pattern failed only because its package loaded with errors (the package may
     /// still be partially usable; Bazel reports `package contains errors: <pkg>: <first error>`).
     pub package_errors: Option<PackageErrors>,
+    /// Set when the pattern failed because fetching an external repository or evaluating its
+    /// module extension failed; holds the raw diagnostic and classification from the repository
+    /// resolver.
+    pub repo_fetch_error: Option<crate::lookup::RepoFetchError>,
+}
+
+struct ExpandError {
+    message: String,
+    repo_fetch_error: Option<crate::lookup::RepoFetchError>,
+}
+
+impl ExpandError {
+    fn msg(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            repo_fetch_error: None,
+        }
+    }
 }
 
 /// A package that loaded with errors (`Package.containsErrors()`).
@@ -400,23 +418,37 @@ impl PatternResolver {
         pattern: &TargetPattern,
         events: &mut Vec<PackageEvent>,
     ) -> Result<Vec<Target>, String> {
+        self.expand_detailed(pattern, events).map_err(|e| e.message)
+    }
+
+    fn expand_detailed(
+        &self,
+        pattern: &TargetPattern,
+        events: &mut Vec<PackageEvent>,
+    ) -> Result<Vec<Target>, ExpandError> {
         match pattern {
             TargetPattern::SingleTarget(label) => {
                 let pkg = self.package(label.package_identifier()).map_err(|e| {
                     events.extend(e.events.iter().cloned());
-                    e.message
+                    ExpandError {
+                        message: e.message,
+                        repo_fetch_error: e.repo_fetch_error,
+                    }
                 })?;
                 self.take_events(&pkg, events);
                 // A target missing from a package that contains errors is a plain
                 // `NoSuchTargetException` (`no such target ...: not declared in package ...`).
                 let t = pkg
-                    .get_target(label.name(), self.loader.config().lookup.fs.as_ref())?
+                    .get_target(label.name(), self.loader.config().lookup.fs.as_ref())
+                    .map_err(ExpandError::msg)?
                     .clone();
                 Ok(vec![t])
             }
             TargetPattern::PathAsTarget { original, path } => {
-                let label = self.interpret_path_as_target(original, path)?;
-                self.expand(&TargetPattern::SingleTarget(label), events)
+                let label = self
+                    .interpret_path_as_target(original, path)
+                    .map_err(ExpandError::msg)?;
+                self.expand_detailed(&TargetPattern::SingleTarget(label), events)
             }
             TargetPattern::TargetsInPackage {
                 package,
@@ -424,15 +456,18 @@ impl PatternResolver {
             } => {
                 let pkg = self.package(package).map_err(|e| {
                     events.extend(e.events.iter().cloned());
-                    e.message
+                    ExpandError {
+                        message: e.message,
+                        repo_fetch_error: e.repo_fetch_error,
+                    }
                 })?;
                 self.take_events(&pkg, events);
                 if pkg.contains_errors {
-                    return Err(format!(
+                    return Err(ExpandError::msg(format!(
                         "error loading package '{}': Package '{}' contains errors",
                         package.package_fragment(),
                         package.package_fragment()
-                    ));
+                    )));
                 }
                 Ok(Self::rules_or_all(&pkg, *include_files))
             }
@@ -453,7 +488,7 @@ impl PatternResolver {
         raw_positive_pattern: Option<&str>,
         keep_going: bool,
         events: &mut Vec<PackageEvent>,
-    ) -> Result<(Vec<Target>, Vec<String>), String> {
+    ) -> Result<(Vec<Target>, Vec<ExpandError>), ExpandError> {
         let mut out = Vec::new();
         let mut pkgs = Vec::new();
         self.find_packages_below_excluding_with_pattern(
@@ -463,7 +498,7 @@ impl PatternResolver {
             &mut pkgs,
             events,
         )?;
-        let mut pkg_failures: Vec<String> = Vec::new();
+        let mut pkg_failures: Vec<ExpandError> = Vec::new();
         let mut pkg_err_events = Vec::new();
         for id in pkgs {
             match self.package(&id) {
@@ -474,17 +509,20 @@ impl PatternResolver {
                             None,
                             format!("package contains errors: {}", id.package_fragment()),
                         ));
-                        pkg_failures.push(format!(
+                        pkg_failures.push(ExpandError::msg(format!(
                             "error loading package '{}': Package '{}' contains errors",
                             id.package_fragment(),
                             id.package_fragment()
-                        ));
+                        )));
                         continue;
                     }
                     out.extend(Self::rules_or_all(&pkg, include_files));
                 }
                 Err(e) => {
-                    pkg_failures.push(e.message);
+                    pkg_failures.push(ExpandError {
+                        message: e.message,
+                        repo_fetch_error: e.repo_fetch_error,
+                    });
                 }
             }
         }
@@ -545,6 +583,18 @@ impl PatternResolver {
         self.find_packages_below_excluding(dir, &[], out, &mut ignored_events)
     }
 
+    /// Like [`find_packages_below`](Self::find_packages_below), also returning any raw external
+    /// repository fetch / module extension diagnostic if the repository lookup failed to fetch.
+    pub fn find_packages_below_detailed(
+        &self,
+        dir: &PackageIdentifier,
+        out: &mut Vec<PackageIdentifier>,
+    ) -> Result<(), (String, Option<crate::lookup::RepoFetchError>)> {
+        let mut ignored_events = Vec::new();
+        self.find_packages_below_excluding_with_pattern(dir, &[], None, out, &mut ignored_events)
+            .map_err(|e| (e.message, e.repo_fetch_error))
+    }
+
     pub fn find_packages_below_excluding(
         &self,
         dir: &PackageIdentifier,
@@ -553,6 +603,7 @@ impl PatternResolver {
         events: &mut Vec<PackageEvent>,
     ) -> Result<(), String> {
         self.find_packages_below_excluding_with_pattern(dir, excluded_subdirs, None, out, events)
+            .map_err(|e| e.message)
     }
 
     fn find_packages_below_excluding_with_pattern(
@@ -562,7 +613,7 @@ impl PatternResolver {
         raw_positive_pattern: Option<&str>,
         out: &mut Vec<PackageIdentifier>,
         events: &mut Vec<PackageEvent>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ExpandError> {
         if excluded_subdirs
             .iter()
             .any(|ex| dir.package_fragment().starts_with(ex))
@@ -570,28 +621,38 @@ impl PatternResolver {
             return Ok(());
         }
         let lookup = &self.loader.config().lookup;
-        let Some(root) = lookup.resolver.repo_root(dir.repository()) else {
-            let repo = dir.repository();
-            let main_map = lookup.resolver.mapping(&RepositoryName::main());
-            let dym = main_map.did_you_mean(repo.name());
-            let repo_display = if repo.is_main() || !repo.is_visible() {
-                repo.canonical_form()
-            } else {
-                format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
-            };
-            let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
-                format!(
-                    "No repository visible as '@{}' from main repository{dym}",
-                    repo.name()
-                )
-            });
-            return Err(format!(
-                "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: {not_vis}",
-                dir.package_fragment()
-            ));
+        let root = match lookup.resolver.resolve_repo_root(dir.repository()) {
+            Ok(root) => root,
+            Err(crate::lookup::RepoRootError::FetchFailed(err)) => {
+                let short = crate::lookup::short_repo_fetch_error(&err.message).to_string();
+                return Err(ExpandError {
+                    message: short,
+                    repo_fetch_error: Some(err),
+                });
+            }
+            Err(crate::lookup::RepoRootError::NotFound) => {
+                let repo = dir.repository();
+                let main_map = lookup.resolver.mapping(&RepositoryName::main());
+                let dym = main_map.did_you_mean(repo.name());
+                let repo_display = if repo.is_main() || !repo.is_visible() {
+                    repo.canonical_form()
+                } else {
+                    format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
+                };
+                let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
+                    format!(
+                        "No repository visible as '@{}' from main repository{dym}",
+                        repo.name()
+                    )
+                });
+                return Err(ExpandError::msg(format!(
+                    "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: {not_vis}",
+                    dir.package_fragment()
+                )));
+            }
         };
         if let Err(e) = lookup.check_bazelignore(&root) {
-            return Err(format!("Error reading .bazelignore: {e}"));
+            return Err(ExpandError::msg(format!("Error reading .bazelignore: {e}")));
         }
         if let Some(entry) = lookup
             .ignored_subdirectories(&root)
@@ -615,10 +676,10 @@ impl PatternResolver {
             .map(|s| s.is_directory)
             .unwrap_or(false)
         {
-            return Err(format!(
+            return Err(ExpandError::msg(format!(
                 "no targets found beneath '{}'",
                 dir.package_fragment()
-            ));
+            )));
         }
         let is_root = dir.package_fragment().is_empty();
         let mut ancestors = Vec::new();
@@ -649,10 +710,10 @@ impl PatternResolver {
                     return Ok(());
                 }
             }
-            return Err(format!(
+            return Err(ExpandError::msg(format!(
                 "no targets found beneath '{}'",
                 dir.package_fragment()
-            ));
+            )));
         }
         Ok(())
     }
@@ -871,6 +932,7 @@ impl PatternResolver {
                         pattern: raw.clone(),
                         message: e.0,
                         package_errors: None,
+                        repo_fetch_error: None,
                     });
                     parsed_list.push(None);
                 }
@@ -1001,11 +1063,12 @@ impl PatternResolver {
                         &mut events,
                     ) {
                         Ok((ts, pkg_errs)) => {
-                            for msg in pkg_errs {
+                            for err in pkg_errs {
                                 outcome.errors.push(PatternError {
                                     pattern: raw.clone(),
-                                    message: msg,
+                                    message: err.message,
                                     package_errors: None,
+                                    repo_fetch_error: err.repo_fetch_error,
                                 });
                             }
                             Ok(ts)
@@ -1013,16 +1076,17 @@ impl PatternResolver {
                         Err(e) => Err(e),
                     }
                 }
-                _ => self.expand(&signed.pattern, &mut events),
+                _ => self.expand_detailed(&signed.pattern, &mut events),
             };
             outcome.events.extend(events);
             match (signed.sign, res) {
-                (_, Err(message)) => {
-                    let package_errors = self.package_errors_for(&signed.pattern, &message);
+                (_, Err(err)) => {
+                    let package_errors = self.package_errors_for(&signed.pattern, &err.message);
                     outcome.errors.push(PatternError {
                         pattern: raw,
-                        message,
+                        message: err.message,
                         package_errors,
+                        repo_fetch_error: err.repo_fetch_error,
                     })
                 }
                 (PatternSign::Positive, Ok(ts)) => {

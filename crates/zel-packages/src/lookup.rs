@@ -21,10 +21,91 @@ use std::sync::Arc;
 use zel_cmdline::{Label, PackageIdentifier, RepositoryMapping, RepositoryName};
 use zel_vfs::{FileSystem, PathFragment};
 
+/// Classification of a repository fetch or module extension evaluation failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoFetchErrorKind {
+    /// Fetching or evaluating a repository rule (or `--nofetch`, `--override_repository`, etc.)
+    /// failed; Bazel reports this with exit code 1 (`BUILD_FAILURE`).
+    RepoRule,
+    /// Evaluating a Bzlmod module extension (including `.bzl` loading, missing extension export,
+    /// invalid return value, `fail()`, or `use_repo`/`override_repo`/`inject_repo` validation)
+    /// failed; Bazel reports this with exit code 48.
+    ModuleExtension,
+}
+
+/// A repository fetch or module extension evaluation error with its structured classification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoFetchError {
+    pub message: String,
+    pub kind: RepoFetchErrorKind,
+}
+
+impl RepoFetchError {
+    pub fn new(message: impl Into<String>, kind: RepoFetchErrorKind) -> Self {
+        Self {
+            message: message.into(),
+            kind,
+        }
+    }
+
+    pub fn repo_rule(message: impl Into<String>) -> Self {
+        Self::new(message, RepoFetchErrorKind::RepoRule)
+    }
+
+    pub fn module_extension(message: impl Into<String>) -> Self {
+        Self::new(message, RepoFetchErrorKind::ModuleExtension)
+    }
+
+    pub fn is_module_extension(&self) -> bool {
+        self.kind == RepoFetchErrorKind::ModuleExtension
+    }
+}
+
+/// Failure reason returned by [`RepoResolver::resolve_repo_root`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoRootError {
+    /// The repository is not visible from the requesting repo or is not defined.
+    NotFound,
+    /// The repository exists (or its owning module extension exists), but fetching or evaluating
+    /// it failed with the given diagnostic and classification.
+    FetchFailed(RepoFetchError),
+}
+
+/// Extracts the trailing concise cause from a multi-line repository/extension fetch diagnostic
+/// (the text after the last `\nERROR: `), or strips a leading `ERROR: ` if single-part.
+pub fn short_repo_fetch_error(raw: &str) -> &str {
+    if let Some((_, tail)) = raw.rsplit_once("\nERROR: ") {
+        tail
+    } else {
+        raw.strip_prefix("ERROR: ").unwrap_or(raw)
+    }
+}
+
+/// Returns the preamble lines (INFO/traceback) before the trailing `\nERROR: <short>` line,
+/// if any.
+pub fn repo_fetch_error_preamble(raw: &str) -> Option<&str> {
+    raw.rsplit_once("\nERROR: ").map(|(head, _)| head)
+}
+
+/// Formats a raw repository/extension fetch diagnostic for console output, ensuring a leading
+/// `ERROR: ` unless it already starts with `INFO: `, `WARNING: `, or `ERROR: `.
+pub fn format_repo_fetch_error(raw: &str) -> String {
+    if raw.starts_with("INFO: ") || raw.starts_with("ERROR: ") || raw.starts_with("WARNING: ") {
+        raw.to_string()
+    } else {
+        format!("ERROR: {raw}")
+    }
+}
+
 /// Maps repositories to their source roots and apparent names to canonical names.
 pub trait RepoResolver: Send + Sync {
-    /// Root directory of `repo`, or `None` if the repository is not defined.
+    /// Root directory of `repo`, or `None` if the repository is not defined or failed to fetch.
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment>;
+    /// Like [`repo_root`](Self::repo_root), distinguishing a missing/invisible repository from
+    /// a repository whose fetch or module extension evaluation failed.
+    fn resolve_repo_root(&self, repo: &RepositoryName) -> Result<PathFragment, RepoRootError> {
+        self.repo_root(repo).ok_or(RepoRootError::NotFound)
+    }
     /// Repository mapping used when parsing labels that appear in files of `owner`.
     fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping;
     /// Optional `(module_name, module_version)` associated with `repo` (`module_name()` /
@@ -146,6 +227,7 @@ pub enum PackageLookup {
     Deleted(String),
     InvalidName(String),
     RepoNotFound(String),
+    RepoFetchError(RepoFetchError),
     IoError(String),
 }
 
@@ -325,24 +407,30 @@ impl PackageLookupConfig {
     }
 
     pub fn lookup(&self, pkg: &PackageIdentifier) -> PackageLookup {
-        let Some(root) = self.resolver.repo_root(pkg.repository()) else {
-            let repo = pkg.repository();
-            let main_map = self.resolver.mapping(&RepositoryName::main());
-            let dym = main_map.did_you_mean(repo.name());
-            let repo_display = if repo.is_main() || !repo.is_visible() {
-                repo.canonical_form()
-            } else {
-                format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
-            };
-            let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
-                format!(
-                    "No repository visible as '@{}' from main repository{dym}",
-                    repo.name()
-                )
-            });
-            return PackageLookup::RepoNotFound(format!(
-                "The repository '{repo_display}' could not be resolved: {not_vis}"
-            ));
+        let root = match self.resolver.resolve_repo_root(pkg.repository()) {
+            Ok(root) => root,
+            Err(RepoRootError::FetchFailed(err)) => {
+                return PackageLookup::RepoFetchError(err);
+            }
+            Err(RepoRootError::NotFound) => {
+                let repo = pkg.repository();
+                let main_map = self.resolver.mapping(&RepositoryName::main());
+                let dym = main_map.did_you_mean(repo.name());
+                let repo_display = if repo.is_main() || !repo.is_visible() {
+                    repo.canonical_form()
+                } else {
+                    format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
+                };
+                let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
+                    format!(
+                        "No repository visible as '@{}' from main repository{dym}",
+                        repo.name()
+                    )
+                });
+                return PackageLookup::RepoNotFound(format!(
+                    "The repository '{repo_display}' could not be resolved: {not_vis}"
+                ));
+            }
         };
         if let Err(e) = self.check_bazelignore(&root) {
             return PackageLookup::IoError(format!("Error reading .bazelignore: {e}"));
@@ -388,6 +476,7 @@ impl PackageLookupConfig {
             | PackageLookup::InvalidName(r)
             | PackageLookup::RepoNotFound(r)
             | PackageLookup::IoError(r) => r.clone(),
+            PackageLookup::RepoFetchError(e) => e.message.clone(),
             PackageLookup::Found { .. } => String::new(),
         }
     }
@@ -432,5 +521,102 @@ impl PackageLookupConfig {
         Some(format!(
             "Label '{label_str}' is invalid because '{sub_display}' is a subpackage; perhaps you meant to put the colon here: '{prefix}{sub_display}:{rest}'?"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zel_vfs::InMemoryFileSystem;
+
+    struct FailingFetchResolver {
+        main_root: PathFragment,
+        err: RepoFetchError,
+    }
+
+    impl RepoResolver for FailingFetchResolver {
+        fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+            self.resolve_repo_root(repo).ok()
+        }
+
+        fn resolve_repo_root(&self, repo: &RepositoryName) -> Result<PathFragment, RepoRootError> {
+            if repo.is_main() {
+                return Ok(self.main_root.clone());
+            }
+            if repo.is_visible() && repo.name() == "mod++ext+bad" {
+                return Err(RepoRootError::FetchFailed(self.err.clone()));
+            }
+            Err(RepoRootError::NotFound)
+        }
+
+        fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
+            let mut m = std::collections::HashMap::new();
+            m.insert(
+                "bad".to_string(),
+                RepositoryName::create_unvalidated("mod++ext+bad"),
+            );
+            RepositoryMapping::new(m, owner.clone())
+        }
+    }
+
+    #[test]
+    fn lookup_distinguishes_fetch_error_from_unknown_repo() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        let raw = "INFO: Repo mod++ext+bad defined by rule r in @@mod+//:ext.bzl\nERROR: /x/ext.bzl:2:5: An error occurred during the fetch of repository 'mod++ext+bad':\nError in fail: boom\nERROR: boom".to_string();
+        let fetch_err = RepoFetchError::repo_rule(raw.clone());
+        let cfg = PackageLookupConfig {
+            fs,
+            resolver: Arc::new(FailingFetchResolver {
+                main_root: PathFragment::create("/ws"),
+                err: fetch_err.clone(),
+            }),
+            deleted_packages: BTreeSet::new(),
+        };
+
+        let bad_pkg = PackageIdentifier::create(
+            RepositoryName::create_unvalidated("mod++ext+bad"),
+            PathFragment::empty(),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.lookup(&bad_pkg),
+            PackageLookup::RepoFetchError(fetch_err.clone())
+        );
+        assert_eq!(short_repo_fetch_error(&raw), "boom");
+        assert!(repo_fetch_error_preamble(&raw)
+            .unwrap()
+            .contains("An error occurred during the fetch of repository 'mod++ext+bad'"));
+        assert_eq!(format_repo_fetch_error(&raw), raw);
+        assert!(!fetch_err.is_module_extension());
+
+        let missing_pkg = PackageIdentifier::create(
+            RepositoryName::create_unvalidated("no_such_repo"),
+            PathFragment::empty(),
+        )
+        .unwrap();
+        assert!(matches!(
+            cfg.lookup(&missing_pkg),
+            PackageLookup::RepoNotFound(_)
+        ));
+    }
+
+    #[test]
+    fn repo_fetch_error_helpers_handle_module_extension_and_single_line() {
+        let ext_err = "/x/ext.bzl:2:5: Traceback (most recent call last):\nError in fail: ext boom\nERROR: error evaluating module extension @@mod+//:ext.bzl%ext";
+        assert_eq!(
+            short_repo_fetch_error(ext_err),
+            "error evaluating module extension @@mod+//:ext.bzl%ext"
+        );
+        assert!(RepoFetchError::module_extension(ext_err).is_module_extension());
+        assert!(RepoFetchError::module_extension(
+            "expected module extension @@mod+//:ext.bzl%ext to return None or extension_metadata, got int"
+        )
+        .is_module_extension());
+        assert!(format_repo_fetch_error(ext_err).starts_with("ERROR: /x/ext.bzl:2:5:"));
+
+        let nofetch = "to fix, run\n\tbazel fetch //...\nExternal repository @@foo+ not found and fetching repositories is disabled.";
+        assert_eq!(short_repo_fetch_error(nofetch), nofetch);
+        assert_eq!(repo_fetch_error_preamble(nofetch), None);
+        assert!(format_repo_fetch_error(nofetch).starts_with("ERROR: to fix, run"));
     }
 }

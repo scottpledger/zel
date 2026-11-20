@@ -134,6 +134,9 @@ pub struct PackageLoadError {
     /// Bazel's message, e.g. `no such package 'x': BUILD file not found ...`.
     pub message: String,
     pub events: Vec<PackageEvent>,
+    /// Set when loading failed because fetching an external repository or evaluating its module
+    /// extension failed; holds the raw diagnostic and classification from the repository resolver.
+    pub repo_fetch_error: Option<crate::lookup::RepoFetchError>,
 }
 
 impl std::fmt::Display for PackageLoadError {
@@ -642,6 +645,7 @@ impl PackageLoader {
                                 build_file
                             ),
                             events: Vec::new(),
+                            repo_fetch_error: None,
                         })
                     }
                 };
@@ -656,8 +660,22 @@ impl PackageLoader {
                             id.package_fragment()
                         ),
                         events: pkg.events,
+                        repo_fetch_error: None,
                     }),
                 }
+            }
+            PackageLookup::RepoFetchError(err) => {
+                let pkg_display = format!(
+                    "{}//{}",
+                    id.repository().canonical_form(),
+                    id.package_fragment()
+                );
+                let short = crate::lookup::short_repo_fetch_error(&err.message);
+                Err(PackageLoadError {
+                    message: format!("no such package '{pkg_display}': {short}"),
+                    events: Vec::new(),
+                    repo_fetch_error: Some(err),
+                })
             }
             other => {
                 let pkg_display = if id.repository().is_main() {
@@ -690,6 +708,7 @@ impl PackageLoader {
                         self.cfg.lookup.error_message(id, &other)
                     ),
                     events: Vec::new(),
+                    repo_fetch_error: None,
                 })
             }
         }

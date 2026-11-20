@@ -218,13 +218,20 @@ const BAZEL_TOOLS_DEFAULT_REPOS: &[(&str, &str)] = &[
 
 impl RepoResolver for BuiltinsResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        self.resolve_repo_root(repo).ok()
+    }
+
+    fn resolve_repo_root(
+        &self,
+        repo: &RepositoryName,
+    ) -> Result<PathFragment, crate::lookup::RepoRootError> {
         if !repo.is_visible() {
-            return None;
+            return Err(crate::lookup::RepoRootError::NotFound);
         }
         if repo.name() == BUILTINS_REPO {
-            return Some(self.root.clone());
+            return Ok(self.root.clone());
         }
-        self.inner.repo_root(repo)
+        self.inner.resolve_repo_root(repo)
     }
 
     fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {

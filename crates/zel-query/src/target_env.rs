@@ -1445,6 +1445,10 @@ pub struct TargetEnv<'a> {
     pub graphless: bool,
     pub output_format: String,
     pub order_output: Option<crate::format::OrderOutput>,
+    /// Structured repository fetch / module extension errors encountered while resolving patterns.
+    pub(crate) repo_fetch_errors: RefCell<Vec<zel_packages::lookup::RepoFetchError>>,
+    /// Preformatted stderr preamble lines (e.g. `INFO: Repo ...` + Starlark traceback) for `query`.
+    pub(crate) raw_stderr: RefCell<Vec<String>>,
 }
 
 impl<'a> TargetEnv<'a> {
@@ -1468,7 +1472,27 @@ impl<'a> TargetEnv<'a> {
             graphless: true,
             output_format: String::new(),
             order_output: None,
+            repo_fetch_errors: RefCell::new(Vec::new()),
+            raw_stderr: RefCell::new(Vec::new()),
         }
+    }
+
+    fn record_repo_fetch_error(&self, err: &zel_packages::lookup::RepoFetchError) {
+        let mut errs = self.repo_fetch_errors.borrow_mut();
+        if !errs.iter().any(|e| e == err) {
+            errs.push(err.clone());
+        }
+        if let Some(pre) = zel_packages::lookup::repo_fetch_error_preamble(&err.message) {
+            let formatted = zel_packages::lookup::format_repo_fetch_error(pre);
+            let mut out = self.raw_stderr.borrow_mut();
+            if !out.contains(&formatted) {
+                out.push(formatted);
+            }
+        }
+    }
+
+    pub(crate) fn take_raw_stderr(&self) -> Vec<String> {
+        std::mem::take(&mut *self.raw_stderr.borrow_mut())
     }
 
     fn is_in_genquery_universe(&self, label: &Label) -> bool {
@@ -2050,19 +2074,42 @@ impl<'a> TargetEnv<'a> {
                 .unwrap_or("");
             if !repo.is_empty() {
                 let name = RepositoryName::create_unvalidated(repo);
-                if self
+                match self
                     .resolver
                     .loader()
                     .config()
                     .lookup
                     .resolver
-                    .repo_root(&name)
-                    .is_none()
+                    .resolve_repo_root(&name)
                 {
-                    return (
-                        Vec::new(),
-                        vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
-                    );
+                    Ok(_) => {}
+                    Err(zel_packages::lookup::RepoRootError::NotFound) => {
+                        return (
+                            Vec::new(),
+                            vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
+                        );
+                    }
+                    Err(zel_packages::lookup::RepoRootError::FetchFailed(fetch_err)) => {
+                        self.record_repo_fetch_error(&fetch_err);
+                        let short =
+                            zel_packages::lookup::short_repo_fetch_error(&fetch_err.message);
+                        if pattern.ends_with("//...") || fetch_err.is_module_extension() {
+                            return (
+                                Vec::new(),
+                                vec![format!(
+                                    "\0Target parsing failed due to unexpected exception: {short}"
+                                )],
+                            );
+                        }
+                        let pkg = pattern
+                            .split_once("//")
+                            .map(|(_, rest)| rest.split(':').next().unwrap_or(""))
+                            .unwrap_or("");
+                        return (
+                            Vec::new(),
+                            vec![format!("no such package '@@{repo}//{pkg}': {short}")],
+                        );
+                    }
                 }
             }
         }
@@ -2078,7 +2125,19 @@ impl<'a> TargetEnv<'a> {
             &self.resolver.main_mapping,
         ) {
             let mut pkgs = Vec::new();
-            if let Err(m) = self.resolver.find_packages_below(&directory, &mut pkgs) {
+            if let Err((m, fetch_err)) = self
+                .resolver
+                .find_packages_below_detailed(&directory, &mut pkgs)
+            {
+                if let Some(raw) = fetch_err {
+                    self.record_repo_fetch_error(&raw);
+                    return (
+                        Vec::new(),
+                        vec![format!(
+                            "\0Target parsing failed due to unexpected exception: {m}"
+                        )],
+                    );
+                }
                 if self.toplevel == pattern
                     && pattern.starts_with("@@")
                     && pattern.ends_with("//...")
@@ -2243,7 +2302,22 @@ impl<'a> TargetEnv<'a> {
                     }
                     errors.push(String::new());
                 }
-                None => errors.push(e.message.clone()),
+                None => {
+                    if let Some(fetch_err) = &e.repo_fetch_error {
+                        self.record_repo_fetch_error(fetch_err);
+                        if fetch_err.is_module_extension() {
+                            let short =
+                                zel_packages::lookup::short_repo_fetch_error(&fetch_err.message);
+                            errors.push(format!(
+                                "\0Target parsing failed due to unexpected exception: {short}"
+                            ));
+                        } else {
+                            errors.push(e.message.clone());
+                        }
+                    } else {
+                        errors.push(e.message.clone());
+                    }
+                }
             }
         }
         for error in &mut errors {

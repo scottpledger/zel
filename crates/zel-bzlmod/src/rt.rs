@@ -278,6 +278,31 @@ pub(crate) const STATIC_FAILURE_MARK: &str = "<<zel-static-failure>>";
 pub(crate) const NESTED_STATIC_FAILURE_MARK: &str = "<<zel-nested-static-failure>>";
 pub(crate) const NESTED_STATIC_TRAILER_MARK: &str = "\n<<zel-nested-static-trailer>>";
 
+thread_local! {
+    /// True while the current thread is executing top-level `.bzl` file initialization inside
+    /// `Rt::eval_bzl_fresh`, so nested `.bzl` loads triggered from an active `repository_ctx` or
+    /// `module_ctx` (e.g. `rctx.path(Label("@other_ext_repo//:f"))`) can still call
+    /// `module_extension()`, while calls inside an implementation callback are rejected.
+    static IN_BZL_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct BzlInitScope {
+    prev: bool,
+}
+
+impl BzlInitScope {
+    fn enter() -> Self {
+        let prev = IN_BZL_INIT.with(|flag| flag.replace(true));
+        Self { prev }
+    }
+}
+
+impl Drop for BzlInitScope {
+    fn drop(&mut self) {
+        IN_BZL_INIT.with(|flag| flag.set(self.prev));
+    }
+}
+
 /// `.bzl` builtins besides the Starlark core, which the resolver accepts as predeclared names.
 const BZL_BUILTIN_NAMES: &[&str] = &[
     "rule",
@@ -807,9 +832,19 @@ impl Rt {
         pkg: &str,
         name: &str,
     ) -> Result<EvalContext, String> {
-        let dir = self
-            .fetch_repo(repo)
-            .map_err(|e| format!("Unable to load package for {key}: {e}"))?;
+        let dir = match self.fetch_repo_detailed(repo) {
+            Ok(dir) => dir,
+            Err(crate::fetch::FetchRepoError::ModuleExtension(e)) => {
+                crate::fetch::record_nested_extension_error(&e);
+                return Err(format!("Unable to load package for {key}: {e}"));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Unable to load package for {key}: {}",
+                    e.into_message()
+                ))
+            }
+        };
         let path = if pkg.is_empty() {
             dir.join(name)
         } else {
@@ -832,7 +867,11 @@ impl Rt {
         );
         ctx.static_names = true;
         ctx.static_universe = BZL_BUILTIN_NAMES.iter().map(|s| s.to_string()).collect();
-        if let Err(errs) = ctx.eval_file_checked(&src, None) {
+        let eval_res = {
+            let _bzl_init = BzlInitScope::enter();
+            ctx.eval_file_checked(&src, None)
+        };
+        if let Err(errs) = eval_res {
             if ctx.static_failure {
                 return Err(format!("{STATIC_FAILURE_MARK}{}", errs.join("\nERROR: ")));
             }
@@ -980,7 +1019,20 @@ impl Rt {
         pkg: &str,
         name: &str,
     ) -> Result<BTreeMap<String, Value>, String> {
-        if let Ok(dir) = self.fetch_repo(repo) {
+        let dir = match self.fetch_repo_detailed(repo) {
+            Ok(dir) => dir,
+            Err(crate::fetch::FetchRepoError::ModuleExtension(e)) => {
+                crate::fetch::record_nested_extension_error(&e);
+                return Err(format!("Unable to load package for {key}: {e}"));
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Unable to load package for {key}: {}",
+                    e.into_message()
+                ))
+            }
+        };
+        {
             let path = if pkg.is_empty() {
                 dir.join(name)
             } else {
@@ -1613,8 +1665,7 @@ impl Rt {
         location: String,
     ) -> Result<Value, StarlarkError> {
         let init_label = ctx.module_env.label_string.lock().unwrap().clone();
-        let in_active_ctx = !self.state.lock().unwrap().ctxs.iter().all(|c| c.is_none());
-        let Some(raw_label) = init_label.filter(|_| !in_active_ctx) else {
+        let Some(raw_label) = init_label.filter(|_| IN_BZL_INIT.with(|f| f.get())) else {
             return err("module_extension() can only be used while initializing a .bzl file");
         };
         let bzl_file = if raw_label.starts_with("//") {

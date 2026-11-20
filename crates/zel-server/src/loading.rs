@@ -430,6 +430,7 @@ impl BlazeRuntime {
                                 "Error evaluating '{pat}': error loading package '{frag}': Package '{frag}' contains errors"
                             ),
                             package_errors: None,
+                            repo_fetch_error: None,
                         });
                     }
                     outcome.targets.retain(|t| {
@@ -445,8 +446,17 @@ impl BlazeRuntime {
         let had_errors = !outcome.errors.is_empty();
         if had_errors && keep_going {
             writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
+            let mut printed_fetch: Vec<String> = Vec::new();
             for err in &outcome.errors {
-                if !matches!(err.pattern.as_str(), "//..." | "...") && err.package_errors.is_none()
+                if let Some(fetch_err) = &err.repo_fetch_error {
+                    let formatted =
+                        zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
+                    if !printed_fetch.contains(&formatted) {
+                        writeln_bytes(stderr, &formatted);
+                        printed_fetch.push(formatted);
+                    }
+                } else if !matches!(err.pattern.as_str(), "//..." | "...")
+                    && err.package_errors.is_none()
                 {
                     writeln_bytes(
                         stderr,
@@ -454,6 +464,70 @@ impl BlazeRuntime {
                     );
                 }
             }
+            if !printed_fetch.is_empty() {
+                for m in self.repo_resolver.take_messages() {
+                    if !printed_fetch.contains(&m) && !m.starts_with("ERROR: ") {
+                        writeln_bytes(stderr, &m);
+                    }
+                }
+            }
+        } else if had_errors && outcome.errors.iter().any(|e| e.repo_fetch_error.is_some()) {
+            // At least one target pattern failed while fetching an external repository or
+            // evaluating its module extension. Surface the fetch/extension diagnostics (e.g.
+            // Starlark `fail()`, invalid extension return value, `--nofetch`, or
+            // `--override_repository` failure) AND any other collected non-fetch pattern errors
+            // (missing targets, missing packages, unknown repos) so none are silently dropped.
+            let mut formatted_fetch: Vec<String> = Vec::new();
+            let mut is_extension_error = false;
+            for err in &outcome.errors {
+                if let Some(fetch_err) = &err.repo_fetch_error {
+                    if fetch_err.is_module_extension() {
+                        is_extension_error = true;
+                    }
+                    let formatted =
+                        zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
+                    if !formatted_fetch.contains(&formatted) {
+                        formatted_fetch.push(formatted);
+                    }
+                }
+            }
+            for m in self.repo_resolver.take_messages() {
+                if !formatted_fetch.contains(&m) && !m.starts_with("ERROR: ") {
+                    writeln_bytes(stderr, &m);
+                }
+            }
+            let mut printed_fetch: Vec<String> = Vec::new();
+            for err in &outcome.errors {
+                if let Some(fetch_err) = &err.repo_fetch_error {
+                    let formatted =
+                        zel_packages::lookup::format_repo_fetch_error(&fetch_err.message);
+                    if !printed_fetch.contains(&formatted) {
+                        writeln_bytes(stderr, &formatted);
+                        printed_fetch.push(formatted);
+                    }
+                } else if let Some(m) = Self::unknown_repo_message(&err.pattern, &err.message) {
+                    writeln_bytes(stderr, &format!("ERROR: {m}"));
+                } else {
+                    if warn_without_keep_going
+                        || (err.message.starts_with("no such target '")
+                            && !err.message.contains("(did you mean"))
+                    {
+                        writeln_bytes(
+                            stderr,
+                            &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
+                        );
+                    }
+                    writeln_bytes(stderr, &format!("ERROR: {}", err.message));
+                }
+            }
+            writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
+            writeln_bytes(stderr, "INFO: 0 processes.");
+            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            return Err(if is_extension_error {
+                ExitCode::from_numeric(48)
+            } else {
+                ExitCode::BUILD_FAILURE
+            });
         } else if had_errors
             && outcome
                 .errors
@@ -461,38 +535,7 @@ impl BlazeRuntime {
                 .all(|e| Self::unknown_repo_message(&e.pattern, &e.message).is_some())
         {
             // A pattern naming a repository that does not exist is rejected while parsing it.
-            let resolver_messages = self.repo_resolver.take_messages();
-            let override_failure = resolver_messages.iter().any(|m| {
-                m.contains("The repository's path is ")
-                    || m.contains("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
-            });
-            let nofetch_failure = resolver_messages
-                .iter()
-                .any(|m| m.contains("not found and fetching repositories is disabled."));
-            if nofetch_failure {
-                for m in &resolver_messages {
-                    writeln_bytes(stderr, m);
-                }
-                writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
-                writeln_bytes(stderr, "INFO: 0 processes.");
-                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                return Err(ExitCode::BUILD_FAILURE);
-            }
-            if override_failure {
-                if let Some(m) = resolver_messages.iter().find(|m| {
-                    m.starts_with("ERROR: No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
-                }) {
-                    writeln_bytes(stderr, m);
-                } else {
-                    for m in &resolver_messages {
-                        writeln_bytes(stderr, m);
-                    }
-                }
-                writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
-                writeln_bytes(stderr, "INFO: 0 processes.");
-                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                return Err(ExitCode::BUILD_FAILURE);
-            }
+            let _ = self.repo_resolver.take_messages();
             for err in &outcome.errors {
                 if let Some(m) = Self::unknown_repo_message(&err.pattern, &err.message) {
                     writeln_bytes(stderr, &format!("ERROR: {m}"));
