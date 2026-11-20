@@ -319,26 +319,6 @@ fn java_label_arg(l: &Label) -> String {
     }
 }
 
-fn is_platforms_os_setting(label: &Label) -> bool {
-    let repo = label.package_identifier().repository().name();
-    let pkg = label.package_identifier().package_fragment().path_string();
-    pkg == "os"
-        && label.name() == "os"
-        && (repo == "platforms"
-            || repo.starts_with("platforms+")
-            || repo.starts_with("platforms~"))
-}
-
-fn is_darwin_os_value(label: &Label) -> bool {
-    let repo = label.package_identifier().repository().name();
-    let pkg = label.package_identifier().package_fragment().path_string();
-    pkg == "os"
-        && matches!(label.name(), "osx" | "macos")
-        && (repo == "platforms"
-            || repo.starts_with("platforms+")
-            || repo.starts_with("platforms~"))
-}
-
 fn java_exec_platform_label<'a>(
     cfg: &'a BuildConfigurationKey,
     inputs: &'a AnalysisInputs,
@@ -376,23 +356,6 @@ fn java_exec_platform_label<'a>(
         .or_else(|| cfg.options.get("host_platform").map(String::as_str))
 }
 
-fn platform_info_os_is_macos(ct: &ConfiguredTarget) -> Option<bool> {
-    let Value::ProviderInstance { fields, .. } = ct.providers.get("PlatformInfo")? else {
-        return None;
-    };
-    let Value::Dict(d) = fields.get("constraints")? else {
-        return None;
-    };
-    for (k, v) in d.lock().unwrap().items() {
-        if let (Value::Label(setting), Value::Label(cv)) = (k, v) {
-            if is_platforms_os_setting(&setting) {
-                return Some(is_darwin_os_value(&cv));
-            }
-        }
-    }
-    None
-}
-
 fn utf8_env_for_inputs(
     cfg: &BuildConfigurationKey,
     inputs: &AnalysisInputs,
@@ -400,11 +363,9 @@ fn utf8_env_for_inputs(
 ) -> BTreeMap<String, String> {
     let mac = java_exec_platform_label(cfg, inputs)
         .and_then(|raw| Label::parse_canonical(raw).ok())
-        .and_then(|label| {
-            let core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
-            inputs.resolver.configured_target(&label, &core_cfg).ok()
-        })
-        .and_then(|ct| platform_info_os_is_macos(&ct))
+        .and_then(|label| crate::lookup_platform_target(inputs.resolver.as_ref(), cfg, &label))
+        .and_then(|ct| crate::platform_os_from_target(&ct))
+        .map(|os| os == "DARWIN")
         .unwrap_or(host_is_macos);
     let mut m = BTreeMap::new();
     m.insert(

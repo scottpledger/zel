@@ -2026,6 +2026,83 @@ pub fn platform_constraint_value_labels(constraints_val: &zel_starlark::Value) -
         .collect()
 }
 
+fn is_platforms_repo_name(repo: &str) -> bool {
+    repo == "platforms" || repo.starts_with("platforms+") || repo.starts_with("platforms~")
+}
+
+fn is_platforms_os_setting_label(label: &Label) -> bool {
+    let repo = label.package_identifier().repository().name();
+    let pkg = label.package_identifier().package_fragment().path_string();
+    pkg == "os" && label.name() == "os" && is_platforms_repo_name(repo)
+}
+
+fn platform_info_value(ct: &ConfiguredTarget) -> Option<&zel_starlark::Value> {
+    for target in [ct.get_actual(), ct] {
+        if let Some(v) = target.providers.get("PlatformInfo") {
+            return Some(v);
+        }
+        if let Some((_, v)) = target
+            .providers
+            .iter()
+            .find(|(k, _)| k.ends_with(":PlatformInfo") || k.ends_with("%PlatformInfo"))
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Resolves a platform target under its canonical core-only configuration (falling back to
+/// `cfg.to_core_only()` and `cfg` for custom `DepResolver` implementations).
+pub fn lookup_platform_target(
+    resolver: &dyn starlark_rule::DepResolver,
+    cfg: &BuildConfigurationKey,
+    label: &Label,
+) -> Option<std::sync::Arc<ConfiguredTarget>> {
+    let host_core = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
+    resolver
+        .configured_target(label, &host_core)
+        .or_else(|_| {
+            let cfg_core = cfg.to_core_only();
+            if cfg_core == host_core {
+                Err(String::new())
+            } else {
+                resolver.configured_target(label, &cfg_core)
+            }
+        })
+        .or_else(|_| resolver.configured_target(label, cfg))
+        .ok()
+}
+
+/// `ConstraintConstants.getOsFromConstraintsOrHost` (`ConstraintConstants.java:38-96`):
+/// returns `Some(OS.name())` (`"LINUX"`, `"DARWIN"`, `"WINDOWS"`, `"FREEBSD"`, `"OPENBSD"`, or
+/// `"UNKNOWN"`) when the platform (or an ancestor `parent` platform) sets `@platforms//os:os`,
+/// or `None` when no `@platforms//os:os` constraint is present so callers fall back to `OS.getCurrent()`.
+pub fn platform_os_from_target(ct: &ConfiguredTarget) -> Option<&'static str> {
+    let zel_starlark::Value::ProviderInstance { fields, .. } = platform_info_value(ct)? else {
+        return None;
+    };
+    let constraints_val = fields.get("constraints")?;
+    for (setting, value) in platform_constraint_map(constraints_val).into_values() {
+        if is_platforms_os_setting_label(&setting) {
+            let repo = value.package_identifier().repository().name();
+            let pkg = value.package_identifier().package_fragment().path_string();
+            if pkg == "os" && is_platforms_repo_name(repo) {
+                return Some(match value.name() {
+                    "linux" => "LINUX",
+                    "osx" | "macos" => "DARWIN",
+                    "windows" => "WINDOWS",
+                    "freebsd" => "FREEBSD",
+                    "openbsd" => "OPENBSD",
+                    _ => "UNKNOWN",
+                });
+            }
+            return Some("UNKNOWN");
+        }
+    }
+    None
+}
+
 fn cc_lookup_explicit(
     cc: &ConstraintCollectionData,
     setting_canon: &str,

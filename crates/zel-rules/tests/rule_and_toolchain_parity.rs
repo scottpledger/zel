@@ -1789,3 +1789,320 @@ leaf = rule(
         &["-XepOpt:Foo=a,b".to_string(), "-XDbar=1, 2".to_string()]
     );
 }
+
+#[test]
+fn exec_os_and_cc_compile_extensions_follow_platform_info_constraints() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    let plat_repo_root = PathFragment::create("/repos/platforms");
+    fs.create_directory_and_parents(&root).unwrap();
+    fs.create_directory_and_parents(&plat_repo_root).unwrap();
+
+    write(
+        &fs,
+        &plat_repo_root,
+        "os/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+constraint_setting(name = "os")
+constraint_value(name = "windows", constraint_setting = ":os")
+constraint_value(name = "linux", constraint_setting = ":os")
+constraint_value(name = "osx", constraint_setting = ":os")
+constraint_value(name = "macos", constraint_setting = ":os")
+constraint_value(name = "none", constraint_setting = ":os")
+constraint_value(name = "android", constraint_setting = ":os")
+"#,
+    );
+    write(
+        &fs,
+        &plat_repo_root,
+        "cpu/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+constraint_setting(name = "cpu")
+constraint_value(name = "x86_64", constraint_setting = ":cpu")
+"#,
+    );
+
+    write(
+        &fs,
+        &root,
+        "plats/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+
+# Deliberately neutral names without any OS substring.
+platform(
+    name = "neutral_exec_box",
+    constraint_values = ["@platforms//os:windows", "@platforms//cpu:x86_64"],
+)
+
+platform(
+    name = "child_box",
+    parents = [":neutral_exec_box"],
+    constraint_values = [],
+)
+
+alias(
+    name = "aliased_child_box",
+    actual = ":child_box",
+)
+
+# Deliberately misleading label containing "windows", while PlatformInfo specifies Linux.
+platform(
+    name = "windows_named_box",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+platform(
+    name = "apple_parent_box",
+    constraint_values = ["@platforms//os:osx"],
+)
+
+platform(
+    name = "apple_child_box",
+    parents = [":apple_parent_box"],
+)
+
+platform(
+    name = "android_box",
+    constraint_values = ["@platforms//os:android"],
+)
+
+# No OS constraint at all, despite "windows" and "darwin" in the label.
+platform(
+    name = "windows_darwin_unconstrained",
+    constraint_values = ["@platforms//cpu:x86_64"],
+)
+"#,
+    );
+
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r#"
+_cc_internal = cc_common.internal_DO_NOT_USE()
+ProbeInfo = provider(fields = ["exec_os"])
+
+def _make_fc(ctx):
+    tool = struct(type_name = "tool", path = "C:\\tools\\cl.exe", with_features = [], execution_requirements = [])
+    acs = [
+        struct(
+            type_name = "action_config",
+            action_name = name,
+            enabled = True,
+            tools = [tool],
+            flag_sets = [],
+            implies = [],
+        )
+        for name in ["c++-header-parsing", "assemble", "c++-module-compile", "c++-compile"]
+    ]
+    ph = struct(
+        type_name = "feature",
+        name = "parse_headers",
+        enabled = True,
+        flag_sets = [],
+        env_sets = [],
+        requires = [],
+        implies = [],
+        provides = [],
+    )
+    info = struct(
+        _features_DO_NOT_USE = [ph],
+        _action_configs_DO_NOT_USE = acs,
+        _artifact_name_patterns_DO_NOT_USE = [],
+        _exec_os_DO_NOT_USE = _cc_internal.exec_os(ctx),
+    )
+    tf = _cc_internal.cc_toolchain_features(
+        toolchain_config_info = info,
+        tools_directory = "",
+    )
+    return tf.configure_features(
+        requested_features = [
+            "parse_headers",
+            "c++-header-parsing",
+            "assemble",
+            "c++-module-compile",
+            "c++-compile",
+        ],
+    )
+
+def _probe_impl(ctx):
+    fc = _make_fc(ctx)
+    vars = _cc_internal.cc_toolchain_variables()
+    outs = []
+    for src in ctx.files.srcs:
+        out = ctx.actions.declare_file(src.basename + ".out")
+        outs.append(out)
+        _cc_internal.create_cc_compile_action(
+            action_construction_context = ctx,
+            cc_compilation_context = None,
+            cc_toolchain = None,
+            configuration = ctx.configuration,
+            feature_configuration = fc,
+            compile_build_variables = vars,
+            source = src,
+            output_file = out,
+        )
+    return [
+        DefaultInfo(files = depset(outs)),
+        ProbeInfo(
+            exec_os = _cc_internal.exec_os(ctx),
+        ),
+    ]
+
+cc_probe = rule(
+    implementation = _probe_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+    },
+)
+
+cc_win_only_probe = rule(
+    implementation = _probe_impl,
+    exec_compatible_with = ["@platforms//os:windows"],
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+    },
+)
+"#,
+    );
+    write(&fs, &root, "hdr.HPP", "inline int x() { return 1; }\n");
+    write(&fs, &root, "asm.ASM", "nop\n");
+    write(&fs, &root, "mod.CPPMAP", "module m {}\n");
+    write(&fs, &root, "bad.PIC.s", "nop\n");
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        r#"
+load(":defs.bzl", "cc_probe", "cc_win_only_probe")
+
+cc_probe(
+    name = "win_exts",
+    srcs = ["hdr.HPP", "asm.ASM", "mod.CPPMAP"],
+)
+
+cc_probe(
+    name = "pic_asm",
+    srcs = ["bad.PIC.s"],
+)
+
+cc_win_only_probe(
+    name = "ecw_win",
+    srcs = ["hdr.HPP", "asm.ASM"],
+)
+"#,
+    );
+
+    let mut rr = SimpleRepoResolver::new(root);
+    rr.apparent.insert(String::new(), RepositoryName::main());
+    rr.apparent.insert(
+        "platforms".into(),
+        RepositoryName::create("platforms").unwrap(),
+    );
+    rr.external.insert("platforms".into(), plat_repo_root);
+    let rr_arc: Arc<dyn zel_packages::RepoResolver> = Arc::new(rr);
+
+    let analyze_with_exec = |extra_exec: &[&str],
+                             host_plat: Option<&str>,
+                             target: &str|
+     -> Result<Arc<zel_analysis::ConfiguredTarget>, String> {
+        let lc = LoaderConfig::new(fs.clone() as Arc<dyn FileSystem>, Arc::clone(&rr_arc));
+        let mut acfg = AnalysisConfig::new();
+        acfg.extra_execution_platforms = extra_exec
+            .iter()
+            .map(|s| Label::parse_canonical(s).unwrap())
+            .collect();
+        acfg.host_platform = host_plat.map(|s| Label::parse_canonical(s).unwrap());
+        let r = TargetResolver::new(PackageLoader::new(lc), acfg);
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        r.analyze(&Label::parse_canonical(target).unwrap(), &cfg)
+    };
+
+    let get_exec_os = |ct: &zel_analysis::ConfiguredTarget| -> String {
+        let Value::ProviderInstance { fields, .. } = &ct.providers["//:defs.bzl%ProbeInfo"] else {
+            panic!("missing ProbeInfo");
+        };
+        fields["exec_os"].as_str().unwrap().to_string()
+    };
+
+    // 1. Neutral-named Windows platform (`--extra_execution_platforms` and `--host_platform`,
+    //    plus `parents` inheritance + `alias` chain): `exec_os == "WINDOWS"`, `.HPP` / `.ASM` /
+    //    `.CPPMAP` compile with normalized `C:/tools/cl.exe`, and `.PIC.s` is rejected as PIC asm.
+    for (extra, host) in [
+        (&["//plats:neutral_exec_box"][..], None),
+        (&[][..], Some("//plats:aliased_child_box")),
+    ] {
+        let ct = analyze_with_exec(extra, host, "//:win_exts").unwrap();
+        assert_eq!(get_exec_os(&ct), "WINDOWS");
+        assert_eq!(ct.typed_actions.len(), 3);
+        assert_eq!(ct.typed_actions[0].mnemonic, "CppCompileHeader");
+        assert_eq!(ct.typed_actions[1].mnemonic, "CppCompile");
+        assert_eq!(ct.typed_actions[2].mnemonic, "CppCompile");
+        if let zel_analysis::ActionKind::Spawn { executable, .. } = &ct.typed_actions[0].kind {
+            assert_eq!(executable, "C:/tools/cl.exe");
+        } else {
+            panic!("expected Spawn action");
+        }
+
+        let pic_err = analyze_with_exec(extra, host, "//:pic_asm").unwrap_err();
+        assert!(
+            pic_err.contains("should not have '.pic.s' extension"),
+            "expected Windows PIC_ASSEMBLER rejection, got: {pic_err}"
+        );
+    }
+
+    // 2. Misleadingly-named `//plats:windows_named_box` with `@platforms//os:linux`:
+    //    `exec_os == "LINUX"` (no label substring fallback!), `.HPP` fails as unrecognized,
+    //    and `bad.PIC.s` is accepted as regular `.s` assembly on non-Windows.
+    let linux_pic = analyze_with_exec(&["//plats:windows_named_box"], None, "//:pic_asm").unwrap();
+    assert_eq!(get_exec_os(&linux_pic), "LINUX");
+    let linux_hdr_err =
+        analyze_with_exec(&["//plats:windows_named_box"], None, "//:win_exts").unwrap_err();
+    assert!(
+        linux_hdr_err.contains("Unrecognized source file type for 'hdr.HPP'"),
+        "expected non-Windows rejection of .HPP, got: {linux_hdr_err}"
+    );
+
+    // 3. `exec_compatible_with = ["@platforms//os:windows"]` on a Starlark rule with `toolchains = []`
+    //    skips incompatible `//plats:windows_named_box` (Linux) and selects `//plats:child_box` (Windows).
+    let ecw_ct = analyze_with_exec(
+        &["//plats:windows_named_box", "//plats:child_box"],
+        None,
+        "//:ecw_win",
+    )
+    .unwrap();
+    assert_eq!(get_exec_os(&ecw_ct), "WINDOWS");
+    assert_eq!(ecw_ct.typed_actions.len(), 2);
+
+    // 4. Parent-inherited `@platforms//os:osx` -> `"DARWIN"`; `@platforms//os:android` -> `"UNKNOWN"`
+    //    (`ConstraintConstants.CONSTRAINT_VALUE_TO_OS`); unconstrained platform -> host OS (`OS.getCurrent()`).
+    let apple_ct = analyze_with_exec(&["//plats:apple_child_box"], None, "//:pic_asm").unwrap();
+    assert_eq!(get_exec_os(&apple_ct), "DARWIN");
+
+    let android_ct = analyze_with_exec(&["//plats:android_box"], None, "//:pic_asm").unwrap();
+    assert_eq!(get_exec_os(&android_ct), "UNKNOWN");
+
+    if !cfg!(windows) {
+        let host_fallback_ct = analyze_with_exec(
+            &["//plats:windows_darwin_unconstrained"],
+            None,
+            "//:pic_asm",
+        )
+        .unwrap();
+        let expected_host = if cfg!(target_os = "macos") {
+            "DARWIN"
+        } else if cfg!(target_os = "freebsd") {
+            "FREEBSD"
+        } else if cfg!(target_os = "openbsd") {
+            "OPENBSD"
+        } else if cfg!(target_os = "linux") {
+            "LINUX"
+        } else {
+            "UNKNOWN"
+        };
+        assert_eq!(get_exec_os(&host_fallback_ct), expected_host);
+    }
+}

@@ -672,7 +672,7 @@ fn analyze_rule(
             // `--incompatible_auto_exec_groups`: automatically creates an exec group keyed by
             // each requested toolchain type's canonical label.
             let auto_eg = cfg.bool_option("incompatible_auto_exec_groups", false);
-            if auto_eg {
+            if auto_eg && !types.is_empty() {
                 for t in &types {
                     let gname = t.toolchain_type.canonical_form();
                     let gtc = resolve_ctx_toolchains(

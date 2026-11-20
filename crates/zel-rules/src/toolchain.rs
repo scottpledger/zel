@@ -426,9 +426,10 @@ pub(crate) fn resolve_toolchains_lazy(
     acfg: &crate::AnalysisConfig,
 ) -> Result<ResolvedToolchains, String> {
     let target = target_platform(cfg, resolver, acfg)?.expect("platform");
+    let plat_core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
     let mut exec_platforms: Vec<Arc<ConfiguredTarget>> = Vec::new();
     for l in extra_exec_platforms.iter() {
-        let ep = resolver.configured_target(l, cfg)?;
+        let ep = resolver.configured_target(l, &plat_core_cfg)?;
         if !ep.providers.contains_key("PlatformInfo") {
             return Err(format!(
                 "Target {} was referenced as a platform, but does not provide PlatformInfo",
@@ -603,9 +604,10 @@ pub fn resolve_toolchains(
     acfg: &crate::AnalysisConfig,
 ) -> Result<ResolvedToolchains, String> {
     let target = target_platform(cfg, resolver, acfg)?.expect("platform");
+    let plat_core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
     let mut exec_platforms: Vec<Arc<ConfiguredTarget>> = Vec::new();
     for l in extra_exec_platforms.iter() {
-        let ep = resolver.configured_target(l, cfg)?;
+        let ep = resolver.configured_target(l, &plat_core_cfg)?;
         if !ep.providers.contains_key("PlatformInfo") {
             return Err(format!(
                 "Target {} was referenced as a platform, but does not provide PlatformInfo",

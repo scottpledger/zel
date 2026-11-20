@@ -27,59 +27,26 @@ fn host_exec_os() -> &'static str {
     }
 }
 
-fn os_from_constraint_collection(cc: &crate::ConstraintCollectionData) -> Option<&'static str> {
-    for (setting, val) in &cc.entries {
-        let Some(Value::Label(sl)) = field(setting, "label") else {
-            continue;
-        };
-        if sl.name() == "os" && sl.package_identifier().package_fragment().path_string() == "os" {
-            if let Some(Value::Label(vl)) = field(val, "label") {
-                return Some(match vl.name() {
-                    "macos" | "osx" | "ios" | "tvos" | "watchos" | "visionos" => "DARWIN",
-                    "windows" => "WINDOWS",
-                    "freebsd" => "FREEBSD",
-                    "openbsd" => "OPENBSD",
-                    "linux" | "android" => "LINUX",
-                    _ => "UNKNOWN",
-                });
-            }
-        }
-    }
-    cc.parent
-        .as_deref()
-        .and_then(os_from_constraint_collection)
-}
-
+/// `CcStarlarkInternal.getExecOs` (`CcStarlarkInternal.java:500-502`) +
+/// `ConstraintConstants.getOsFromConstraintsOrHost` (`ConstraintConstants.java:82-96`):
+/// resolves the execution platform's `PlatformInfo` constraints (including `parents` inheritance)
+/// in core configuration and falls back to `OS.getCurrent()` (`host_exec_os()`) when no
+/// `@platforms//os:os` constraint is present.
 fn exec_os_for_ctx(st: &CtxState) -> &'static str {
-    if let Some(ep) = &st.inputs.exec_platform {
-        if let Ok(lbl) = Label::parse_canonical(ep) {
-            if let Ok(ct) = st.inputs.resolver.configured_target(&lbl, &st.cfg) {
-                if let Some(pi) = ct.get_actual().providers.get("@@//_builtins:PlatformInfo") {
-                    if let Some(cval) = field(pi, "constraints") {
-                        if let Some(cc) = crate::constraint_collection_of(&cval) {
-                            if let Some(os) = os_from_constraint_collection(&cc) {
-                                return os;
-                            }
-                        }
-                    }
+    let ep = st
+        .inputs
+        .exec_platform
+        .as_deref()
+        .or_else(|| st.cfg.options.get("host_platform").map(String::as_str));
+    if let Some(raw) = ep {
+        if let Ok(lbl) = Label::parse_canonical(raw) {
+            if let Some(ct) =
+                crate::lookup_platform_target(st.inputs.resolver.as_ref(), &st.cfg, &lbl)
+            {
+                if let Some(os) = crate::platform_os_from_target(&ct) {
+                    return os;
                 }
             }
-        }
-        let lower = ep.to_ascii_lowercase();
-        if lower.contains("windows") {
-            return "WINDOWS";
-        }
-        if lower.contains("macos") || lower.contains("osx") || lower.contains("darwin") {
-            return "DARWIN";
-        }
-        if lower.contains("freebsd") {
-            return "FREEBSD";
-        }
-        if lower.contains("openbsd") {
-            return "OPENBSD";
-        }
-        if lower.contains("linux") {
-            return "LINUX";
         }
     }
     host_exec_os()
@@ -428,6 +395,7 @@ fn file_type_has_any_ext(path: &str, exts: &[&str], windows: bool) -> bool {
 
 /// `CppCompileActionBuilder.getActionName`: determines the default action name for `source`
 /// when no explicit `action_name` is supplied.
+#[cfg(test)]
 fn cc_default_compile_action(
     source: &str,
     fc: &FeatureConfiguration,
@@ -633,7 +601,12 @@ fn cc_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Str
         .ok_or_else(|| StarlarkError("create_cc_compile_action: source must be a File".into()))?;
     let action_name = match cc_kw(pos, kw, 100, "action_name") {
         Some(Value::String(s)) if !s.is_empty() => s.clone(),
-        _ => cc_default_compile_action(source.exec_path.path_string(), &fc)?.to_string(),
+        _ => cc_default_compile_action_for_os(
+            source.exec_path.path_string(),
+            &fc,
+            exec_os_for_ctx(st) == "WINDOWS",
+        )?
+        .to_string(),
     };
     if !fc.action_is_configured(&action_name) {
         return err(format!(
@@ -1252,7 +1225,7 @@ fn cc_expand_and_tokenize(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Strin
             LocationMode::Exec,
             &st.inputs.workspace_name,
             Some(&repo_map),
-            cfg!(windows),
+            exec_os_for_ctx(st) == "WINDOWS",
         )
         .map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?
         .text;

@@ -768,6 +768,52 @@ mod java_native_tests {
             utf8_env_for_inputs(&cfg_auto_eg, &inputs_auto_eg, false)["LC_CTYPE"],
             "en_US.UTF-8"
         );
+
+        // Real `ConstraintCollection` (as produced by native `platform(...)` with `parents = [...]`).
+        let os_setting = provider_instance(
+            "ConstraintSettingInfo",
+            vec![(
+                "label",
+                Value::Label(Label::parse_canonical("@@platforms+//os:os").unwrap()),
+            )],
+        );
+        let osx_val = provider_instance(
+            "ConstraintValueInfo",
+            vec![
+                ("constraint", os_setting.clone()),
+                (
+                    "label",
+                    Value::Label(Label::parse_canonical("@@platforms+//os:osx").unwrap()),
+                ),
+            ],
+        );
+        let parent_cc = crate::register_constraint_collection(vec![(os_setting, osx_val)], None);
+        let child_cc = crate::register_constraint_collection(vec![], Some(&parent_cc));
+        let child_lbl = Label::parse_canonical("//pkg:inherited_apple_box").unwrap();
+        let mut child_ct = ConfiguredTarget::new(
+            child_lbl.clone(),
+            BuildConfigurationKey::target("k8", "fastbuild").to_core_only(),
+            "platform".into(),
+        );
+        child_ct.providers.insert(
+            "PlatformInfo".into(),
+            provider_instance(
+                "PlatformInfo",
+                vec![
+                    ("label", Value::Label(child_lbl.clone())),
+                    ("constraints", child_cc),
+                ],
+            ),
+        );
+        let cc_resolver: Arc<dyn DepResolver> = Arc::new(MapPlatformResolver {
+            platforms: BTreeMap::from([(child_lbl.canonical_form(), Arc::new(child_ct))]),
+        });
+        let mut inputs_inherited = AnalysisInputs::new(cc_resolver);
+        inputs_inherited.exec_platform = Some(child_lbl.canonical_form());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_inherited, false)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
     }
 
     #[test]
