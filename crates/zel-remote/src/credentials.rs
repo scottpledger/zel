@@ -2636,7 +2636,13 @@ mod tests {
             let script = tools.join("helper.cmd");
             std::fs::write(
                 &script,
-                "@echo off\r\nset /p REQ=\r\necho {\"headers\":{\"Authorization\":[\"Bearer %CLIENT_API_TOKEN%\"],\"X-Cwd\":[\"%CD%\"],\"X-Runfiles\":[\"%RUN_UNDER_RUNFILES%\"]}}\r\n",
+                concat!(
+                    "@echo off\r\n",
+                    "setlocal EnableExtensions\r\n",
+                    "set \"CWD=%CD%\"\r\n",
+                    "set \"CWD=%CWD:\\=/%\"\r\n",
+                    "echo {\"headers\":{\"Authorization\":[\"Bearer %CLIENT_API_TOKEN%\"],\"X-Cwd\":[\"%CWD%\"],\"X-Runfiles\":[\"%RUN_UNDER_RUNFILES%\"]}}\r\n",
+                ),
             )
             .unwrap();
             "%workspace%/tools/helper.cmd"

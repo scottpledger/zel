@@ -3464,7 +3464,13 @@ mod tests {
             let script = tools.join("bes_helper.cmd");
             std::fs::write(
                 &script,
-                "@echo off\r\nset /p REQ=\r\necho {\"headers\":{\"Authorization\":[\"Bearer %BES_CLIENT_TOK%\"],\"X-Cwd\":[\"%CD%\"]}}\r\n",
+                concat!(
+                    "@echo off\r\n",
+                    "setlocal EnableExtensions\r\n",
+                    "set \"CWD=%CD%\"\r\n",
+                    "set \"CWD=%CWD:\\=/%\"\r\n",
+                    "echo {\"headers\":{\"Authorization\":[\"Bearer %BES_CLIENT_TOK%\"],\"X-Cwd\":[\"%CWD%\"]}}\r\n",
+                ),
             )
             .unwrap();
             "remote.buildbuddy.io=%workspace%/tools/bes_helper.cmd"
