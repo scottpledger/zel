@@ -1038,8 +1038,6 @@ impl RemoteOptions {
                 headers,
                 credentials: creds,
                 verify_downloads: self.verify_downloads,
-                cache_compression: self.cache_compression,
-                compression_threshold: self.cache_compression_threshold,
             },
         ))))
     }

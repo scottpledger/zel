@@ -23,7 +23,7 @@ use std::net::{IpAddr, Shutdown, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// A connected byte stream split into halves plus a shutdown hook.
 pub struct Transport {
@@ -35,6 +35,12 @@ pub struct Transport {
 /// Something that can open new transports to a fixed endpoint.
 pub trait Connector: Send + Sync {
     fn connect(&self) -> io::Result<Transport>;
+    /// Opens a transport applying `timeout` as the connect and socket read/write idle timeout
+    /// when non-zero. Connectors without kernel socket timeouts fall back to [`Self::connect`]
+    /// and rely on caller-level idle watchdogs.
+    fn connect_with_timeout(&self, _timeout: Duration) -> io::Result<Transport> {
+        self.connect()
+    }
     /// Value used for the HTTP/2 `:authority` pseudo-header (or HTTP/1.1 `Host`).
     fn authority(&self) -> String;
 }
@@ -56,17 +62,46 @@ impl TcpConnector {
             authority_override: None,
         }
     }
-}
 
-impl Connector for TcpConnector {
-    fn connect(&self) -> io::Result<Transport> {
+    fn connect_internal(
+        &self,
+        connect_timeout: Duration,
+        io_timeout: Option<Duration>,
+    ) -> io::Result<Transport> {
         let mut last = io::Error::new(io::ErrorKind::NotFound, "no addresses resolved");
+        let deadline = if connect_timeout.is_zero() {
+            None
+        } else {
+            Some(Instant::now() + connect_timeout)
+        };
         for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
-            match TcpStream::connect_timeout(&addr, self.connect_timeout) {
+            let attempt = match deadline {
+                Some(dl) => {
+                    let rem = dl.saturating_duration_since(Instant::now());
+                    if rem.is_zero() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "connection timed out",
+                        ));
+                    }
+                    TcpStream::connect_timeout(&addr, rem)
+                }
+                None => TcpStream::connect(addr),
+            };
+            match attempt {
                 Ok(s) => {
                     let _ = s.set_nodelay(true);
+                    let active_io_timeout = io_timeout.filter(|t| !t.is_zero());
+                    if let Some(t) = active_io_timeout {
+                        let _ = s.set_read_timeout(Some(t));
+                        let _ = s.set_write_timeout(Some(t));
+                    }
                     let r = s.try_clone()?;
                     let w = s.try_clone()?;
+                    if let Some(t) = active_io_timeout {
+                        let _ = r.set_read_timeout(Some(t));
+                        let _ = w.set_write_timeout(Some(t));
+                    }
                     return Ok(Transport {
                         reader: Box::new(r),
                         writer: Box::new(w),
@@ -79,6 +114,16 @@ impl Connector for TcpConnector {
             }
         }
         Err(last)
+    }
+}
+
+impl Connector for TcpConnector {
+    fn connect(&self) -> io::Result<Transport> {
+        self.connect_internal(self.connect_timeout, None)
+    }
+
+    fn connect_with_timeout(&self, timeout: Duration) -> io::Result<Transport> {
+        self.connect_internal(timeout, Some(timeout))
     }
 
     fn authority(&self) -> String {
@@ -420,9 +465,21 @@ impl UnixConnector {
 #[cfg(unix)]
 impl Connector for UnixConnector {
     fn connect(&self) -> io::Result<Transport> {
+        self.connect_with_timeout(Duration::ZERO)
+    }
+
+    fn connect_with_timeout(&self, timeout: Duration) -> io::Result<Transport> {
         let s = std::os::unix::net::UnixStream::connect(&self.path)?;
+        if !timeout.is_zero() {
+            let _ = s.set_read_timeout(Some(timeout));
+            let _ = s.set_write_timeout(Some(timeout));
+        }
         let r = s.try_clone()?;
         let w = s.try_clone()?;
+        if !timeout.is_zero() {
+            let _ = r.set_read_timeout(Some(timeout));
+            let _ = w.set_write_timeout(Some(timeout));
+        }
         Ok(Transport {
             reader: Box::new(r),
             writer: Box::new(w),
