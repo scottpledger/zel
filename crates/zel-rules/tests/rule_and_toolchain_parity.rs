@@ -1156,19 +1156,44 @@ def _top_impl(ctx):
     return [ctx.attr.dep[Info]]
 top = rule(implementation = _top_impl, attrs = {"dep": attr.label(cfg = tr)})
 
+BfpInfo = provider(fields = ["path"])
 def _bfp_impl(ctx):
-    _ = ctx.build_file_path
-    return []
+    return [BfpInfo(path = ctx.build_file_path)]
 bfp_rule = rule(implementation = _bfp_impl)
+
+def _bfp_exec_consumer_impl(ctx):
+    return [BfpInfo(path = ctx.attr.tool[BfpInfo].path)]
+bfp_exec_consumer = rule(
+    implementation = _bfp_exec_consumer_impl,
+    attrs = {"tool": attr.label(cfg = "exec")},
+)
 "#,
     );
     write(&fs, &root, "other.txt", "ok");
     write(
         &fs,
         &root,
+        "pkg/BUILD",
+        r#"
+load("//:defs.bzl", "bfp_rule")
+bfp_rule(name = "bfp_pkg", visibility = ["//visibility:public"])
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "pkg_bazel/BUILD.bazel",
+        r#"
+load("//:defs.bzl", "bfp_rule")
+bfp_rule(name = "bfp_bazel", visibility = ["//visibility:public"])
+"#,
+    );
+    write(
+        &fs,
+        &root,
         "BUILD",
         r#"
-load(":defs.bzl", "str_flag", "leaf", "top", "bfp_rule")
+load(":defs.bzl", "str_flag", "leaf", "top", "bfp_rule", "bfp_exec_consumer")
 str_flag(name = "foo_starlark", build_setting_default = "default_foo")
 config_feature_flag(name = "ff", allowed_values = ["default", "configured"], default_value = "default")
 config_feature_flag(name = "ff_no_default", allowed_values = ["only"])
@@ -1180,6 +1205,7 @@ top(name = "t", dep = ":l")
 platform(name = "p_parent", flags = ["--cpu=arm"])
 platform(name = "p_child", parents = [":p_parent"], flags = ["--cpu=k8"])
 bfp_rule(name = "bfp")
+bfp_exec_consumer(name = "bfp_exec", tool = "//pkg_bazel:bfp_bazel")
 "#,
     );
 
@@ -1233,13 +1259,61 @@ bfp_rule(name = "bfp")
     };
     assert_eq!(pf["flags"].repr(), "[\"--cpu=arm\", \"--cpu=k8\"]");
 
-    let bfp_err = r
-        .analyze(&Label::parse_canonical("//:bfp").unwrap(), &cfg)
-        .unwrap_err();
-    assert!(
-        bfp_err.contains("Use ctx.label.package + '/BUILD' instead of ctx.build_file_path."),
-        "got: {bfp_err}"
+    // Bazel 9.3.2 exports `ctx.build_file_path` by default (`--incompatible_stop_exporting_build_file_path=false`).
+    for (target, expected) in [
+        ("//:bfp", "BUILD"),
+        ("//pkg:bfp_pkg", "pkg/BUILD"),
+        ("//pkg_bazel:bfp_bazel", "pkg_bazel/BUILD.bazel"),
+        ("//:bfp_exec", "pkg_bazel/BUILD.bazel"),
+    ] {
+        let ct = r
+            .analyze(&Label::parse_canonical(target).unwrap(), &cfg)
+            .unwrap_or_else(|e| panic!("default {target} should succeed: {e}"));
+        let Value::ProviderInstance { fields, .. } = &ct.providers["//:defs.bzl%BfpInfo"] else {
+            panic!("expected BfpInfo for {target}");
+        };
+        assert_eq!(fields["path"].as_str(), Some(expected), "target {target}");
+    }
+
+    // Passing `--incompatible_stop_exporting_build_file_path` disables `ctx.build_file_path`
+    // in both target and exec configurations.
+    let mut strict_bfp_cfg = cfg.clone();
+    strict_bfp_cfg.options.insert(
+        "incompatible_stop_exporting_build_file_path".into(),
+        "true".into(),
     );
+    for target in ["//:bfp", "//:bfp_exec"] {
+        let bfp_err = r
+            .analyze(&Label::parse_canonical(target).unwrap(), &strict_bfp_cfg)
+            .unwrap_err();
+        assert!(
+            bfp_err.contains("Use ctx.label.package + '/BUILD' instead of ctx.build_file_path."),
+            "target {target} got: {bfp_err}"
+        );
+        assert!(
+            bfp_err.contains(
+                "Use --incompatible_stop_exporting_build_file_path=false to temporarily disable this check."
+            ),
+            "target {target} got: {bfp_err}"
+        );
+    }
+
+    // Passing `--noincompatible_stop_exporting_build_file_path` explicitly keeps it enabled.
+    let mut allow_bfp_cfg = cfg.clone();
+    allow_bfp_cfg.options.insert(
+        "incompatible_stop_exporting_build_file_path".into(),
+        "false".into(),
+    );
+    let bfp_ok = r
+        .analyze(
+            &Label::parse_canonical("//:bfp_exec").unwrap(),
+            &allow_bfp_cfg,
+        )
+        .unwrap();
+    let Value::ProviderInstance { fields, .. } = &bfp_ok.providers["//:defs.bzl%BfpInfo"] else {
+        panic!("expected BfpInfo");
+    };
+    assert_eq!(fields["path"].as_str(), Some("pkg_bazel/BUILD.bazel"));
 }
 
 #[test]

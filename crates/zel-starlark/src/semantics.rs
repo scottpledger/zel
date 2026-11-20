@@ -124,7 +124,7 @@ impl Default for StarlarkSemantics {
             experimental_bzl_visibility: true,
             check_bzl_visibility: true,
             allow_experimental_loads: false,
-            incompatible_stop_exporting_build_file_path: true,
+            incompatible_stop_exporting_build_file_path: false,
             incompatible_no_implicit_file_export: true,
             incompatible_no_rule_outputs_param: true,
             incompatible_disallow_empty_glob: true,

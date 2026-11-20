@@ -274,7 +274,12 @@ pub struct TargetResolver {
 fn key(label: &Label, cfg: &BuildConfigurationKey) -> (String, String) {
     (
         label.canonical_form(),
-        format!("{}#{}", cfg.mnemonic(), cfg.checksum()),
+        format!(
+            "{}#{}{}",
+            cfg.mnemonic(),
+            cfg.checksum(),
+            cfg.semantics_cache_key()
+        ),
     )
 }
 
@@ -633,7 +638,7 @@ impl TargetResolver {
         let mut adj_cfg;
         let plat_adj;
         let cfg = if is_noconfig {
-            adj_cfg = BuildConfigurationKey::target("noconfig", "fastbuild").to_core_only();
+            adj_cfg = cfg.to_core_only();
             &adj_cfg
         } else {
             let cfg = if !cfg.core_only && !cfg.platforms.is_empty() {

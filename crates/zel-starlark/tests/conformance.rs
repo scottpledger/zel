@@ -626,7 +626,7 @@ fn test_starlark_semantics_flags() {
     let ctx = EvalContext::default();
     assert_eq!(ctx.semantics.nested_set_depth_limit, 3500);
     assert!(ctx.semantics.incompatible_always_check_depset_elements);
-    assert!(ctx.semantics.incompatible_stop_exporting_build_file_path);
+    assert!(!ctx.semantics.incompatible_stop_exporting_build_file_path);
     assert!(ctx.semantics.incompatible_no_implicit_file_export);
     assert!(ctx.semantics.incompatible_fail_on_unknown_attributes);
 }

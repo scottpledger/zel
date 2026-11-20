@@ -2052,3 +2052,139 @@ mapped_dirs(
         "stale item.txt in former primary output directory out_x must be cleaned on rebuild"
     );
 }
+
+#[test]
+fn ctx_build_file_path_default_and_incompatible_flag() {
+    let w = Ws::new("ctx-build-file-path");
+    w.write(
+        "defs.bzl",
+        r#"
+BfpInfo = provider(fields = ["path"])
+
+def _bfp_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ctx.build_file_path)
+    return [DefaultInfo(files = depset([out])), BfpInfo(path = ctx.build_file_path)]
+
+bfp = rule(implementation = _bfp_impl)
+
+def _exec_consumer_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ctx.attr.tool[BfpInfo].path)
+    return [DefaultInfo(files = depset([out]))]
+
+exec_consumer = rule(
+    implementation = _exec_consumer_impl,
+    attrs = {"tool": attr.label(cfg = "exec")},
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        r#"
+load(":defs.bzl", "bfp", "exec_consumer")
+bfp(name = "root")
+exec_consumer(name = "exec_check", tool = "//pkg_bazel:b")
+"#,
+    );
+    w.write(
+        "pkg/BUILD",
+        r#"
+load("//:defs.bzl", "bfp")
+bfp(name = "a")
+"#,
+    );
+    w.write(
+        "pkg_bazel/BUILD.bazel",
+        r#"
+load("//:defs.bzl", "bfp")
+bfp(name = "b", visibility = ["//visibility:public"])
+"#,
+    );
+
+    // 1. Default (Bazel 9.3.2): `--incompatible_stop_exporting_build_file_path=false`, so
+    // `ctx.build_file_path` is exported and returns the package's real BUILD filename.
+    let (code, _, err, _) = w.run(&[
+        "build",
+        "//:root",
+        "//pkg:a",
+        "//pkg_bazel:b",
+        "//:exec_check",
+    ]);
+    assert_eq!(code, 0, "default build failed: {err}");
+    let bin = w.bin_dir();
+    assert_eq!(
+        std::fs::read_to_string(bin.join("root.txt")).unwrap(),
+        "BUILD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bin.join("pkg/a.txt")).unwrap(),
+        "pkg/BUILD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bin.join("pkg_bazel/b.txt")).unwrap(),
+        "pkg_bazel/BUILD.bazel"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bin.join("exec_check.txt")).unwrap(),
+        "pkg_bazel/BUILD.bazel"
+    );
+
+    // 2. `info starlark-semantics` matches Bazel 9.3.2 for default, true, and false.
+    let (code, out, err, _) = w.run(&["info", "starlark-semantics"]);
+    assert_eq!(code, 0, "info default failed: {err}");
+    assert_eq!(
+        out.trim(),
+        "StarlarkSemantics{internal_bazel_only_utf_8_byte_strings=true}"
+    );
+    let (code, out, err, _) = w.run(&[
+        "info",
+        "--incompatible_stop_exporting_build_file_path",
+        "starlark-semantics",
+    ]);
+    assert_eq!(code, 0, "info strict failed: {err}");
+    assert_eq!(
+        out.trim(),
+        "StarlarkSemantics{incompatible_stop_exporting_build_file_path=true, internal_bazel_only_utf_8_byte_strings=true}"
+    );
+    let (code, out, err, _) = w.run(&[
+        "info",
+        "--noincompatible_stop_exporting_build_file_path",
+        "starlark-semantics",
+    ]);
+    assert_eq!(code, 0, "info noflag failed: {err}");
+    assert_eq!(
+        out.trim(),
+        "StarlarkSemantics{internal_bazel_only_utf_8_byte_strings=true}"
+    );
+
+    // 3. `--incompatible_stop_exporting_build_file_path` rejects `ctx.build_file_path` in both
+    // target and exec configurations with the Bazel error message.
+    for target in ["//:root", "//:exec_check"] {
+        let (code, _, err, _) = w.run(&[
+            "build",
+            "--incompatible_stop_exporting_build_file_path",
+            target,
+        ]);
+        assert_ne!(code, 0, "strict build of {target} should fail");
+        assert!(
+            err.contains("Use ctx.label.package + '/BUILD' instead of ctx.build_file_path."),
+            "missing deprecation message for {target}: {err}"
+        );
+        assert!(
+            err.contains(
+                "Use --incompatible_stop_exporting_build_file_path=false to temporarily disable this check."
+            ),
+            "missing flag hint for {target}: {err}"
+        );
+    }
+
+    // 4. `--noincompatible_stop_exporting_build_file_path` and `=false` keep it enabled.
+    for flag in [
+        "--noincompatible_stop_exporting_build_file_path",
+        "--incompatible_stop_exporting_build_file_path=false",
+    ] {
+        let (code, _, err, _) = w.run(&["build", flag, "//:root", "//:exec_check"]);
+        assert_eq!(code, 0, "build with {flag} failed: {err}");
+    }
+}

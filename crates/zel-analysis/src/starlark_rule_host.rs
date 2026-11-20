@@ -1320,29 +1320,16 @@ fn ctx_attr(st: &Arc<CtxState>, attr: &str) -> HostResult {
         "build_file_path" => {
             if st
                 .cfg
-                .bool_option("incompatible_stop_exporting_build_file_path", true)
+                .bool_option("incompatible_stop_exporting_build_file_path", false)
             {
                 return err(
-                    "Deprecated API: ctx.build_file_path has been removed. Use ctx.label.package + '/BUILD' instead of ctx.build_file_path.\nUse --noincompatible_stop_exporting_build_file_path to temporarily continue using it.",
+                    "Use ctx.label.package + '/BUILD' instead of ctx.build_file_path.\nUse --incompatible_stop_exporting_build_file_path=false to temporarily disable this check.",
                 );
             }
-            let fname = st
-                .rule
-                .extra
-                .location
-                .as_deref()
-                .and_then(|loc| loc.split(':').next())
-                .and_then(|p| p.rsplit('/').next())
-                .filter(|b| *b == "BUILD.bazel" || *b == "BUILD")
-                .unwrap_or("BUILD");
-            Value::String(
-                st.label
-                    .package_identifier()
-                    .package_fragment()
-                    .get_relative_str(fname)
-                    .path_string()
-                    .to_string(),
-            )
+            Value::String(ctx_build_file_path(
+                &st.label,
+                st.rule.extra.location.as_deref(),
+            ))
         }
         "var" => mk_dict(
             st.make_vars
@@ -1645,4 +1632,79 @@ pub fn convert_flag_value(ty: &str, raw: &str) -> Result<Value, String> {
         }
         _ => Value::String(raw.to_string()),
     })
+}
+
+fn build_file_name_from_location(location: Option<&str>) -> &'static str {
+    let Some(mut path) = location else {
+        return "BUILD";
+    };
+    // Strip trailing `:col` and `:line` suffixes without splitting on Windows drive colons (`C:\...`).
+    for _ in 0..2 {
+        if let Some((prefix, suffix)) = path.rsplit_once(':') {
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
+                path = prefix;
+                continue;
+            }
+        }
+        break;
+    }
+    match path.rsplit(['/', '\\']).next() {
+        Some("BUILD.bazel") => "BUILD.bazel",
+        _ => "BUILD",
+    }
+}
+
+fn ctx_build_file_path(label: &Label, location: Option<&str>) -> String {
+    let fname = build_file_name_from_location(location);
+    label
+        .package_identifier()
+        .package_fragment()
+        .get_relative_str(fname)
+        .path_string()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctx_build_file_path_handles_windows_and_unix_locations() {
+        let pkg_bazel = Label::parse_canonical("//pkg_bazel:b").unwrap();
+        assert_eq!(
+            ctx_build_file_path(&pkg_bazel, Some(r"C:\ws\pkg_bazel\BUILD.bazel")),
+            "pkg_bazel/BUILD.bazel"
+        );
+        assert_eq!(
+            ctx_build_file_path(&pkg_bazel, Some(r"C:\ws\pkg_bazel\BUILD.bazel:3:4")),
+            "pkg_bazel/BUILD.bazel"
+        );
+        assert_eq!(
+            ctx_build_file_path(&pkg_bazel, Some("C:/ws/pkg_bazel/BUILD.bazel:3:4")),
+            "pkg_bazel/BUILD.bazel"
+        );
+        assert_eq!(
+            ctx_build_file_path(&pkg_bazel, Some(r"\\?\C:\ws\pkg_bazel\BUILD.bazel:12:1")),
+            "pkg_bazel/BUILD.bazel"
+        );
+        assert_eq!(
+            ctx_build_file_path(&pkg_bazel, Some("/ws/pkg_bazel/BUILD.bazel:2:1")),
+            "pkg_bazel/BUILD.bazel"
+        );
+        assert_eq!(
+            ctx_build_file_path(&pkg_bazel, Some(r"C:\ws\pkg_bazel\BUILD:2:1")),
+            "pkg_bazel/BUILD"
+        );
+        assert_eq!(ctx_build_file_path(&pkg_bazel, None), "pkg_bazel/BUILD");
+
+        let root = Label::parse_canonical("//:root").unwrap();
+        assert_eq!(
+            ctx_build_file_path(&root, Some(r"C:\ws\BUILD.bazel:1:1")),
+            "BUILD.bazel"
+        );
+        assert_eq!(
+            ctx_build_file_path(&root, Some(r"C:\ws\BUILD:1:1")),
+            "BUILD"
+        );
+    }
 }
