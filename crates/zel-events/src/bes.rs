@@ -684,6 +684,59 @@ pub fn rewrite_bep_event(
         }
     }
 
+    if let Some(tc) = out.get_msg("completed").cloned() {
+        let mut new_tc = tc.clone();
+        let mut changed = false;
+        let important: Vec<Msg> = tc
+            .get_msgs("important_output")
+            .into_iter()
+            .cloned()
+            .collect();
+        if !important.is_empty() {
+            new_tc.clear("important_output");
+            for mut f in important {
+                transform_file(&mut f, false);
+                new_tc.set_msg("important_output", f);
+            }
+            changed = true;
+        }
+        let groups: Vec<Msg> = tc.get_msgs("output_group").into_iter().cloned().collect();
+        if !groups.is_empty() {
+            new_tc.clear("output_group");
+            for mut g in groups {
+                let inline: Vec<Msg> = g.get_msgs("inline_files").into_iter().cloned().collect();
+                if !inline.is_empty() {
+                    g.clear("inline_files");
+                    for mut f in inline {
+                        transform_file(&mut f, false);
+                        g.set_msg("inline_files", f);
+                    }
+                    changed = true;
+                }
+                new_tc.set_msg("output_group", g);
+            }
+        }
+        let dirs: Vec<Msg> = tc
+            .get_msgs("directory_output")
+            .into_iter()
+            .cloned()
+            .collect();
+        if !dirs.is_empty() {
+            new_tc.clear("directory_output");
+            for mut d in dirs {
+                if !d.get_str("uri").is_empty() {
+                    d.clear("uri");
+                    changed = true;
+                }
+                new_tc.set_msg("directory_output", d);
+            }
+        }
+        if changed {
+            out.clear("completed");
+            out.set_msg("completed", new_tc);
+        }
+    }
+
     if let Some(btl) = out.get_msg("build_tool_logs").cloned() {
         let files: Vec<Msg> = btl.get_msgs("log").into_iter().cloned().collect();
         if !files.is_empty() {
