@@ -147,7 +147,7 @@ pub fn execute_actions(
     for (i, a) in uniq.iter().enumerate() {
         for inp in a.inputs() {
             if let Some(&p) = producer.get(inp.exec_path.path_string()) {
-                if p != i && deps[i].insert(p) {
+                if deps[i].insert(p) {
                     deps_ordered[i].push(p);
                     dependents[p].push(i);
                 }
@@ -156,7 +156,7 @@ pub fn execute_actions(
         // Symlink actions implicitly depend on the producer of their target.
         if let ActionAnalysisMetadata::SymlinkAction { input_path, .. } = a {
             if let Some(&p) = producer.get(input_path.path_string()) {
-                if p != i && deps[i].insert(p) {
+                if deps[i].insert(p) {
                     deps_ordered[i].push(p);
                     dependents[p].push(i);
                 }
