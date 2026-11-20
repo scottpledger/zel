@@ -33,6 +33,7 @@ jobs:
         with:
           toolchain: "1.85.0"
           components: rustfmt, clippy
+          targets: aarch64-unknown-linux-gnu
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -42,6 +43,9 @@ jobs:
 
       - name: Check Cargo compilation & Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Check Cargo compilation & Clippy (linux-arm64)
+        run: cargo clippy --workspace --all-targets --locked --target aarch64-unknown-linux-gnu -- -D warnings
 
   test:
     name: Test & Self-Host (${{ matrix.os }})
