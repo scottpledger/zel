@@ -551,6 +551,48 @@ default login defuser password defpass
 
     #[test]
     fn resolve_netrc_headers_ignores_server_process_env() {
+        if let Some(child_netrc) = std::env::var_os("ZEL_NETRC_PROC_ISOLATION_CHILD") {
+            let server_netrc = PathBuf::from(&child_netrc);
+            assert_eq!(
+                std::env::var_os("NETRC").as_deref(),
+                Some(child_netrc.as_os_str())
+            );
+            assert!(server_netrc.is_file());
+
+            let empty_client_env = BTreeMap::new();
+            let leaked =
+                resolve_netrc_headers("https://leak.example.com/pkg.tar.gz", &empty_client_env);
+            let leaked_auth = resolve_auth_headers(
+                "https://leak.example.com/pkg.tar.gz",
+                &[],
+                &empty_client_env,
+            )
+            .unwrap();
+
+            let mut explicit_client_env = BTreeMap::new();
+            explicit_client_env.insert(
+                "NETRC".to_string(),
+                server_netrc.to_string_lossy().into_owned(),
+            );
+            let allowed =
+                resolve_netrc_headers("https://leak.example.com/pkg.tar.gz", &explicit_client_env);
+
+            assert!(
+                leaked.is_empty(),
+                "server process NETRC must not leak when absent from client_env: {leaked:?}"
+            );
+            assert!(leaked_auth.is_empty(), "{leaked_auth:?}");
+            assert_eq!(
+                allowed,
+                vec![(
+                    "Authorization".to_string(),
+                    "Basic c3J2dXNlcjpzcnZzZWNyZXQ=".to_string()
+                )]
+            );
+            println!("ZEL_NETRC_PROC_ISOLATION_CHILD_OK");
+            return;
+        }
+
         let dir =
             std::env::temp_dir().join(format!("zel-netrc-proc-isolation-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -562,45 +604,86 @@ default login defuser password defpass
         )
         .unwrap();
 
-        let prev_netrc = std::env::var_os("NETRC");
-        std::env::set_var("NETRC", &server_netrc);
-
-        let empty_client_env = BTreeMap::new();
-        let leaked =
-            resolve_netrc_headers("https://leak.example.com/pkg.tar.gz", &empty_client_env);
-        let leaked_auth = resolve_auth_headers(
-            "https://leak.example.com/pkg.tar.gz",
-            &[],
-            &empty_client_env,
-        )
-        .unwrap();
-
-        let mut explicit_client_env = BTreeMap::new();
-        explicit_client_env.insert(
-            "NETRC".to_string(),
-            server_netrc.to_string_lossy().into_owned(),
-        );
-        let allowed =
-            resolve_netrc_headers("https://leak.example.com/pkg.tar.gz", &explicit_client_env);
-
-        match prev_netrc {
-            Some(v) => std::env::set_var("NETRC", v),
-            None => std::env::remove_var("NETRC"),
-        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "netrc::tests::resolve_netrc_headers_ignores_server_process_env",
+                "--nocapture",
+            ])
+            .env_remove("TESTBRIDGE_TEST_ONLY")
+            .env("ZEL_NETRC_PROC_ISOLATION_CHILD", &server_netrc)
+            .env("NETRC", &server_netrc)
+            .output()
+            .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(
-            leaked.is_empty(),
-            "server process NETRC must not leak when absent from client_env: {leaked:?}"
+            out.status.success() && stdout.contains("ZEL_NETRC_PROC_ISOLATION_CHILD_OK"),
+            "isolated child failed (status={:?}):\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            out.status.code()
         );
-        assert!(leaked_auth.is_empty(), "{leaked_auth:?}");
-        assert_eq!(
-            allowed,
-            vec![(
-                "Authorization".to_string(),
-                "Basic c3J2dXNlcjpzcnZzZWNyZXQ=".to_string()
-            )]
-        );
+    }
+
+    #[test]
+    fn concurrent_proc_isolation_child_never_mutates_parent_netrc_env() {
+        use std::sync::{Arc, Barrier};
+
+        let baseline = std::env::var_os("NETRC");
+        let barrier = Arc::new(Barrier::new(3));
+        let b1 = Arc::clone(&barrier);
+        let baseline_sampler = baseline.clone();
+        let sampler = std::thread::spawn(move || {
+            b1.wait();
+            for _ in 0..200 {
+                assert_eq!(
+                    std::env::var_os("NETRC"),
+                    baseline_sampler,
+                    "parent process NETRC env must never change while isolation child runs"
+                );
+                std::thread::yield_now();
+            }
+        });
+
+        let b2 = Arc::clone(&barrier);
+        let runner = std::thread::spawn(move || {
+            let dir = std::env::temp_dir().join(format!(
+                "zel-netrc-proc-isolation-race-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let server_netrc = dir.join(".netrc");
+            std::fs::write(
+                &server_netrc,
+                "machine leak.example.com login srvuser password srvsecret\n",
+            )
+            .unwrap();
+            b2.wait();
+            let out = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "netrc::tests::resolve_netrc_headers_ignores_server_process_env",
+                    "--nocapture",
+                ])
+                .env_remove("TESTBRIDGE_TEST_ONLY")
+                .env("ZEL_NETRC_PROC_ISOLATION_CHILD", &server_netrc)
+                .env("NETRC", &server_netrc)
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                out.status.success()
+                    && String::from_utf8_lossy(&out.stdout)
+                        .contains("ZEL_NETRC_PROC_ISOLATION_CHILD_OK")
+            );
+        });
+
+        barrier.wait();
+        sampler.join().unwrap();
+        runner.join().unwrap();
+        assert_eq!(std::env::var_os("NETRC"), baseline);
     }
 
     #[cfg(unix)]

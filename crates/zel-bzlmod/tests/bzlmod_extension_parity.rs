@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use zel_bzlmod::netrc::{resolve_auth_headers, resolve_netrc_headers};
 use zel_bzlmod::resolve::{resolve, CheckMode, ResolveOptions};
 use zel_bzlmod::rt::{ExternalOptions, Rt};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
 #[test]
 fn non_root_module_extension_labels_bind_to_own_repo_and_rule_allowed_at_load() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let root = std::env::temp_dir().join(format!("zel-bzlmod-ext-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let ws = root.join("ws");
@@ -115,43 +112,49 @@ fn non_root_module_extension_labels_bind_to_own_repo_and_rule_allowed_at_load() 
 
 #[test]
 fn netrc_and_credential_helper_auth_headers() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if std::env::var_os("ZEL_NETRC_AUTH_CHILD").is_some() {
+        let empty_env = BTreeMap::new();
+        let from_proc_netrc =
+            resolve_netrc_headers("https://example.com/modules/a/1.0/MODULE.bazel", &empty_env);
+        let from_proc_auth = resolve_auth_headers(
+            "https://example.com/modules/a/1.0/MODULE.bazel",
+            &[],
+            &empty_env,
+        )
+        .unwrap();
+        assert!(from_proc_netrc.is_empty(), "{from_proc_netrc:?}");
+        assert!(from_proc_auth.is_empty(), "{from_proc_auth:?}");
+        println!("ZEL_NETRC_AUTH_CHILD_OK");
+        return;
+    }
+
     let dir = std::env::temp_dir().join(format!("zel-netrc-auth-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let netrc = dir.join(".netrc");
     std::fs::write(&netrc, "machine example.com login foo password bar\n").unwrap();
 
-    // Server process NETRC/HOME/USERPROFILE must be ignored when absent from `client_env`.
-    let prev_netrc = std::env::var_os("NETRC");
-    let prev_home = std::env::var_os("HOME");
-    let prev_userprofile = std::env::var_os("USERPROFILE");
-    std::env::set_var("NETRC", &netrc);
-    std::env::set_var("HOME", &dir);
-    std::env::set_var("USERPROFILE", &dir);
-    let empty_env = BTreeMap::new();
-    let from_proc_netrc =
-        resolve_netrc_headers("https://example.com/modules/a/1.0/MODULE.bazel", &empty_env);
-    let from_proc_auth = resolve_auth_headers(
-        "https://example.com/modules/a/1.0/MODULE.bazel",
-        &[],
-        &empty_env,
-    )
-    .unwrap();
-    match prev_netrc {
-        Some(v) => std::env::set_var("NETRC", v),
-        None => std::env::remove_var("NETRC"),
-    }
-    match prev_home {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-    match prev_userprofile {
-        Some(v) => std::env::set_var("USERPROFILE", v),
-        None => std::env::remove_var("USERPROFILE"),
-    }
-    assert!(from_proc_netrc.is_empty(), "{from_proc_netrc:?}");
-    assert!(from_proc_auth.is_empty(), "{from_proc_auth:?}");
+    // Server process NETRC/HOME/USERPROFILE must be ignored when absent from `client_env`;
+    // verify in an isolated child process so the multi-threaded test runner's env stays untouched.
+    let child_out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "netrc_and_credential_helper_auth_headers",
+            "--nocapture",
+        ])
+        .env_remove("TESTBRIDGE_TEST_ONLY")
+        .env("ZEL_NETRC_AUTH_CHILD", "1")
+        .env("NETRC", &netrc)
+        .env("HOME", &dir)
+        .env("USERPROFILE", &dir)
+        .output()
+        .unwrap();
+    let child_stdout = String::from_utf8_lossy(&child_out.stdout);
+    let child_stderr = String::from_utf8_lossy(&child_out.stderr);
+    assert!(
+        child_out.status.success() && child_stdout.contains("ZEL_NETRC_AUTH_CHILD_OK"),
+        "isolated auth child failed:\nstdout:\n{child_stdout}\nstderr:\n{child_stderr}"
+    );
 
     let mut env = BTreeMap::new();
     env.insert("NETRC".to_string(), netrc.to_string_lossy().into_owned());
