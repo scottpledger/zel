@@ -99,19 +99,19 @@ fn dispatch(
                     Some((p, m)) => (p, m),
                     None => {
                         let owner = st.label.package_identifier();
-                        let entries = st
+                        let ordered: Vec<(String, zel_cmdline::RepositoryName)> = st
                             .inputs
                             .resolver
-                            .repo_mapping_entries(owner.repository().name());
-                        let mut map = std::collections::HashMap::new();
-                        for (a, c) in entries {
-                            if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
-                                map.insert(a, rn);
-                            }
-                        }
+                            .repo_mapping_entries(owner.repository().name())
+                            .into_iter()
+                            .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+                            .collect();
                         (
                             owner.clone(),
-                            zel_cmdline::RepositoryMapping::new(map, owner.repository().clone()),
+                            zel_cmdline::RepositoryMapping::new_ordered(
+                                ordered,
+                                owner.repository().clone(),
+                            ),
                         )
                     }
                 };

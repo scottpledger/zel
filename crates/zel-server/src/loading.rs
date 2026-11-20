@@ -167,6 +167,9 @@ impl BlazeRuntime {
             .get_bool("experimental_bzl_visibility")
             .unwrap_or(true);
         cfg.check_bzl_visibility = parsed.get_bool("check_bzl_visibility").unwrap_or(true);
+        cfg.sibling_repository_layout = parsed
+            .get_bool("experimental_sibling_repository_layout")
+            .unwrap_or(false);
         let mut sig_parts: Vec<String> = vec![
             format!("allow_empty_glob={}", cfg.allow_empty_glob),
             format!(
@@ -174,6 +177,10 @@ impl BlazeRuntime {
                 cfg.experimental_bzl_visibility
             ),
             format!("check_bzl_visibility={}", cfg.check_bzl_visibility),
+            format!(
+                "sibling_repository_layout={}",
+                cfg.sibling_repository_layout
+            ),
             format!("deleted={:?}", cfg.lookup.deleted_packages),
         ];
         sig_parts.extend(

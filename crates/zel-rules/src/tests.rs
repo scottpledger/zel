@@ -3,6 +3,7 @@
 use super::*;
 use std::sync::Arc;
 use zel_analysis::{ActionKind, ConfiguredTarget};
+use zel_cmdline::RepositoryName;
 use zel_packages::{LoaderConfig, PackageLoader, SimpleRepoResolver};
 use zel_vfs::{FileSystem, InMemoryFileSystem, PathFragment};
 
@@ -2277,6 +2278,13 @@ current_launcher_binary(name = "launcher")
     let mut repo_resolver = SimpleRepoResolver::new(main_root);
     repo_resolver.external.insert("bazel_tools".into(), bt_root);
     repo_resolver.external.insert("platforms".into(), plat_root);
+    repo_resolver
+        .apparent
+        .insert("bazel_tools".into(), RepositoryName::bazel_tools());
+    repo_resolver.apparent.insert(
+        "platforms".into(),
+        RepositoryName::create("platforms").unwrap(),
+    );
     let lc = LoaderConfig::new(fs, Arc::new(repo_resolver));
     let mut acfg = AnalysisConfig::new();
     acfg.registered_toolchains =
@@ -2894,7 +2902,7 @@ def make_cc_toolchain(
         _grep_includes = None,
         _if_so_builder = if_so_builder,
         _is_tool_configuration = False,
-        _is_sibling_repository_layout = False,
+        _is_sibling_repository_layout = ctx.configuration.is_sibling_repository_layout(),
         _stamp_binaries = False,
         _static_runtime_lib_depset = None,
         _dynamic_runtime_lib_depset = None,
@@ -3979,4 +3987,303 @@ filegroup(name = "sel", srcs = select({":on_t": ["on.txt"], ":off_f": ["off.txt"
         assert_eq!(is_match(&ct_n), Some(Value::Bool(true)), "{raw_false}");
         assert_eq!(sel.default_info.files[0].exec_path.to_string(), "off.txt");
     }
+}
+
+#[test]
+fn external_repo_cc_compile_and_genrule_paths_agree_under_sibling_repository_layout() {
+    let dir = std::env::temp_dir().join(format!("zel-sibling-cc-parity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let main_dir = dir.join("main");
+    let ext_dir = dir.join("ext_cc");
+    let bt_dir = dir.join("bt");
+    std::fs::create_dir_all(&main_dir).unwrap();
+    std::fs::create_dir_all(ext_dir.join("pkg/inc")).unwrap();
+    std::fs::create_dir_all(bt_dir.join("tools/genrule")).unwrap();
+
+    std::fs::write(main_dir.join("BUILD"), "").unwrap();
+    std::fs::write(
+        bt_dir.join("tools/genrule/BUILD"),
+        "exports_files(['genrule-setup.sh'])\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bt_dir.join("tools/genrule/genrule-setup.sh"),
+        "#!/bin/bash\n",
+    )
+    .unwrap();
+    std::fs::write(ext_dir.join("tc_helpers.bzl"), CC_COMMON_TEST_HELPERS_BZL).unwrap();
+    std::fs::write(ext_dir.join("BUILD"), "").unwrap();
+    std::fs::write(
+        ext_dir.join("defs.bzl"),
+        r#"
+load(":tc_helpers.bzl", "make_cc_toolchain")
+
+ProbeCcInfo = provider(fields = [
+    "is_sibling",
+    "workspace_root",
+    "bin_dir",
+    "includes",
+    "system_includes",
+    "quote_includes",
+    "hdr_paths",
+    "obj_paths",
+])
+
+def _ext_cc_impl(ctx):
+    tc = make_cc_toolchain(
+        ctx,
+        cpu = "k8",
+        action_configs = [
+            struct(
+                action_name = "c++-compile",
+                enabled = True,
+                tools = [struct(path = "/usr/bin/g++", with_features = [], execution_requirements = [])],
+                flag_sets = [],
+                implies = [],
+            ),
+        ],
+    )
+    fc = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = tc,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features,
+    )
+    cc_ctx, cc_outs = cc_common.compile(
+        name = ctx.label.name,
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        srcs = ctx.files.srcs,
+        public_hdrs = ctx.files.hdrs,
+        strip_include_prefix = ctx.attr.strip_include_prefix,
+        include_prefix = ctx.attr.include_prefix,
+    )
+    return [
+        DefaultInfo(files = depset(cc_outs.objects)),
+        ProbeCcInfo(
+            is_sibling = ctx.configuration.is_sibling_repository_layout(),
+            workspace_root = ctx.label.workspace_root,
+            bin_dir = ctx.bin_dir.path,
+            includes = cc_ctx.includes.to_list(),
+            system_includes = cc_ctx.system_includes.to_list(),
+            quote_includes = cc_ctx.quote_includes.to_list(),
+            hdr_paths = [h.path for h in cc_ctx.headers.to_list()],
+            obj_paths = [o.path for o in cc_outs.objects],
+        ),
+    ]
+
+ext_cc_lib = rule(
+    implementation = _ext_cc_impl,
+    fragments = ["cpp"],
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        "hdrs": attr.label_list(allow_files = True),
+        "includes": attr.string_list(),
+        "strip_include_prefix": attr.string(),
+        "include_prefix": attr.string(),
+    },
+)
+"#,
+    )
+    .unwrap();
+    std::fs::write(ext_dir.join("pkg/src.cc"), "int f() { return 1; }\n").unwrap();
+    std::fs::write(ext_dir.join("pkg/hdr.h"), "#pragma once\n").unwrap();
+    std::fs::write(
+        ext_dir.join("pkg/BUILD"),
+        r#"
+load("//:defs.bzl", "ext_cc_lib")
+
+genrule(
+    name = "gen_hdr",
+    outs = ["gen.h"],
+    cmd = "echo '// $(RULEDIR)' > $@",
+)
+
+ext_cc_lib(
+    name = "lib",
+    srcs = ["src.cc"],
+    hdrs = ["hdr.h", ":gen.h"],
+    includes = ["inc"],
+    strip_include_prefix = "/pkg",
+    include_prefix = "pref",
+)
+"#,
+    )
+    .unwrap();
+
+    let run_with_layout = |sibling: bool| {
+        let mut rr = SimpleRepoResolver::new(PathFragment::create(&main_dir.to_string_lossy()));
+        rr.external.insert(
+            "ext_cc".into(),
+            PathFragment::create(&ext_dir.to_string_lossy()),
+        );
+        rr.external.insert(
+            "bazel_tools".into(),
+            PathFragment::create(&bt_dir.to_string_lossy()),
+        );
+        rr.apparent
+            .insert("ext_cc".into(), RepositoryName::create("ext_cc").unwrap());
+        rr.apparent
+            .insert("bazel_tools".into(), RepositoryName::bazel_tools());
+        let mut lc = LoaderConfig::new(Arc::new(zel_vfs::LocalFileSystem::default()), Arc::new(rr));
+        lc.sibling_repository_layout = sibling;
+        let loader = PackageLoader::new(lc);
+        assert_eq!(loader.builtins_error(), None);
+        let mut acfg = AnalysisConfig::new();
+        acfg.sibling_repository_layout = sibling;
+        let resolver = TargetResolver::new(loader, acfg);
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        let gen_ct = resolver
+            .analyze(
+                &Label::parse_canonical("@@ext_cc//pkg:gen_hdr").unwrap(),
+                &cfg,
+            )
+            .unwrap();
+        let lib_ct = resolver
+            .analyze(&Label::parse_canonical("@@ext_cc//pkg:lib").unwrap(), &cfg)
+            .unwrap();
+        (gen_ct, lib_ct)
+    };
+
+    let str_list = |v: &Value| -> Vec<String> {
+        zel_starlark::eval::builtins::value_to_sequence(v)
+            .unwrap()
+            .into_iter()
+            .map(|x| x.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // 1. Default layout (`--noexperimental_sibling_repository_layout`).
+    let (gen_def, lib_def) = run_with_layout(false);
+    let (_, gen_def_argv, _, gen_def_outs) = spawn_of(&gen_def, 0);
+    assert!(
+        gen_def_argv[2].starts_with("source external/bazel_tools/tools/genrule/genrule-setup.sh;"),
+        "got: {}",
+        gen_def_argv[2]
+    );
+    assert!(
+        gen_def_argv[2].contains("bazel-out/k8-fastbuild/bin/external/ext_cc/pkg"),
+        "got: {}",
+        gen_def_argv[2]
+    );
+    assert_eq!(
+        gen_def_outs,
+        vec!["bazel-out/k8-fastbuild/bin/external/ext_cc/pkg/gen.h"]
+    );
+    let Some(Value::ProviderInstance { fields: f_def, .. }) =
+        lib_def.providers.get("@@ext_cc//:defs.bzl%ProbeCcInfo")
+    else {
+        panic!("expected ProbeCcInfo");
+    };
+    assert_eq!(f_def["is_sibling"], Value::Bool(false));
+    assert_eq!(
+        f_def["workspace_root"],
+        Value::String("external/ext_cc".into())
+    );
+    assert_eq!(
+        f_def["bin_dir"],
+        Value::String("bazel-out/k8-fastbuild/bin".into())
+    );
+    assert_eq!(
+        str_list(&f_def["includes"]),
+        vec!["bazel-out/k8-fastbuild/bin/external/ext_cc/pkg/_virtual_includes/lib"]
+    );
+    let quote_def = str_list(&f_def["quote_includes"]);
+    assert!(
+        quote_def.contains(&"external/ext_cc".to_string()),
+        "{quote_def:?}"
+    );
+    assert!(
+        quote_def.contains(&"bazel-out/k8-fastbuild/bin/external/ext_cc".to_string()),
+        "{quote_def:?}"
+    );
+    let hdrs_def = str_list(&f_def["hdr_paths"]);
+    assert!(
+        hdrs_def.contains(
+            &"bazel-out/k8-fastbuild/bin/external/ext_cc/pkg/_virtual_includes/lib/pref/hdr.h"
+                .to_string()
+        ),
+        "{hdrs_def:?}"
+    );
+    assert!(
+        hdrs_def.contains(
+            &"bazel-out/k8-fastbuild/bin/external/ext_cc/pkg/_virtual_includes/lib/pref/gen.h"
+                .to_string()
+        ),
+        "{hdrs_def:?}"
+    );
+    assert!(
+        hdrs_def.contains(&"external/ext_cc/pkg/hdr.h".to_string()),
+        "{hdrs_def:?}"
+    );
+    assert_eq!(
+        str_list(&f_def["obj_paths"]),
+        vec!["bazel-out/k8-fastbuild/bin/external/ext_cc/pkg/_objs/lib/src.o"]
+    );
+
+    // 2. Sibling layout (`--experimental_sibling_repository_layout`).
+    let (gen_sib, lib_sib) = run_with_layout(true);
+    let (_, gen_sib_argv, _, gen_sib_outs) = spawn_of(&gen_sib, 0);
+    assert!(
+        gen_sib_argv[2].starts_with("source ../bazel_tools/tools/genrule/genrule-setup.sh;"),
+        "got: {}",
+        gen_sib_argv[2]
+    );
+    assert!(
+        gen_sib_argv[2].contains("bazel-out/ext_cc/k8-fastbuild/bin/pkg"),
+        "got: {}",
+        gen_sib_argv[2]
+    );
+    assert_eq!(
+        gen_sib_outs,
+        vec!["bazel-out/ext_cc/k8-fastbuild/bin/pkg/gen.h"]
+    );
+    let Some(Value::ProviderInstance { fields: f_sib, .. }) =
+        lib_sib.providers.get("@@ext_cc//:defs.bzl%ProbeCcInfo")
+    else {
+        panic!("expected ProbeCcInfo");
+    };
+    assert_eq!(f_sib["is_sibling"], Value::Bool(true));
+    assert_eq!(f_sib["workspace_root"], Value::String("../ext_cc".into()));
+    assert_eq!(
+        f_sib["bin_dir"],
+        Value::String("bazel-out/ext_cc/k8-fastbuild/bin".into())
+    );
+    assert_eq!(
+        str_list(&f_sib["includes"]),
+        vec!["bazel-out/ext_cc/k8-fastbuild/bin/pkg/_virtual_includes/lib"]
+    );
+    let quote_sib = str_list(&f_sib["quote_includes"]);
+    assert!(
+        quote_sib.contains(&"../ext_cc".to_string()),
+        "{quote_sib:?}"
+    );
+    assert!(
+        quote_sib.contains(&"bazel-out/ext_cc/k8-fastbuild/bin".to_string()),
+        "{quote_sib:?}"
+    );
+    let hdrs_sib = str_list(&f_sib["hdr_paths"]);
+    assert!(
+        hdrs_sib.contains(
+            &"bazel-out/ext_cc/k8-fastbuild/bin/pkg/_virtual_includes/lib/pref/hdr.h".to_string()
+        ),
+        "{hdrs_sib:?}"
+    );
+    assert!(
+        hdrs_sib.contains(
+            &"bazel-out/ext_cc/k8-fastbuild/bin/pkg/_virtual_includes/lib/pref/gen.h".to_string()
+        ),
+        "{hdrs_sib:?}"
+    );
+    assert!(
+        hdrs_sib.contains(&"../ext_cc/pkg/hdr.h".to_string()),
+        "{hdrs_sib:?}"
+    );
+    assert_eq!(
+        str_list(&f_sib["obj_paths"]),
+        vec!["bazel-out/ext_cc/k8-fastbuild/bin/pkg/_objs/lib/src.o"]
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

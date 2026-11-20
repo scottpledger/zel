@@ -137,6 +137,8 @@ pub struct AnalysisInputs {
     pub exec_group_platforms: BTreeMap<String, String>,
     /// `--incompatible_allow_tags_propagation` (default true).
     pub allow_tags_propagation: bool,
+    /// `--experimental_sibling_repository_layout` (default false).
+    pub sibling_repository_layout: bool,
 }
 
 impl AnalysisInputs {
@@ -152,6 +154,7 @@ impl AnalysisInputs {
             exec_group_toolchains: BTreeMap::new(),
             exec_group_platforms: BTreeMap::new(),
             allow_tags_propagation: true,
+            sibling_repository_layout: false,
         }
     }
 }
@@ -348,10 +351,18 @@ impl CtxState {
     }
 
     fn bin_dir(&self) -> String {
-        format!("bazel-out/{}/bin", self.cfg.mnemonic())
+        Artifact::bin_dir_for_repo(
+            &self.cfg.mnemonic(),
+            self.label.package_identifier().repository(),
+            self.inputs.sibling_repository_layout,
+        )
     }
     fn genfiles_dir(&self) -> String {
-        format!("bazel-out/{}/bin", self.cfg.mnemonic())
+        Artifact::bin_dir_for_repo(
+            &self.cfg.mnemonic(),
+            self.label.package_identifier().repository(),
+            self.inputs.sibling_repository_layout,
+        )
     }
     fn root(&self) -> ArtifactRoot {
         if self.output_to_genfiles && !self.in_subrule.load(std::sync::atomic::Ordering::Relaxed) {
@@ -360,8 +371,27 @@ impl CtxState {
             ArtifactRoot::Bin
         }
     }
+    fn package_directory(&self) -> PathFragment {
+        let repo = self.label.package_identifier().repository();
+        if repo.is_main() || self.inputs.sibling_repository_layout {
+            self.pkg_dir.clone()
+        } else {
+            let pkg = self.pkg_dir.path_string();
+            if pkg.is_empty() {
+                PathFragment::create(&format!("external/{}", repo.name()))
+            } else {
+                PathFragment::create(&format!("external/{}/{pkg}", repo.name()))
+            }
+        }
+    }
     fn derived(&self, rel: PathFragment) -> Artifact {
-        Artifact::derived_in_root(&self.cfg.mnemonic(), self.root(), rel, self.label.clone())
+        Artifact::derived_in_root_with_layout(
+            &self.cfg.mnemonic(),
+            self.root(),
+            rel,
+            self.label.clone(),
+            self.inputs.sibling_repository_layout,
+        )
     }
     fn check_mutable(&self, what: &str) -> Result<(), StarlarkError> {
         if *self.frozen.lock().unwrap() {
@@ -726,6 +756,361 @@ mod java_native_tests {
         assert_eq!(
             utf8_env_for_inputs(&cfg_auto_eg, &inputs_auto_eg, false)["LC_CTYPE"],
             "en_US.UTF-8"
+        );
+    }
+
+    #[test]
+    fn configuration_is_sibling_repository_layout_and_output_roots_track_flag() {
+        use zel_packages::rule_class::{RuleClass, StarlarkRuleSpec};
+        use zel_packages::RuleExtra;
+        use zel_starlark::EvalContext;
+
+        let mut ectx = EvalContext::new(PathFragment::empty(), None);
+        ectx.globals
+            .insert("Label".into(), Value::BuiltinFunction("host:Label".into()));
+        ectx.eval_str(
+            r#"
+def _impl(ctx):
+    out = ctx.actions.declare_file("out.txt")
+    ext_lbl = Label("@@ext//pkg:hdr.h")
+    ctx.actions.write(
+        output = out,
+        content = "|".join([
+            str(ctx.configuration.is_sibling_repository_layout()),
+            ext_lbl.workspace_root,
+            ctx.label.workspace_root,
+            ctx.bin_dir.path,
+            ctx.genfiles_dir.path,
+            out.path,
+            out.root.path,
+            out.short_path,
+        ]),
+    )
+    return []
+
+def _bad_kwargs_impl(ctx):
+    ctx.configuration.is_sibling_repository_layout(True)
+    return []
+"#,
+        )
+        .unwrap();
+        let impl_fn = ectx.globals.get("_impl").cloned().unwrap();
+        let bad_fn = ectx.globals.get("_bad_kwargs_impl").cloned().unwrap();
+
+        let make_rule = |label_str: &str, func: Value| -> RuleInstance {
+            let rc = Arc::new(RuleClass {
+                name: "probe".into(),
+                attrs: BTreeMap::new(),
+                attr_order: vec!["name".into()],
+                implicit: BTreeMap::new(),
+                is_test: false,
+                is_executable: false,
+                open: false,
+                implicit_outputs: Vec::new(),
+                outputs_fn: None,
+                is_starlark: true,
+                build_setting: false,
+                starlark: Some(Arc::new(StarlarkRuleSpec {
+                    implementation: func,
+                    kwargs: BTreeMap::new(),
+                    defined_in: "//:defs.bzl".into(),
+                    definition_digest: String::new(),
+                    definition_stack: Vec::new(),
+                    initializers: Vec::new(),
+                    build_setting_flag: false,
+                })),
+            });
+            RuleInstance {
+                label: Label::parse_canonical(label_str).unwrap(),
+                rule_class: "probe".into(),
+                attrs: BTreeMap::new(),
+                srcs: Vec::new(),
+                deps: Vec::new(),
+                outs: Vec::new(),
+                tools: Vec::new(),
+                data: Vec::new(),
+                visibility: Vec::new(),
+                cmd: None,
+                executable: false,
+                testonly: false,
+                extra: RuleExtra {
+                    rule_class: Some(rc),
+                    ..Default::default()
+                },
+            }
+        };
+
+        let resolver: Arc<dyn DepResolver> = Arc::new(MapPlatformResolver {
+            platforms: BTreeMap::new(),
+        });
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+        let run_case = |label_str: &str, sibling: bool| -> String {
+            let rule = make_rule(label_str, impl_fn.clone());
+            let mut inputs = AnalysisInputs::new(resolver.clone());
+            inputs.sibling_repository_layout = sibling;
+            let ct = analyze_starlark_rule(&rule, &cfg, inputs).unwrap();
+            let crate::ActionKind::FileWrite {
+                content: crate::FileContent::Literal(body),
+                ..
+            } = &ct.typed_actions[0].kind
+            else {
+                panic!("expected literal FileWrite action");
+            };
+            body.clone()
+        };
+
+        assert_eq!(
+            run_case("//pkg:main_t", false),
+            "False|external/ext||bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin/pkg/out.txt|bazel-out/k8-fastbuild/bin|pkg/out.txt"
+        );
+        assert_eq!(
+            run_case("//pkg:main_t", true),
+            "True|../ext||bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin/pkg/out.txt|bazel-out/k8-fastbuild/bin|pkg/out.txt"
+        );
+        assert_eq!(
+            run_case("@@ext//pkg:ext_t", false),
+            "False|external/ext|external/ext|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin|bazel-out/k8-fastbuild/bin/external/ext/pkg/out.txt|bazel-out/k8-fastbuild/bin|../ext/pkg/out.txt"
+        );
+        assert_eq!(
+            run_case("@@ext//pkg:ext_t", true),
+            "True|../ext|../ext|bazel-out/ext/k8-fastbuild/bin|bazel-out/ext/k8-fastbuild/bin|bazel-out/ext/k8-fastbuild/bin/pkg/out.txt|bazel-out/ext/k8-fastbuild/bin|../ext/pkg/out.txt"
+        );
+
+        let ext_src_default = Artifact::source_with_layout(
+            PathFragment::create("pkg/hdr.h"),
+            Label::parse_canonical("@@ext//pkg:hdr.h").unwrap(),
+            false,
+        );
+        assert_eq!(
+            ext_src_default.exec_path.path_string(),
+            "external/ext/pkg/hdr.h"
+        );
+        assert_eq!(ext_src_default.short_path(), "../ext/pkg/hdr.h");
+
+        let ext_src_sibling = Artifact::source_with_layout(
+            PathFragment::create("pkg/hdr.h"),
+            Label::parse_canonical("@@ext//pkg:hdr.h").unwrap(),
+            true,
+        );
+        assert_eq!(ext_src_sibling.exec_path.path_string(), "../ext/pkg/hdr.h");
+        assert_eq!(ext_src_sibling.short_path(), "../ext/pkg/hdr.h");
+
+        let bad_rule = make_rule("//pkg:bad", bad_fn);
+        let err =
+            analyze_starlark_rule(&bad_rule, &cfg, AnalysisInputs::new(resolver)).unwrap_err();
+        assert!(
+            err.contains("is_sibling_repository_layout"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn declare_file_directory_symlink_and_short_path_in_external_repos() {
+        use zel_packages::attr::{AttrType, AttrValue, Attribute};
+        use zel_packages::rule_class::{RuleClass, StarlarkRuleSpec};
+        use zel_packages::RuleExtra;
+        use zel_starlark::EvalContext;
+
+        struct SourceResolver {
+            sibling: bool,
+        }
+        impl DepResolver for SourceResolver {
+            fn configured_target(
+                &self,
+                label: &Label,
+                cfg: &BuildConfigurationKey,
+            ) -> Result<Arc<ConfiguredTarget>, String> {
+                let rel = label
+                    .package_identifier()
+                    .package_fragment()
+                    .get_relative_str(label.name());
+                let art = Artifact::source_with_layout(rel, label.clone(), self.sibling);
+                let mut ct =
+                    ConfiguredTarget::new(label.clone(), cfg.clone(), "source file".to_string());
+                ct.default_info.files = vec![art];
+                Ok(Arc::new(ct))
+            }
+        }
+
+        let mut ectx = EvalContext::new(PathFragment::empty(), None);
+        ectx.eval_str(
+            r#"
+def _impl(ctx):
+    f = ctx.actions.declare_file("sub/a.txt")
+    sib_src = ctx.actions.declare_file("b.txt", sibling = ctx.file.src)
+    sib_der = ctx.actions.declare_file("c.txt", sibling = f)
+    d = ctx.actions.declare_directory("sub_dir")
+    sym = ctx.actions.declare_symlink("sub_sym")
+    ctx.actions.write(f, "a")
+    ctx.actions.write(sib_src, "b")
+    ctx.actions.write(sib_der, "c")
+    ctx.actions.run_shell(outputs = [d], command = "mkdir -p \"$1\"", arguments = [d.path])
+    ctx.actions.symlink(output = sym, target_path = "target/path")
+    summary = ctx.actions.declare_file("summary.txt")
+    ctx.actions.write(
+        summary,
+        "\n".join([
+            ctx.file.src.path + "|" + ctx.file.src.short_path,
+            f.path + "|" + f.short_path,
+            sib_src.path + "|" + sib_src.short_path,
+            sib_der.path + "|" + sib_der.short_path,
+            d.path + "|" + d.short_path,
+            sym.path + "|" + sym.short_path,
+        ]),
+    )
+    return []
+
+def _cross_sib(ctx):
+    out = ctx.actions.declare_file("escape.txt", sibling = ctx.file.other_src)
+    ctx.actions.write(out, "x")
+    return []
+"#,
+        )
+        .unwrap();
+        let impl_fn = ectx.globals.get("_impl").cloned().unwrap();
+        let cross_fn = ectx.globals.get("_cross_sib").cloned().unwrap();
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+        let make_single_file_rule =
+            |canon_label: &str, attr_name: &str, src_label: &str, func: Value| -> RuleInstance {
+                let mut src_attr = Attribute::new(attr_name, AttrType::Label);
+                src_attr.allow_single_file = true;
+                let mut attrs_def = BTreeMap::new();
+                attrs_def.insert(attr_name.to_string(), src_attr);
+                let rc = Arc::new(RuleClass {
+                    name: "ext_decl".into(),
+                    attrs: attrs_def,
+                    attr_order: vec!["name".into(), attr_name.into()],
+                    implicit: BTreeMap::new(),
+                    is_test: false,
+                    is_executable: false,
+                    open: false,
+                    implicit_outputs: Vec::new(),
+                    outputs_fn: None,
+                    is_starlark: true,
+                    build_setting: false,
+                    starlark: Some(Arc::new(StarlarkRuleSpec {
+                        implementation: func,
+                        kwargs: BTreeMap::new(),
+                        defined_in: "@@ext//:defs.bzl".into(),
+                        definition_digest: String::new(),
+                        definition_stack: Vec::new(),
+                        initializers: Vec::new(),
+                        build_setting_flag: false,
+                    })),
+                });
+                let mut attr_vals = BTreeMap::new();
+                attr_vals.insert(
+                    attr_name.to_string(),
+                    AttrValue::Label(Some(Label::parse_canonical(src_label).unwrap())),
+                );
+                RuleInstance {
+                    label: Label::parse_canonical(canon_label).unwrap(),
+                    rule_class: "ext_decl".into(),
+                    attrs: BTreeMap::new(),
+                    srcs: Vec::new(),
+                    deps: Vec::new(),
+                    outs: Vec::new(),
+                    tools: Vec::new(),
+                    data: Vec::new(),
+                    visibility: Vec::new(),
+                    cmd: None,
+                    executable: false,
+                    testonly: false,
+                    extra: RuleExtra {
+                        rule_class: Some(rc),
+                        attr_values: attr_vals,
+                        ..Default::default()
+                    },
+                }
+            };
+
+        let run_ext = |canon_label: &str, src_label: &str, sibling: bool| -> String {
+            let rule = make_single_file_rule(canon_label, "src", src_label, impl_fn.clone());
+            let resolver: Arc<dyn DepResolver> = Arc::new(SourceResolver { sibling });
+            let mut inputs = AnalysisInputs::new(resolver);
+            inputs.sibling_repository_layout = sibling;
+            inputs.allow_unresolved_symlinks = true;
+            let ct = analyze_starlark_rule(&rule, &cfg, inputs).unwrap();
+            let crate::ActionKind::FileWrite {
+                content: crate::FileContent::Literal(body),
+                ..
+            } = &ct
+                .typed_actions
+                .iter()
+                .find(|a| a.outputs[0].basename() == "summary.txt")
+                .unwrap()
+                .kind
+            else {
+                panic!("expected summary FileWrite");
+            };
+            body.clone()
+        };
+
+        // External subpackage `@@ext//pkg:t`: `short_path` stays `../ext/pkg/...` under both layouts.
+        assert_eq!(
+            run_ext("@@ext//pkg:t", "@@ext//pkg:nested/in.txt", false),
+            [
+                "external/ext/pkg/nested/in.txt|../ext/pkg/nested/in.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/sub/a.txt|../ext/pkg/sub/a.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/nested/b.txt|../ext/pkg/nested/b.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/sub/c.txt|../ext/pkg/sub/c.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/sub_dir|../ext/pkg/sub_dir",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/sub_sym|../ext/pkg/sub_sym",
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            run_ext("@@ext//pkg:t", "@@ext//pkg:nested/in.txt", true),
+            [
+                "../ext/pkg/nested/in.txt|../ext/pkg/nested/in.txt",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/sub/a.txt|../ext/pkg/sub/a.txt",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/nested/b.txt|../ext/pkg/nested/b.txt",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/sub/c.txt|../ext/pkg/sub/c.txt",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/sub_dir|../ext/pkg/sub_dir",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/sub_sym|../ext/pkg/sub_sym",
+            ]
+            .join("\n")
+        );
+
+        // External root package `@@ext//:t`: `short_path` is `../ext/...` under both layouts.
+        assert_eq!(
+            run_ext("@@ext//:t", "@@ext//:in.txt", false),
+            [
+                "external/ext/in.txt|../ext/in.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/sub/a.txt|../ext/sub/a.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/b.txt|../ext/b.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/sub/c.txt|../ext/sub/c.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/sub_dir|../ext/sub_dir",
+                "bazel-out/k8-fastbuild/bin/external/ext/sub_sym|../ext/sub_sym",
+            ]
+            .join("\n")
+        );
+        assert_eq!(
+            run_ext("@@ext//:t", "@@ext//:in.txt", true),
+            [
+                "../ext/in.txt|../ext/in.txt",
+                "bazel-out/ext/k8-fastbuild/bin/sub/a.txt|../ext/sub/a.txt",
+                "bazel-out/ext/k8-fastbuild/bin/b.txt|../ext/b.txt",
+                "bazel-out/ext/k8-fastbuild/bin/sub/c.txt|../ext/sub/c.txt",
+                "bazel-out/ext/k8-fastbuild/bin/sub_dir|../ext/sub_dir",
+                "bazel-out/ext/k8-fastbuild/bin/sub_sym|../ext/sub_sym",
+            ]
+            .join("\n")
+        );
+
+        // Legacy layout: `@@ext//:t` declaring a sibling next to a main-repo file must fail
+        // because `sub/escape.txt` is not under `external/ext`.
+        let cross_rule =
+            make_single_file_rule("@@ext//:bad", "other_src", "//sub:in.txt", cross_fn);
+        let cross_resolver: Arc<dyn DepResolver> = Arc::new(SourceResolver { sibling: false });
+        let cross_err =
+            analyze_starlark_rule(&cross_rule, &cfg, AnalysisInputs::new(cross_resolver))
+                .unwrap_err();
+        assert!(
+            cross_err.contains("is not under package directory 'external/ext'"),
+            "unexpected error: {cross_err}"
         );
     }
 }

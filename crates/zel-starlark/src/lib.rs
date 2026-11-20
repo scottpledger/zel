@@ -1850,20 +1850,22 @@ impl EvalContext {
                 "name" => Ok(Value::String(l.name().to_string())),
                 "package" => Ok(Value::String(l.package_name().to_string())),
                 "repo_name" | "workspace_name" => {
-                    if let Some(msg) = l.repository().not_visible_error_message() {
-                        return Err(StarlarkError(format!("{loc}: {msg}")));
+                    if !l.repository().is_visible() {
+                        return Err(StarlarkError(format!(
+                            "{loc}: '{attr}' is not allowed on invalid Label {l}"
+                        )));
                     }
                     Ok(Value::String(l.repository().name().to_string()))
                 }
                 "workspace_root" => {
-                    if let Some(msg) = l.repository().not_visible_error_message() {
-                        return Err(StarlarkError(format!("{loc}: {msg}")));
+                    if !l.repository().is_visible() {
+                        return Err(StarlarkError(format!(
+                            "{loc}: 'workspace_root' is not allowed on invalid Label {l}"
+                        )));
                     }
-                    Ok(Value::String(if l.repository().is_main() {
-                        String::new()
-                    } else {
-                        format!("external/{}", l.repository().name())
-                    }))
+                    Ok(Value::String(l.workspace_root(
+                        self.semantics.experimental_sibling_repository_layout,
+                    )))
                 }
                 "same_package_label" | "relative" | "package_relative" => {
                     Ok(self.bound_method(Value::Label(l.clone()), attr, loc))
@@ -2673,38 +2675,8 @@ impl EvalContext {
                 };
                 let lctx = self.current_module_env().label_ctx.lock().unwrap().clone();
                 let label = match lctx {
-                    Some((pkg, mapping)) => {
-                        let mapping = match s.strip_prefix('@').filter(|r| !r.starts_with('@')) {
-                            Some(rest) => {
-                                let apparent = rest.split("//").next().unwrap_or(rest);
-                                if !apparent.is_empty()
-                                    && !mapping.entries().any(|(k, _)| k == apparent)
-                                    && apparent != "bazel_tools"
-                                    && apparent != "platforms"
-                                {
-                                    let owner = mapping.owner_repo().clone();
-                                    let dym = mapping.did_you_mean(apparent);
-                                    let marker = zel_cmdline::RepositoryName::to_non_visible(
-                                        apparent, &owner, &dym,
-                                    );
-                                    let mut entries: std::collections::HashMap<
-                                        String,
-                                        zel_cmdline::RepositoryName,
-                                    > = mapping
-                                        .entries()
-                                        .map(|(k, v)| (k.clone(), v.clone()))
-                                        .collect();
-                                    entries.insert(apparent.to_string(), marker);
-                                    zel_cmdline::RepositoryMapping::new(entries, owner)
-                                } else {
-                                    mapping
-                                }
-                            }
-                            None => mapping,
-                        };
-                        Label::parse_with_package_context(s, &pkg, &mapping)
-                            .map_err(|e| StarlarkError(format!("{loc}: {e}")))?
-                    }
+                    Some((pkg, mapping)) => Label::parse_with_package_context(s, &pkg, &mapping)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?,
                     None => Label::parse_canonical(s)
                         .map_err(|e| StarlarkError(format!("{loc}: {e}")))?,
                 };
@@ -2929,11 +2901,12 @@ impl EvalContext {
         if let Some(r) = self.probe_host_attr(func_name, &eval_pos, &eval_kw) {
             return Ok(Ok(r?));
         }
-        match eval::builtins::eval_universal_function_in(
+        match eval::builtins::eval_universal_function_with_semantics(
             func_name,
             &eval_pos,
             &eval_kw,
             &self.mutability,
+            &self.semantics,
         ) {
             Ok(Some(res)) => Ok(Ok(res)),
             Ok(None) => Ok(Err((eval_pos, eval_kw))),
@@ -3425,22 +3398,14 @@ impl EvalContext {
                         StarlarkError(format!("{loc}: {method}() takes a string"))
                     })?;
                     let lctx = self.current_module_env().label_ctx.lock().unwrap().clone();
-                    let mapping = match lctx {
-                        Some((pkg, m)) if pkg.repository() == l.repository() => m,
-                        _ => zel_cmdline::RepositoryMapping::always_fallback(),
-                    };
-                    let parsed = if raw.starts_with('@')
-                        && !raw.starts_with("@@")
-                        && mapping.entries().next().is_none()
-                    {
-                        zel_cmdline::Label::parse_canonical(&format!("@{raw}"))
-                    } else {
-                        zel_cmdline::Label::parse_with_package_context(
-                            raw,
-                            l.package_identifier(),
-                            &mapping,
-                        )
-                    };
+                    let mapping = lctx
+                        .map(|(_, m)| m)
+                        .unwrap_or_else(zel_cmdline::RepositoryMapping::always_fallback);
+                    let parsed = zel_cmdline::Label::parse_with_package_context(
+                        raw,
+                        l.package_identifier(),
+                        &mapping,
+                    );
                     parsed
                         .map(zel_cmdline::Label::with_unambiguous_display)
                         .map(Value::Label)
@@ -4167,14 +4132,17 @@ same = (l1 == l2)
         ctx.eval_str("nv = Label('@rules_r//a:b')").unwrap();
         let err = ctx.eval_str("rn = nv.repo_name").unwrap_err();
         assert!(
-            err.0.contains("No repository visible as '@rules_r' from main repository (did you mean 'rules_rs'?)"),
+            err.0.contains(
+                "'repo_name' is not allowed on invalid Label @@[unknown repo 'rules_r' requested from @@ (did you mean 'rules_rs'?)]//a:b"
+            ),
             "got: {}",
             err.0
         );
         let err = ctx.eval_str("wr = nv.workspace_root").unwrap_err();
         assert!(
-            err.0
-                .contains("No repository visible as '@rules_r' from main repository"),
+            err.0.contains(
+                "'workspace_root' is not allowed on invalid Label @@[unknown repo 'rules_r' requested from @@ (did you mean 'rules_rs'?)]//a:b"
+            ),
             "got: {}",
             err.0
         );

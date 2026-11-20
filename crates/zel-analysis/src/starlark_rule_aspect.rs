@@ -393,6 +393,9 @@ fn apply_aspect_path(
 
         // 4. Run the implementation: `impl(target, ctx)`.
         let mut ectx = EvalContext::new(pkg_dir.clone(), None);
+        ectx.semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
+        ectx.thread.semantics.experimental_sibling_repository_layout =
+            st.inputs.sibling_repository_layout;
         ectx.file_name = rule.extra.location.clone().unwrap_or_else(|| "BUILD".to_string());
         let st2 = st.clone();
         ectx.host = Some(Arc::new(move |c, n, p, k| dispatch(&st2, c, n, p, k)));

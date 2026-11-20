@@ -69,6 +69,8 @@ pub struct AnalysisConfig {
     pub platforms_repo: String,
     /// `--shell_executable` (`ShellConfiguration`): the shell genrules run under.
     pub shell_executable: Option<String>,
+    /// `--experimental_sibling_repository_layout`.
+    pub sibling_repository_layout: bool,
     expansion_cache: Arc<Mutex<ExpansionCache>>,
 }
 
@@ -634,6 +636,8 @@ impl TargetResolver {
         }
         let me: Arc<dyn DepResolver> = self.me();
         let mut inputs = zel_analysis::starlark_rule::AnalysisInputs::new(me);
+        inputs.sibling_repository_layout =
+            self.config.sibling_repository_layout || self.loader.config().sibling_repository_layout;
         inputs.exec_platform = Some(self.config.default_exec_platform());
         for a in aspects {
             ct = zel_analysis::starlark_rule::apply_aspect_cli(&inputs, ct, a, params)
@@ -830,12 +834,16 @@ impl TargetResolver {
         if config.check_visibility != self.config.check_visibility
             || config.allow_unresolved_symlinks != self.config.allow_unresolved_symlinks
             || config.no_compact_repo_mapping != self.config.no_compact_repo_mapping
+            || config.sibling_repository_layout != self.config.sibling_repository_layout
             || config.host_platform != self.config.host_platform
             || config.shell_executable != self.config.shell_executable
             || config.toolchain_patterns != self.config.toolchain_patterns
             || config.execution_platform_patterns != self.config.execution_platform_patterns
         {
             self.retain_exec_only();
+            if config.sibling_repository_layout != self.config.sibling_repository_layout {
+                self.clear_exec();
+            }
             return;
         }
         self.reported_cycles.lock().unwrap().clear();
@@ -1574,12 +1582,21 @@ impl DepResolver for TargetResolver {
 }
 
 /// Source-file configured target.
+#[allow(dead_code)]
 pub(crate) fn source_file_target(label: &Label, cfg: &BuildConfigurationKey) -> ConfiguredTarget {
+    source_file_target_with_layout(label, cfg, false)
+}
+
+pub(crate) fn source_file_target_with_layout(
+    label: &Label,
+    cfg: &BuildConfigurationKey,
+    sibling_repository_layout: bool,
+) -> ConfiguredTarget {
     let rel = label
         .package_identifier()
         .package_fragment()
         .get_relative_str(label.name());
-    let art = Artifact::source(rel, label.clone());
+    let art = Artifact::source_with_layout(rel, label.clone(), sibling_repository_layout);
     let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), "source file".to_string());
     ct.default_info = DefaultInfo {
         files: vec![art.clone()],

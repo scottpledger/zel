@@ -235,7 +235,13 @@ fn attr_to_value_in(
         Ok(ct)
     };
     let out_art = |l: &Label| {
-        Artifact::derived_in_root(&cfg.mnemonic(), out_root, pkg_relative(l, pkg_dir), rule.label.clone())
+        Artifact::derived_in_root_with_layout(
+            &cfg.mnemonic(),
+            out_root,
+            pkg_relative(l, pkg_dir),
+            rule.label.clone(),
+            inputs.sibling_repository_layout,
+        )
     };
     Ok(match av {
         AttrValue::Int(i) => ConvertedAttr { value: Value::Int(BigInt::from_i64(*i)), deps: vec![], split: None },
@@ -427,7 +433,16 @@ fn convert_rule_attrs(
                     }
                 }
                 None => match &attr.computed_default {
-                    Some(f) => computed_default_value(f, attr, name, &raw_attrs, rule, &inputs.resolver).map_err(wrap)?,
+                    Some(f) => computed_default_value(
+                        f,
+                        attr,
+                        name,
+                        &raw_attrs,
+                        rule,
+                        &inputs.resolver,
+                        inputs.sibling_repository_layout,
+                    )
+                    .map_err(wrap)?,
                     None => attr.default_value(),
                 },
             },
@@ -748,21 +763,23 @@ pub fn analyze_starlark_rule(
     // Implicit outputs (`rule(outputs = {...})`).
     for (key, tmpl) in &rc.implicit_outputs {
         let fname = expand_output_template(tmpl, rule);
-        let a = Artifact::derived_in_root(
+        let a = Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             out_root,
             pkg_dir.get_relative_str(&fname),
             label.clone(),
+            inputs.sibling_repository_layout,
         );
         outputs_fields.insert(key.clone(), file_value(&a));
         predeclared.push(a);
     }
     let default_executable = if rc.is_executable || rc.is_test {
-        Some(Artifact::derived_in_root(
+        Some(Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             out_root,
             pkg_dir.get_relative_str(label.name()),
             label.clone(),
+            inputs.sibling_repository_layout,
         ))
     } else {
         None
@@ -821,6 +838,9 @@ pub fn analyze_starlark_rule(
 
     // 3. Run the implementation function.
     let mut ectx = EvalContext::new(pkg_dir.clone(), None);
+    ectx.semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
+    ectx.thread.semantics.experimental_sibling_repository_layout =
+        st.inputs.sibling_repository_layout;
     ectx.file_name = rule.extra.location.clone().unwrap_or_else(|| "BUILD".to_string());
     let st2 = st.clone();
     ectx.host = Some(Arc::new(move |c, n, p, k| dispatch(&st2, c, n, p, k)));
@@ -850,6 +870,7 @@ fn computed_default_value(
     raw_attrs: &Value,
     rule: &RuleInstance,
     resolver: &Arc<dyn DepResolver>,
+    sibling_repository_layout: bool,
 ) -> Result<AttrValue, String> {
     let Value::UserFunction(def) = f else { return Err(format!("attribute '{name}': invalid computed default")) };
     let mut kw = BTreeMap::new();
@@ -861,6 +882,8 @@ fn computed_default_value(
         }
     }
     let mut ctx = EvalContext::default();
+    ctx.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
+    ctx.thread.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
     let owner = rule.label.package_identifier().clone();
     let resolver_arc = Arc::clone(resolver);
     ctx.host = Some(Arc::new(move |ctx, host_name, pos, _kw| {
@@ -874,14 +897,18 @@ fn computed_default_value(
                     let (pkg, mapping) = match ctx.current_label_ctx() {
                         Some((p, m)) => (p, m),
                         None => {
-                            let entries = resolver_arc.repo_mapping_entries(owner.repository().name());
-                            let mut map = std::collections::HashMap::new();
-                            for (a, c) in entries {
-                                if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
-                                    map.insert(a, rn);
-                                }
-                            }
-                            (owner.clone(), zel_cmdline::RepositoryMapping::new(map, owner.repository().clone()))
+                            let ordered: Vec<(String, zel_cmdline::RepositoryName)> = resolver_arc
+                                .repo_mapping_entries(owner.repository().name())
+                                .into_iter()
+                                .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+                                .collect();
+                            (
+                                owner.clone(),
+                                zel_cmdline::RepositoryMapping::new_ordered(
+                                    ordered,
+                                    owner.repository().clone(),
+                                ),
+                            )
                         }
                     };
                     Label::parse_with_package_context(s, &pkg, &mapping)
@@ -1256,11 +1283,12 @@ fn finish_target(
     let mut runfiles_support = None;
     if is_exec_or_test && !default_runfiles.is_empty() && build_manifests {
         let exe = executable.clone().ok_or("executable must not be null")?;
-        let manifest = Artifact::derived_in_root(
+        let manifest = Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             if st.output_to_genfiles { ArtifactRoot::Genfiles } else { ArtifactRoot::Bin },
             PathFragment::create(&format!("{}.runfiles_manifest", exe.root_relative_path)),
             label.clone(),
+            st.inputs.sibling_repository_layout,
         );
         let mut a = Action::new(
             label.clone(),
@@ -1276,11 +1304,12 @@ fn finish_target(
         st.register(a).map_err(|e| e.0)?;
         // `RunfilesSupport.createRepoMappingManifestAction`: <executable>.repo_mapping in bin.
         let repo_mapping = st.repo_mapping_for(&default_runfiles);
-        let rm_artifact = Artifact::derived_in_root(
+        let rm_artifact = Artifact::derived_in_root_with_layout(
             &cfg.mnemonic(),
             if st.output_to_genfiles { ArtifactRoot::Genfiles } else { ArtifactRoot::Bin },
             PathFragment::create(&format!("{}.repo_mapping", exe.root_relative_path)),
             label.clone(),
+            st.inputs.sibling_repository_layout,
         );
         let mut rma = Action::new(
             label.clone(),

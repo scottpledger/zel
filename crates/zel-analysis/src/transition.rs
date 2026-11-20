@@ -785,6 +785,12 @@ pub fn apply_transition_split_with_resolver(
         zel_starlark::StarlarkDict::from_entries(settings).map_err(|e| e.0)?,
     )));
     let mut ctx = EvalContext::default();
+    let sibling_layout = resolver
+        .and_then(|r| r.package_loader())
+        .map(|l| l.config().sibling_repository_layout)
+        .unwrap_or(false);
+    ctx.semantics.experimental_sibling_repository_layout = sibling_layout;
+    ctx.thread.semantics.experimental_sibling_repository_layout = sibling_layout;
     let tctx_for_label = tctx.clone();
     ctx.host = Some(std::sync::Arc::new(move |ctx, host_name, pos, _kw| {
         if host_name == "Label" {

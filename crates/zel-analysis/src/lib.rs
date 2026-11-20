@@ -761,20 +761,45 @@ pub struct Artifact {
 
 impl Artifact {
     pub fn source(root_relative_path: PathFragment, owner_label: Label) -> Self {
-        // A source file of an external repository lives under `external/<repo>/` of the exec root.
-        let exec_path = if owner_label.repository().is_main() {
-            root_relative_path.clone()
+        Self::source_with_layout(root_relative_path, owner_label, false)
+    }
+
+    /// Source artifact respecting `--experimental_sibling_repository_layout`
+    /// (`../<repo>/...` when true, `external/<repo>/...` when false).
+    pub fn source_with_layout(
+        root_relative_path: PathFragment,
+        owner_label: Label,
+        sibling_repository_layout: bool,
+    ) -> Self {
+        let (root_relative_path, exec_path) = if owner_label.repository().is_main() {
+            (root_relative_path.clone(), root_relative_path)
         } else {
-            let repo_prefix = format!("external/{}/", owner_label.repository().name());
-            if root_relative_path.path_string().starts_with(&repo_prefix) {
-                root_relative_path.clone()
+            let repo_name = owner_label.repository().name();
+            let raw = root_relative_path.path_string();
+            let legacy_exact = format!("external/{repo_name}");
+            let legacy_prefix = format!("{legacy_exact}/");
+            let sib_exact = format!("../{repo_name}");
+            let sib_prefix = format!("{sib_exact}/");
+            let repo_rel = if raw == legacy_exact || raw == sib_exact {
+                ""
+            } else if let Some(s) = raw.strip_prefix(legacy_prefix.as_str()) {
+                s
+            } else if let Some(s) = raw.strip_prefix(sib_prefix.as_str()) {
+                s
             } else {
-                PathFragment::create(&format!(
-                    "external/{}/{}",
-                    owner_label.repository().name(),
-                    root_relative_path
-                ))
-            }
+                raw
+            };
+            let prefix = if sibling_repository_layout {
+                sib_exact
+            } else {
+                legacy_exact
+            };
+            let exec = if repo_rel.is_empty() {
+                PathFragment::create(&prefix)
+            } else {
+                PathFragment::create(&format!("{prefix}/{repo_rel}"))
+            };
+            (PathFragment::create(repo_rel), exec)
         };
         Self {
             is_source: true,
@@ -788,8 +813,24 @@ impl Artifact {
         }
     }
 
+    /// `OutputDirectories.getBinDirectory(repository)`: `bazel-out/<repo>/<mnemonic>/bin`
+    /// for external repositories under `--experimental_sibling_repository_layout`, and
+    /// `bazel-out/<mnemonic>/bin` otherwise.
+    pub fn bin_dir_for_repo(
+        config_mnemonic: &str,
+        repo: &zel_cmdline::RepositoryName,
+        sibling_repository_layout: bool,
+    ) -> String {
+        if sibling_repository_layout && !repo.is_main() {
+            format!("bazel-out/{}/{config_mnemonic}/bin", repo.name())
+        } else {
+            format!("bazel-out/{config_mnemonic}/bin")
+        }
+    }
+
     /// Derived files of targets in external repositories live below `external/<repo>/` (their
-    /// root-relative path carries the prefix; `short_path` strips it again).
+    /// root-relative path carries the prefix; `short_path` strips it again) unless
+    /// `--experimental_sibling_repository_layout` is enabled.
     fn external_prefixed(owner: &Label, rel: PathFragment) -> PathFragment {
         let repo = owner.package_identifier().repository();
         if repo.is_main() {
@@ -808,20 +849,28 @@ impl Artifact {
         root_relative_path: PathFragment,
         owner_label: Label,
     ) -> Self {
-        let root_relative_path = Self::external_prefixed(&owner_label, root_relative_path);
-        let exec_path = PathFragment::create(&format!(
-            "bazel-out/{config_mnemonic}/bin/{root_relative_path}"
-        ));
-        Self {
-            is_source: false,
-            is_tree_artifact: false,
-            root: ArtifactRoot::Bin,
-            is_unresolved_symlink: false,
-            is_constant_metadata: false,
-            exec_path,
+        Self::derived_in_root_with_layout(
+            config_mnemonic,
+            ArtifactRoot::Bin,
             root_relative_path,
             owner_label,
-        }
+            false,
+        )
+    }
+
+    pub fn derived_with_layout(
+        config_mnemonic: &str,
+        root_relative_path: PathFragment,
+        owner_label: Label,
+        sibling_repository_layout: bool,
+    ) -> Self {
+        Self::derived_in_root_with_layout(
+            config_mnemonic,
+            ArtifactRoot::Bin,
+            root_relative_path,
+            owner_label,
+            sibling_repository_layout,
+        )
     }
 }
 
@@ -835,12 +884,37 @@ impl Artifact {
         root_relative_path: PathFragment,
         owner_label: Label,
     ) -> Self {
-        let root_relative_path = Self::external_prefixed(&owner_label, root_relative_path);
+        Self::derived_in_root_with_layout(
+            config_mnemonic,
+            root,
+            root_relative_path,
+            owner_label,
+            false,
+        )
+    }
+
+    /// Like [`Artifact::derived_in_root`], respecting `--experimental_sibling_repository_layout`
+    /// (`bazel-out/<repo>/<mnemonic>/bin/<pkg>/...` for external repositories when enabled).
+    pub fn derived_in_root_with_layout(
+        config_mnemonic: &str,
+        root: ArtifactRoot,
+        root_relative_path: PathFragment,
+        owner_label: Label,
+        sibling_repository_layout: bool,
+    ) -> Self {
+        let repo = owner_label.package_identifier().repository();
+        let root_relative_path = if sibling_repository_layout {
+            root_relative_path
+        } else {
+            Self::external_prefixed(&owner_label, root_relative_path)
+        };
         // `--incompatible_merge_genfiles_directory` (default): genfiles live under `bin`.
-        let dir = "bin";
-        let exec_path = PathFragment::create(&format!(
-            "bazel-out/{config_mnemonic}/{dir}/{root_relative_path}"
-        ));
+        let bin_dir = Self::bin_dir_for_repo(config_mnemonic, repo, sibling_repository_layout);
+        let exec_path = if root_relative_path.is_empty() {
+            PathFragment::create(&bin_dir)
+        } else {
+            PathFragment::create(&format!("{bin_dir}/{root_relative_path}"))
+        };
         Self {
             is_source: false,
             is_tree_artifact: false,
@@ -876,20 +950,55 @@ impl Artifact {
         }
     }
 
+    /// `Artifact.getRepositoryRelativePath`: path relative to the artifact's repository root.
+    pub fn repository_relative_path(&self) -> PathFragment {
+        let repo = self.owner_label.repository();
+        if repo.is_main() {
+            return self.root_relative_path.clone();
+        }
+        let rel = self.root_relative_path.path_string();
+        let legacy_exact = format!("external/{}", repo.name());
+        let legacy_prefix = format!("{legacy_exact}/");
+        let sib_exact = format!("../{}", repo.name());
+        let sib_prefix = format!("{sib_exact}/");
+        if rel == legacy_exact || rel == sib_exact {
+            PathFragment::empty()
+        } else if let Some(s) = rel.strip_prefix(legacy_prefix.as_str()) {
+            PathFragment::create(s)
+        } else if let Some(s) = rel.strip_prefix(sib_prefix.as_str()) {
+            PathFragment::create(s)
+        } else {
+            self.root_relative_path.clone()
+        }
+    }
+
+    /// `Artifact.getOutputDirRelativePath(siblingRepositoryLayout)`: used by
+    /// `ctx.actions.declare_file(..., sibling = ...)` and `declare_directory` / `declare_symlink`.
+    pub fn output_dir_relative_path(&self, sibling_repository_layout: bool) -> PathFragment {
+        if self.is_source {
+            if sibling_repository_layout {
+                self.repository_relative_path()
+            } else {
+                self.exec_path.clone()
+            }
+        } else {
+            self.root_relative_path.clone()
+        }
+    }
+
     /// `File.short_path`: path relative to the runfiles root (`../repo/x` for external repos).
     pub fn short_path(&self) -> String {
         let repo = self.owner_label.repository();
-        let rel = self.root_relative_path.path_string();
         if repo.is_main() {
-            rel.to_string()
+            self.root_relative_path.path_string().to_string()
         } else {
-            let exact = format!("external/{}", repo.name());
-            if rel == exact {
-                return format!("../{}", repo.name());
+            let rel_frag = self.repository_relative_path();
+            let rel = rel_frag.path_string();
+            if rel.is_empty() {
+                format!("../{}", repo.name())
+            } else {
+                format!("../{}/{}", repo.name(), rel)
             }
-            let prefix = format!("{exact}/");
-            let rel = rel.strip_prefix(prefix.as_str()).unwrap_or(rel);
-            format!("../{}/{}", repo.name(), rel)
         }
     }
 

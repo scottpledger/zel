@@ -44,6 +44,7 @@ pub struct BzlmodConfig {
     pub nofetch: bool,
     pub bazel_version: String,
     pub experimental_repository_ctx_execute_wasm: bool,
+    pub experimental_sibling_repository_layout: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
@@ -369,6 +370,9 @@ impl BzlmodConfig {
             experimental_repository_ctx_execute_wasm: parsed
                 .get_bool("experimental_repository_ctx_execute_wasm")
                 .unwrap_or(false),
+            experimental_sibling_repository_layout: parsed
+                .get_bool("experimental_sibling_repository_layout")
+                .unwrap_or(false),
             credential_helpers,
         })
     }
@@ -391,6 +395,7 @@ impl BzlmodConfig {
             nofetch: self.nofetch,
             verbose: false,
             experimental_repository_ctx_execute_wasm: self.experimental_repository_ctx_execute_wasm,
+            experimental_sibling_repository_layout: self.experimental_sibling_repository_layout,
             credential_helpers: self.credential_helpers.clone(),
         }
     }

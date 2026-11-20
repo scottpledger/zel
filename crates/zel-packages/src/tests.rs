@@ -697,7 +697,9 @@ fn bzl_load_errors() {
     )]);
     let e = load_errors(&ws, "").join("\n");
     assert!(
-        e.contains("Unable to find package for @@rules_foo//foo:defs.bzl: The repository '@@"),
+        e.contains(
+            "Unable to find package for @@[unknown repo 'rules_foo' requested from @@]//foo:defs.bzl: The repository '@@[unknown repo 'rules_foo' requested from @@]' could not be resolved"
+        ),
         "{e}"
     );
     assert!(ws.try_load("").is_err());

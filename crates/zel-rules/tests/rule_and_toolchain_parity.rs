@@ -781,6 +781,9 @@ builtin_cc_common_dll(
 
     let mut repo_resolver =
         SimpleRepoResolver::new(PathFragment::create(&ws_dir.to_string_lossy()));
+    repo_resolver
+        .apparent
+        .insert(String::new(), RepositoryName::main());
     for (name, path) in [
         ("rules_cc", &rules_cc),
         ("bazel_skylib", &skylib),
@@ -794,6 +797,9 @@ builtin_cc_common_dll(
             name.to_string(),
             PathFragment::create(&path.to_string_lossy()),
         );
+        repo_resolver
+            .apparent
+            .insert(name.to_string(), RepositoryName::create(name).unwrap());
     }
 
     let lc = LoaderConfig::new(

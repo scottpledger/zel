@@ -267,6 +267,8 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
         )
     };
     let mut ctx = EvalContext::new(PathFragment::empty(), None);
+    ctx.semantics.experimental_sibling_repository_layout = popts.sibling_repository_layout;
+    ctx.thread.semantics.experimental_sibling_repository_layout = popts.sibling_repository_layout;
     ctx.strict_names = true;
     ctx.globals
         .insert("depset".into(), Value::BuiltinFunction("depset".into()));
@@ -1121,6 +1123,8 @@ pub(crate) fn run(
     });
 
     let mut ctx = EvalContext::new(PathFragment::empty(), None);
+    ctx.semantics.experimental_sibling_repository_layout = popts.sibling_repository_layout;
+    ctx.thread.semantics.experimental_sibling_repository_layout = popts.sibling_repository_layout;
     ctx.strict_names = true;
     ctx.globals
         .insert("depset".into(), Value::BuiltinFunction("depset".into()));

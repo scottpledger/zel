@@ -126,6 +126,7 @@ impl BlazeRuntime {
                 "incompatible_disable_target_default_provider_fields",
                 false,
             ),
+            sibling_repository_layout: flag("experimental_sibling_repository_layout", false),
             ..Default::default()
         };
         let tr = {
@@ -134,6 +135,7 @@ impl BlazeRuntime {
                 if r.config.check_visibility == acfg.check_visibility
                     && r.config.allow_unresolved_symlinks == acfg.allow_unresolved_symlinks
                     && r.config.no_compact_repo_mapping == acfg.no_compact_repo_mapping
+                    && r.config.sibling_repository_layout == acfg.sibling_repository_layout
                     && r.config.host_platform == acfg.host_platform
                     && r.config.shell_executable == acfg.shell_executable
                     && r.config.toolchain_patterns == acfg.toolchain_patterns
@@ -142,8 +144,12 @@ impl BlazeRuntime {
                     r.update_for_command(acfg);
                     r
                 } else {
+                    let same_sibling_layout =
+                        r.config.sibling_repository_layout == acfg.sibling_repository_layout;
                     let new_r = TargetResolver::new(resolver.loader().clone(), acfg);
-                    new_r.copy_exec_from(&r);
+                    if same_sibling_layout {
+                        new_r.copy_exec_from(&r);
+                    }
                     *lr = Some(new_r.clone());
                     new_r
                 }

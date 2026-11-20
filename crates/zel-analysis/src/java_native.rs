@@ -1100,7 +1100,11 @@ fn java_resource_path(st: &Arc<CtxState>, r: &Artifact) -> Result<String, Starla
     let mut p = if r.is_source { jpath(r) } else { r.root_relative_path.path_string().to_string() };
     let repo = st.label.package_identifier().repository().name().to_string();
     if !repo.is_empty() {
-        let prefix = format!("external/{repo}/");
+        let prefix = if st.inputs.sibling_repository_layout {
+            format!("../{repo}/")
+        } else {
+            format!("external/{repo}/")
+        };
         if let Some(rest) = p.strip_prefix(&prefix) {
             p = rest.to_string();
         }

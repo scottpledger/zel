@@ -1036,14 +1036,29 @@ impl SkyFunction for PackageLookupFunction {
             {
                 Some(root) => root,
                 None => {
-                    let repo_display = format!(
-                        "@@[unknown repo '{}' requested from @@]",
-                        pkg_id.repository().name()
-                    );
+                    let repo = pkg_id.repository();
+                    let dym = self
+                        .repo_resolver
+                        .get()
+                        .map(|r| {
+                            r.mapping(&zel_cmdline::RepositoryName::main())
+                                .did_you_mean(repo.name())
+                        })
+                        .unwrap_or_default();
+                    let repo_display = if repo.is_main() || !repo.is_visible() {
+                        repo.canonical_form()
+                    } else {
+                        format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
+                    };
+                    let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
+                        format!(
+                            "No repository visible as '@{}' from main repository{dym}",
+                            repo.name()
+                        )
+                    });
                     return Err(SkyFunctionError::persistent(format!(
-                        "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
+                        "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: {not_vis}",
                         pkg_frag,
-                        pkg_id.repository().name()
                     )));
                 }
             }

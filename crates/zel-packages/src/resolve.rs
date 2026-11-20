@@ -547,27 +547,20 @@ impl PatternResolver {
     ) -> Result<(), String> {
         let lookup = &self.loader.config().lookup;
         let Some(root) = lookup.resolver.repo_root(dir.repository()) else {
+            let repo = dir.repository();
             let main_map = lookup.resolver.mapping(&RepositoryName::main());
-            let dym = main_map.did_you_mean(dir.repository().name());
-            let repo_display = if dir.repository().is_main() {
-                dir.repository().canonical_form()
-            } else if !dir.repository().is_visible() {
-                dir.repository().name_with_at()
+            let dym = main_map.did_you_mean(repo.name());
+            let repo_display = if repo.is_main() || !repo.is_visible() {
+                repo.canonical_form()
             } else {
-                format!(
-                    "@@[unknown repo '{}' requested from @@{dym}]",
-                    dir.repository().name()
-                )
+                format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
             };
-            let not_vis = dir
-                .repository()
-                .not_visible_error_message()
-                .unwrap_or_else(|| {
-                    format!(
-                        "No repository visible as '@{}' from main repository{dym}",
-                        dir.repository().name()
-                    )
-                });
+            let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
+                format!(
+                    "No repository visible as '@{}' from main repository{dym}",
+                    repo.name()
+                )
+            });
             return Err(format!(
                 "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: {not_vis}",
                 dir.package_fragment()
