@@ -368,6 +368,8 @@ struct ConnPool {
     /// In-flight dials belonging to the current `close_gen`.
     dialing: usize,
     close_gen: u64,
+    #[cfg(test)]
+    waiters: usize,
 }
 
 struct DialGuard<'a> {
@@ -437,6 +439,8 @@ pub struct Channel {
     streams_per_conn: usize,
     pool: Mutex<ConnPool>,
     pool_cv: Condvar,
+    #[cfg(test)]
+    waiter_cv: Condvar,
     default_metadata: Vec<Header>,
     scheme: &'static str,
     settings: LocalSettings,
@@ -491,6 +495,8 @@ impl Channel {
             },
             pool: Mutex::new(ConnPool::default()),
             pool_cv: Condvar::new(),
+            #[cfg(test)]
+            waiter_cv: Condvar::new(),
             default_metadata: cfg
                 .default_metadata
                 .into_iter()
@@ -565,10 +571,28 @@ impl Channel {
                             "deadline exceeded",
                         ));
                     }
+                    #[cfg(test)]
+                    {
+                        p.waiters += 1;
+                        self.waiter_cv.notify_all();
+                    }
                     let (next_p, _) = self.pool_cv.wait_timeout(p, dl - now).unwrap();
                     p = next_p;
+                    #[cfg(test)]
+                    {
+                        p.waiters -= 1;
+                    }
                 } else {
+                    #[cfg(test)]
+                    {
+                        p.waiters += 1;
+                        self.waiter_cv.notify_all();
+                    }
                     p = self.pool_cv.wait(p).unwrap();
+                    #[cfg(test)]
+                    {
+                        p.waiters -= 1;
+                    }
                 }
             }
         };
@@ -586,7 +610,7 @@ impl Channel {
                 self.connector
                     .connect_with_dial_timeout(remaining)
                     .map_err(|e| {
-                        if e.kind() == std::io::ErrorKind::TimedOut {
+                        if e.kind() == std::io::ErrorKind::TimedOut && Instant::now() >= dl {
                             GrpcStatus::new(code::DEADLINE_EXCEEDED, "deadline exceeded")
                         } else {
                             GrpcStatus::new(code::UNAVAILABLE, format!("connection failed: {e}"))
@@ -1196,15 +1220,19 @@ mod tests {
                     let _ = tx.send(());
                 }
                 if let Some(rx) = self.release_rx.lock().unwrap().take() {
-                    match rx.recv_timeout(timeout) {
-                        Ok(()) => {}
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let end = Instant::now() + timeout;
+                    loop {
+                        let remaining = end.saturating_duration_since(Instant::now());
+                        if remaining.is_zero() {
                             return Err(std::io::Error::new(
                                 std::io::ErrorKind::TimedOut,
                                 "dial timed out",
                             ));
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                        match rx.recv_timeout(remaining) {
+                            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        }
                     }
                 }
             }
@@ -1317,8 +1345,7 @@ mod tests {
         entered_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("first dial should start");
-        // Give the other 3 threads a moment to queue on the pool condvar.
-        std::thread::sleep(Duration::from_millis(30));
+        wait_for_pool_waiters(&ch, 3);
         assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
 
         release_tx.send(()).unwrap();
@@ -1328,6 +1355,21 @@ mod tests {
         assert_eq!(connector.calls.load(Ordering::SeqCst), 1);
         assert_eq!(ch.connections_opened.load(Ordering::SeqCst), 1);
         ch.close();
+    }
+
+    fn wait_for_pool_waiters(ch: &Channel, min_waiters: usize) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut p = ch.pool.lock().unwrap();
+        while p.waiters < min_waiters {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for {min_waiters} pool waiters (have {})",
+                p.waiters
+            );
+            let (next_p, _) = ch.waiter_cv.wait_timeout(p, remaining).unwrap();
+            p = next_p;
+        }
     }
 
     #[test]
@@ -1357,7 +1399,7 @@ mod tests {
 
         let ch2 = ch.clone();
         let t2 = std::thread::spawn(move || ch2.pick_conn(None));
-        std::thread::sleep(Duration::from_millis(30));
+        wait_for_pool_waiters(&ch, 1);
 
         // Closing the channel wakes the pre-close waiter immediately.
         ch.close();
@@ -1498,6 +1540,55 @@ mod tests {
             started2.elapsed() < Duration::from_secs(2),
             "direct dial took too long: {:?}",
             started2.elapsed()
+        );
+    }
+
+    #[test]
+    fn pick_conn_preserves_connect_timeout_when_rpc_deadline_has_not_expired() {
+        struct EarlyConnectTimeoutConnector;
+        impl Connector for EarlyConnectTimeoutConnector {
+            fn connect(&self) -> std::io::Result<crate::transport::Transport> {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "TLS connection/handshake timed out after 10ms",
+                ))
+            }
+
+            fn connect_with_dial_timeout(
+                &self,
+                _timeout: Duration,
+            ) -> std::io::Result<crate::transport::Transport> {
+                self.connect()
+            }
+
+            fn authority(&self) -> String {
+                "remote.example.com:443".into()
+            }
+        }
+
+        let ch = Channel::with_config(
+            Arc::new(EarlyConnectTimeoutConnector),
+            ChannelConfig {
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                ..Default::default()
+            },
+        );
+        let err = ch
+            .unary(
+                "/test.Svc/Ping",
+                b"hi",
+                &CallOptions {
+                    timeout: Some(Duration::from_secs(5)),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert_eq!(err.code, code::UNAVAILABLE, "err={err}");
+        assert!(
+            err.message
+                .contains("TLS connection/handshake timed out after 10ms"),
+            "expected real connect timeout message to be preserved, got: {err}"
         );
     }
 }
