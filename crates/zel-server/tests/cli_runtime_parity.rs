@@ -1718,7 +1718,7 @@ bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "ext_cc_repo", version = "1.0.0")
 local_path_override(module_name = "ext_cc_repo", path = "{}")
 "#,
-            ext_dir.display()
+            PathFragment::create(ext_dir.to_str().unwrap()).path_string()
         ),
     );
     w.write("bad/defs.bzl", "X = CcInfo\n");

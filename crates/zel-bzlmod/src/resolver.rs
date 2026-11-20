@@ -703,13 +703,18 @@ mod tests {
                     &format!("modules/{name}/{v}/MODULE.bazel"),
                     &format!("module(name = '{name}', version = '{v}')\n"),
                 );
+                let source_json = crate::json::Json::Obj(vec![
+                    ("type".to_string(), crate::json::Json::str("local_path")),
+                    (
+                        "path".to_string(),
+                        crate::json::Json::str(src.to_string_lossy().replace('\\', "/")),
+                    ),
+                ])
+                .to_compact();
                 write(
                     &reg,
                     &format!("modules/{name}/{v}/source.json"),
-                    &format!(
-                        "{{\"type\": \"local_path\", \"path\": \"{}\"}}",
-                        src.display()
-                    ),
+                    &source_json,
                 );
             }
         };
