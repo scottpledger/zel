@@ -1691,7 +1691,6 @@ test_suite(
     assert_eq!(
         imp_list.lock().unwrap().elements,
         vec![Value::Label(Label::parse_canonical("//:t_fast").unwrap())]
->>>>>>> 1638190f (Align genrule, filegroup, Python builtins, testing, test_suite, and repo recorded inputs with Bazel 9.3.2)
     );
 }
 

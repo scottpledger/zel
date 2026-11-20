@@ -204,11 +204,6 @@ impl FileContent {
     }
 }
 
-/// Escapes one argument for [`ParamFileFormat::GccQuoted`] (`GccParamFileEscaper.escapeString`).
-pub fn gcc_escape(s: &str) -> String {
-    zel_util::param_escaper::gcc_escape_param(s)
-}
-
 /// Escapes one argument for [`ParamFileFormat::Windows`] (`WindowsParamFileEscaper.escapeString`).
 pub fn windows_escape(s: &str) -> String {
     zel_util::param_escaper::windows_escape_param(s)

@@ -647,19 +647,18 @@ impl TargetResolver {
                 cfg
             };
             if !cfg.is_exec && !cfg.core_only {
-                let keep = loaded_target
-                    .map(|t| match t {
-                        Target::Rule(r) => {
-                            r.is_test_rule()
+                let keep =
+                    loaded_target
+                        .map(|t| match t {
+                            Target::Rule(r) => r.is_test_rule()
                                 || (r.testonly
                                     && cfg.bool_option(
                                         "experimental_retain_test_configuration_across_testonly",
                                         false,
-                                    ))
-                        }
-                        _ => false,
-                    })
-                    .unwrap_or(false);
+                                    )),
+                            _ => false,
+                        })
+                        .unwrap_or(false);
                 if keep != cfg.keep_test {
                     adj_cfg = cfg.clone();
                     adj_cfg.keep_test = keep;
