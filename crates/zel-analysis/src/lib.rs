@@ -1569,6 +1569,16 @@ impl PartialEq for MapDirectoryExpanderHandle {
 }
 
 impl Eq for MapDirectoryExpanderHandle {}
+/// Specification for a `SourceSymlinkManifest` action (`<executable>.runfiles_manifest`),
+/// resolved at execution time so unresolved symlink artifacts (`is_unresolved_symlink == true`)
+/// record their raw `read_link` targets while regular entries are absolutized against `execroot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSymlinkManifestSpec {
+    pub entries: BTreeMap<String, String>,
+    pub workspace_name: String,
+    pub legacy_external_runfiles: bool,
+}
+
 /// Action specification generated during the Analysis phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAnalysisMetadata {
@@ -1602,6 +1612,12 @@ pub enum ActionAnalysisMetadata {
         inputs: Vec<Artifact>,
         param_file_spec: Option<ParamFileWriteSpec>,
     },
+    SourceSymlinkManifestAction {
+        owner: Label,
+        output: Artifact,
+        spec: SourceSymlinkManifestSpec,
+        inputs: Vec<Artifact>,
+    },
     SymlinkAction {
         owner: Label,
         input_path: PathFragment,
@@ -1631,6 +1647,7 @@ impl ActionAnalysisMetadata {
         match self {
             Self::SpawnAction { mnemonic, .. } => mnemonic.as_str(),
             Self::FileWriteAction { .. } => "FileWrite",
+            Self::SourceSymlinkManifestAction { .. } => "SourceSymlinkManifest",
             Self::SymlinkAction { .. } => "Symlink",
             Self::TemplateExpansionAction { .. } => "TemplateExpand",
             Self::BuildInfoTranslateAction { .. } => "TranslateBuildInfo",
@@ -1642,6 +1659,7 @@ impl ActionAnalysisMetadata {
         match self {
             Self::SpawnAction { owner, .. }
             | Self::FileWriteAction { owner, .. }
+            | Self::SourceSymlinkManifestAction { owner, .. }
             | Self::SymlinkAction { owner, .. }
             | Self::TemplateExpansionAction { owner, .. }
             | Self::BuildInfoTranslateAction { owner, .. } => owner,
@@ -1651,9 +1669,9 @@ impl ActionAnalysisMetadata {
 
     pub fn inputs(&self) -> Vec<Artifact> {
         match self {
-            Self::SpawnAction { inputs, .. } | Self::FileWriteAction { inputs, .. } => {
-                inputs.clone()
-            }
+            Self::SpawnAction { inputs, .. }
+            | Self::FileWriteAction { inputs, .. }
+            | Self::SourceSymlinkManifestAction { inputs, .. } => inputs.clone(),
             Self::TemplateExpansionAction { template, .. } => vec![template.clone()],
             Self::BuildInfoTranslateAction {
                 status_file,
@@ -1677,6 +1695,7 @@ impl ActionAnalysisMetadata {
         match self {
             Self::SpawnAction { outputs, .. } => outputs.clone(),
             Self::FileWriteAction { output, .. }
+            | Self::SourceSymlinkManifestAction { output, .. }
             | Self::SymlinkAction { output, .. }
             | Self::TemplateExpansionAction { output, .. }
             | Self::BuildInfoTranslateAction { output, .. } => vec![output.clone()],
@@ -1741,6 +1760,23 @@ impl ActionAnalysisMetadata {
                     for &(s, e) in &spec.flag_groups {
                         fp.add_i32(s as i32).add_i32(e as i32);
                     }
+                }
+            }
+            Self::SourceSymlinkManifestAction {
+                output,
+                spec,
+                inputs,
+                ..
+            } => {
+                fp.add_str(output.exec_path.path_string())
+                    .add_str(&spec.workspace_name)
+                    .add_bool(spec.legacy_external_runfiles);
+                for (k, v) in &spec.entries {
+                    fp.add_str(k).add_str(v);
+                }
+                for inp in inputs {
+                    fp.add_str(inp.exec_path.path_string())
+                        .add_bool(inp.is_unresolved_symlink);
                 }
             }
             Self::SymlinkAction {
@@ -1857,6 +1893,9 @@ impl ActionAnalysisMetadata {
                     },
                     output.exec_path
                 )
+            }
+            Self::SourceSymlinkManifestAction { owner, .. } => {
+                format!("Creating source manifest for {}", owner.canonical_form())
             }
             Self::SymlinkAction { output, .. } => {
                 format!("Symlinking {}", output.exec_path)

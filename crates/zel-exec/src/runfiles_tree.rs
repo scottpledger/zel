@@ -143,6 +143,96 @@ pub fn encode_source_manifest_iso_8859_1(entries: &BTreeMap<String, String>) -> 
     out
 }
 
+/// Resolves runfiles manifest entries `(runfiles-relative path -> source exec path or "")`
+/// using a caller-provided callback `read_unresolved_target(abs_path, is_declared_unresolved)`
+/// that returns `Some(raw_symlink_target)` when the entry should preserve its raw symlink target
+/// (declared unresolved symlinks or dangling symlinks) rather than absolutizing to `exec_root`.
+pub fn resolve_manifest_entries_with<F>(
+    exec_root: &Path,
+    entries: &BTreeMap<String, String>,
+    unresolved_symlink_paths: &BTreeSet<String>,
+    workspace_name: &str,
+    legacy_external_runfiles: bool,
+    mut read_unresolved_target: F,
+) -> BTreeMap<String, String>
+where
+    F: FnMut(&Path, bool) -> Option<String>,
+{
+    let mut all: BTreeMap<String, String> = entries.clone();
+    // Legacy external runfiles: also expose external repos under `<workspace>/external/<repo>`.
+    if legacy_external_runfiles && !workspace_name.is_empty() {
+        for (k, v) in entries {
+            if !k.starts_with(&format!("{workspace_name}/")) && !k.starts_with('_') {
+                if let Some((repo, rest)) = k.split_once('/') {
+                    all.entry(format!("{workspace_name}/external/{repo}/{rest}"))
+                        .or_insert_with(|| v.clone());
+                }
+            }
+        }
+    }
+    all.into_iter()
+        .map(|(k, v)| {
+            let resolved = if v.is_empty() {
+                String::new()
+            } else {
+                let is_abs = Path::new(&v).is_absolute() || v.starts_with('/');
+                let abs_path = if is_abs {
+                    PathBuf::from(&v)
+                } else {
+                    exec_root.join(&v)
+                };
+                if let Some(raw_target) =
+                    read_unresolved_target(&abs_path, unresolved_symlink_paths.contains(&v))
+                {
+                    raw_target
+                } else if is_abs {
+                    v
+                } else {
+                    abs_path.to_string_lossy().into_owned()
+                }
+            };
+            (k, resolved)
+        })
+        .collect()
+}
+
+/// Resolves runfiles manifest entries against the host filesystem at `exec_root`.
+pub fn resolve_manifest_entries(
+    exec_root: &Path,
+    entries: &BTreeMap<String, String>,
+    unresolved_symlink_paths: &BTreeSet<String>,
+    workspace_name: &str,
+    legacy_external_runfiles: bool,
+) -> BTreeMap<String, String> {
+    resolve_manifest_entries_with(
+        exec_root,
+        entries,
+        unresolved_symlink_paths,
+        workspace_name,
+        legacy_external_runfiles,
+        |abs_path, force_unresolved| {
+            // Unresolved symlinks (`ctx.actions.declare_symlink` + `target_path`) replicate their
+            // raw `read_link` target directly into the runfiles tree and manifest (matching Bazel's
+            // `SymlinkTreeHelper` / `SourceManifestAction`), because relative targets like
+            // `rules_python`'s venv `bin/python3 -> ../../../../../...` only resolve inside
+            // `.runfiles`. Also replicate dangling symlinks when `unresolved_symlink_paths` was
+            // not populated.
+            let is_unresolved = force_unresolved
+                || (std::fs::symlink_metadata(abs_path)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+                    && std::fs::metadata(abs_path).is_err());
+            if is_unresolved {
+                std::fs::read_link(abs_path)
+                    .ok()
+                    .map(|t| t.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        },
+    )
+}
+
 /// Builds the runfiles tree. `entries` maps runfiles-relative paths to execroot-relative (or
 /// absolute) source paths; an empty value creates an empty file. Returns the manifest text written.
 pub fn build_runfiles_tree(
@@ -159,58 +249,21 @@ pub fn build_runfiles_tree(
     manifest_path.push(".runfiles_manifest");
     let input_manifest = PathBuf::from(&manifest_path);
 
-    let resolve_target = |v: &str| -> String {
-        if v.is_empty() {
-            return String::new();
-        }
-        let is_abs = Path::new(v).is_absolute() || v.starts_with('/');
-        let abs_path = if is_abs {
-            PathBuf::from(v)
-        } else {
-            exec_root.join(v)
-        };
-        // Unresolved symlinks (`ctx.actions.declare_symlink` + `target_path`) replicate their
-        // raw `read_link` target directly into the runfiles tree and manifest (matching Bazel's
-        // `SymlinkTreeHelper` / `SourceManifestAction`), because relative targets like
-        // `rules_python`'s venv `bin/python3 -> ../../../../../...` only resolve inside `.runfiles`.
-        // Also replicate dangling symlinks when `unresolved_symlink_paths` was not populated.
-        let is_unresolved = opts.unresolved_symlink_paths.contains(v)
-            || (std::fs::symlink_metadata(&abs_path)
-                .map(|m| m.file_type().is_symlink())
-                .unwrap_or(false)
-                && std::fs::metadata(&abs_path).is_err());
-        if is_unresolved {
-            if let Ok(raw_target) = std::fs::read_link(&abs_path) {
-                return raw_target.to_string_lossy().into_owned();
-            }
-        }
-        if is_abs {
-            v.to_string()
-        } else {
-            abs_path.to_string_lossy().into_owned()
-        }
-    };
-    let mut all: BTreeMap<String, String> = entries.clone();
-    // Legacy external runfiles: also expose external repos under `<workspace>/external/<repo>`.
-    if opts.legacy_external_runfiles {
-        for (k, v) in entries {
-            if !k.starts_with(&format!("{workspace_name}/")) && !k.starts_with('_') {
-                if let Some((repo, rest)) = k.split_once('/') {
-                    all.entry(format!("{workspace_name}/external/{repo}/{rest}"))
-                        .or_insert_with(|| v.clone());
-                }
-            }
-        }
-    }
-    let resolved_entries: BTreeMap<String, String> = all
-        .iter()
-        .map(|(k, v)| (k.clone(), resolve_target(v)))
-        .collect();
+    let resolved_entries = resolve_manifest_entries(
+        exec_root,
+        entries,
+        &opts.unresolved_symlink_paths,
+        workspace_name,
+        opts.legacy_external_runfiles,
+    );
     let manifest_bytes = encode_source_manifest_iso_8859_1(&resolved_entries);
     let manifest = String::from_utf8_lossy(&manifest_bytes).into_owned();
 
-    let input_existed = std::fs::symlink_metadata(&input_manifest).is_ok();
-    if !input_existed {
+    let needs_write = match std::fs::read(&input_manifest) {
+        Ok(existing) => existing != manifest_bytes,
+        Err(_) => true,
+    };
+    if needs_write {
         if let Some(p) = input_manifest.parent() {
             std::fs::create_dir_all(p)?;
         }
@@ -706,6 +759,46 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&rf2_py).unwrap(),
             "#!/bin/sh\necho VENV_OK\n"
+        );
+
+        // 5. Existing `.runfiles_manifest` containing stale `bazel-out` paths is rewritten with
+        //    the resolved raw targets for both `enable_runfiles: true` and `enable_runfiles: false`.
+        let exe3 = exec_root
+            .join("bazel-out/k8-opt-exec/bin/external/rules_pylyglot+/pylyglot/private/bundler3");
+        let stale_manifest_path = PathBuf::from(format!("{}.runfiles_manifest", exe3.display()));
+        std::fs::write(
+            &stale_manifest_path,
+            format!("rules_pylyglot+/pylyglot/private/_bundler.venv/bin/python3 {venv_exec}\n"),
+        )
+        .unwrap();
+        build_runfiles_tree(
+            &exec_root,
+            &exe3,
+            "_main",
+            &entries,
+            &RunfilesTreeOptions {
+                enable_runfiles: false,
+                unresolved_symlink_paths: opts.unresolved_symlink_paths.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let on_disk_mf = std::fs::read_to_string(&stale_manifest_path).unwrap();
+        let in_tree_mf = std::fs::read_to_string(PathBuf::from(format!(
+            "{}.runfiles/MANIFEST",
+            exe3.display()
+        )))
+        .unwrap();
+        assert_eq!(on_disk_mf, in_tree_mf);
+        assert!(
+            on_disk_mf.contains(&format!(
+                "rules_pylyglot+/pylyglot/private/_bundler.venv/bin/python3 {rel_target}\n"
+            )),
+            "expected raw symlink target in manifest:\n{on_disk_mf}"
+        );
+        assert!(
+            !on_disk_mf.contains(venv_exec),
+            "stale bazel-out path should not remain in manifest:\n{on_disk_mf}"
         );
 
         let _ = delete_tree(&root);

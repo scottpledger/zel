@@ -353,6 +353,9 @@ pub struct Action {
     pub java_compile: Option<crate::JavaCompileSpec>,
     /// Inputs of `Action.computeKey` that are not otherwise part of this model (nested sets).
     pub key_info: Option<std::sync::Arc<ActionKeyInfo>>,
+    /// Set for `SourceSymlinkManifest` actions so lowering produces a `SourceSymlinkManifestAction`
+    /// that resolves unresolved symlinks at execution time.
+    pub source_manifest: Option<crate::SourceSymlinkManifestSpec>,
     pub kind: ActionKind,
 }
 
@@ -558,6 +561,7 @@ impl Action {
             unused_inputs_list: None,
             java_compile: None,
             key_info: None,
+            source_manifest: None,
             kind,
         }
     }
@@ -1188,27 +1192,36 @@ impl Action {
                 is_executable,
             } => {
                 if let Some(output) = self.outputs.first() {
-                    let param_file_spec = match content {
-                        FileContent::Args {
-                            args,
-                            format,
-                            flag_groups,
-                        } => Some(crate::ParamFileWriteSpec {
-                            args: args.clone(),
-                            format: *format,
-                            flag_groups: flag_groups.clone(),
-                            flags_only: false,
-                        }),
-                        FileContent::Literal(_) | FileContent::Bytes(_) => None,
-                    };
-                    out.push(ActionAnalysisMetadata::FileWriteAction {
-                        owner: self.owner.clone(),
-                        output: output.clone(),
-                        content: content.render(),
-                        is_executable: *is_executable,
-                        inputs: self.inputs.clone(),
-                        param_file_spec,
-                    });
+                    if let Some(spec) = &self.source_manifest {
+                        out.push(ActionAnalysisMetadata::SourceSymlinkManifestAction {
+                            owner: self.owner.clone(),
+                            output: output.clone(),
+                            spec: spec.clone(),
+                            inputs: self.inputs.clone(),
+                        });
+                    } else {
+                        let param_file_spec = match content {
+                            FileContent::Args {
+                                args,
+                                format,
+                                flag_groups,
+                            } => Some(crate::ParamFileWriteSpec {
+                                args: args.clone(),
+                                format: *format,
+                                flag_groups: flag_groups.clone(),
+                                flags_only: false,
+                            }),
+                            FileContent::Literal(_) | FileContent::Bytes(_) => None,
+                        };
+                        out.push(ActionAnalysisMetadata::FileWriteAction {
+                            owner: self.owner.clone(),
+                            output: output.clone(),
+                            content: content.render(),
+                            is_executable: *is_executable,
+                            inputs: self.inputs.clone(),
+                            param_file_spec,
+                        });
+                    }
                 }
             }
             ActionKind::Symlink {

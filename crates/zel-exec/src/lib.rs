@@ -1872,6 +1872,33 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
                 }
             }
         }
+        ActionAnalysisMetadata::SourceSymlinkManifestAction { spec, inputs, .. } => {
+            p.kind = "source_symlink_manifest".into();
+            p.payload
+                .extend_from_slice(&(spec.workspace_name.len() as u32).to_le_bytes());
+            p.payload.extend_from_slice(spec.workspace_name.as_bytes());
+            p.payload.push(spec.legacy_external_runfiles as u8);
+            p.payload
+                .extend_from_slice(&(spec.entries.len() as u32).to_le_bytes());
+            for (k, v) in &spec.entries {
+                p.payload.extend_from_slice(&(k.len() as u32).to_le_bytes());
+                p.payload.extend_from_slice(k.as_bytes());
+                p.payload.extend_from_slice(&(v.len() as u32).to_le_bytes());
+                p.payload.extend_from_slice(v.as_bytes());
+            }
+            let mut unresolved: Vec<&str> = inputs
+                .iter()
+                .filter(|a| a.is_unresolved_symlink)
+                .map(|a| a.exec_path.path_string())
+                .collect();
+            unresolved.sort_unstable();
+            p.payload
+                .extend_from_slice(&(unresolved.len() as u32).to_le_bytes());
+            for u in unresolved {
+                p.payload.extend_from_slice(&(u.len() as u32).to_le_bytes());
+                p.payload.extend_from_slice(u.as_bytes());
+            }
+        }
         ActionAnalysisMetadata::SymlinkAction { input_path, .. } => {
             p.kind = "symlink".into();
             p.payload = input_path.path_string().as_bytes().to_vec();
@@ -2225,6 +2252,9 @@ pub fn execute_action_with(
                     format!("Writing file {}", output.root_relative_path)
                 }
             }
+            ActionAnalysisMetadata::SourceSymlinkManifestAction { owner, .. } => {
+                format!("Creating source manifest for {owner}")
+            }
             ActionAnalysisMetadata::TemplateExpansionAction { output, .. } => {
                 format!("Expanding template {}", output.root_relative_path)
             }
@@ -2434,6 +2464,74 @@ pub fn execute_action_with(
                 if *is_executable {
                     let _ = fs.chmod(&out_path, 0o755);
                 }
+            }
+        }
+        ActionAnalysisMetadata::SourceSymlinkManifestAction {
+            output,
+            spec,
+            inputs,
+            ..
+        } => {
+            let out_path = execroot.get_relative(&output.exec_path);
+            if let Some(parent) = out_path.parent_directory() {
+                fs.create_directory_and_parents(&parent)?;
+            }
+            let unresolved: std::collections::BTreeSet<String> = inputs
+                .iter()
+                .filter(|a| a.is_unresolved_symlink)
+                .map(|a| a.exec_path.path_string().to_string())
+                .collect();
+            let resolved = crate::runfiles_tree::resolve_manifest_entries_with(
+                std::path::Path::new(execroot.path_string()),
+                &spec.entries,
+                &unresolved,
+                &spec.workspace_name,
+                spec.legacy_external_runfiles,
+                |abs_path, force_unresolved| {
+                    let pf = PathFragment::create(&abs_path.to_string_lossy());
+                    let is_unresolved = force_unresolved
+                        || (fs.stat(&pf, false).is_ok_and(|st| st.is_symlink)
+                            && !fs.exists(&pf, true));
+                    if is_unresolved {
+                        fs.read_symbolic_link(&pf)
+                            .ok()
+                            .map(|t| t.path_string().to_string())
+                    } else {
+                        None
+                    }
+                },
+            );
+            let final_bytes = crate::runfiles_tree::encode_source_manifest_iso_8859_1(&resolved);
+            let host_parent_exists = out_path
+                .parent_directory()
+                .is_some_and(|pd| std::path::Path::new(pd.path_string()).is_dir());
+            if host_parent_exists {
+                let p = std::path::Path::new(out_path.path_string());
+                if let Err(e) = file_write_strategy_write(p, &final_bytes, false) {
+                    return Ok(fail_ext(
+                        vec![format!(
+                            "ERROR: {loc}: Creating source manifest {} failed: {e}",
+                            output.root_relative_path
+                        )],
+                        36,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                    ));
+                }
+            } else if let Err(e) = fs.write_file(&out_path, &final_bytes) {
+                return Ok(fail_ext(
+                    vec![format!(
+                        "ERROR: {loc}: Creating source manifest {} failed: {e}",
+                        output.root_relative_path
+                    )],
+                    36,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    true,
+                ));
             }
         }
         ActionAnalysisMetadata::SymlinkAction {

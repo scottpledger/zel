@@ -435,3 +435,206 @@ fn tool_runfiles_unresolved_relative_symlink_executes_in_sandbox() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[cfg(unix)]
+#[test]
+fn source_symlink_manifest_action_records_unresolved_targets_and_caches() {
+    use std::collections::BTreeSet;
+    use zel_analysis::SourceSymlinkManifestSpec;
+
+    let root = std::env::temp_dir().join(format!("zel-exec-src-mf-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let execroot_dir = root.join("execroot/_main");
+    std::fs::create_dir_all(execroot_dir.join("pkg")).unwrap();
+    std::fs::create_dir_all(execroot_dir.join("bazel-out/k8-fastbuild/bin/pkg")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let execroot_dir = std::fs::canonicalize(&execroot_dir).unwrap();
+
+    // Regular source file and a non-dangling source symlink.
+    std::fs::write(execroot_dir.join("pkg/real.txt"), "hello\n").unwrap();
+    std::os::unix::fs::symlink("real.txt", execroot_dir.join("pkg/src_sym.txt")).unwrap();
+    let exe_rel = "bazel-out/k8-fastbuild/bin/pkg/tool";
+    std::fs::write(execroot_dir.join(exe_rel), "#!/bin/sh\n").unwrap();
+
+    let execroot = PathFragment::create(execroot_dir.to_str().unwrap());
+    let fs = LocalFileSystem::default();
+    let cache = CompactPersistentActionCache::new();
+    let reporter = Reporter::new();
+    let owner = Label::parse_canonical("//pkg:tool").unwrap();
+
+    let real_art = Artifact::source(PathFragment::create("pkg/real.txt"), owner.clone());
+    let src_sym_art = Artifact::source(PathFragment::create("pkg/src_sym.txt"), owner.clone());
+    let mut unres_rel_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/sub/unres_rel"),
+        owner.clone(),
+    );
+    unres_rel_art.is_unresolved_symlink = true;
+    let mut unres_abs_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/sub/unres_abs"),
+        owner.clone(),
+    );
+    unres_abs_art.is_unresolved_symlink = true;
+
+    let mf_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/tool.runfiles_manifest"),
+        owner.clone(),
+    );
+
+    let sym_rel_act = ActionAnalysisMetadata::SymlinkAction {
+        owner: owner.clone(),
+        input_path: PathFragment::create("../real.txt"),
+        output: unres_rel_art.clone(),
+        is_executable: false,
+    };
+    let sym_abs_act = ActionAnalysisMetadata::SymlinkAction {
+        owner: owner.clone(),
+        input_path: PathFragment::create("/etc/hosts"),
+        output: unres_abs_art.clone(),
+        is_executable: false,
+    };
+
+    let mut entries = BTreeMap::new();
+    entries.insert("_main/pkg/real.txt".into(), "pkg/real.txt".into());
+    entries.insert("_main/pkg/src_sym.txt".into(), "pkg/src_sym.txt".into());
+    entries.insert(
+        "_main/pkg/sub/unres_rel".into(),
+        unres_rel_art.exec_path.path_string().to_string(),
+    );
+    entries.insert(
+        "_main/pkg/sub/unres_abs".into(),
+        unres_abs_art.exec_path.path_string().to_string(),
+    );
+    entries.insert("_main/pkg/tool".into(), exe_rel.into());
+
+    let mf_act = ActionAnalysisMetadata::SourceSymlinkManifestAction {
+        owner: owner.clone(),
+        output: mf_art.clone(),
+        spec: SourceSymlinkManifestSpec {
+            entries: entries.clone(),
+            workspace_name: "_main".into(),
+            legacy_external_runfiles: false,
+        },
+        inputs: vec![
+            real_art.clone(),
+            src_sym_art.clone(),
+            unres_rel_art.clone(),
+            unres_abs_art.clone(),
+        ],
+    };
+
+    // Run symlink + SourceSymlinkManifest actions.
+    let acts = [&sym_rel_act, &sym_abs_act, &mf_act];
+    let sched = zel_exec::execute_actions(
+        &acts,
+        2,
+        false,
+        &execroot,
+        &fs,
+        &cache,
+        &reporter,
+        &ExecOptions::default(),
+    );
+    assert!(sched.cycle.is_none(), "{:?}", sched.cycle);
+    assert_eq!(sched.failed(), 0, "{:?}", sched.actions);
+
+    let mf_abs = execroot_dir.join(mf_art.exec_path.path_string());
+    let mf_text = std::fs::read_to_string(&mf_abs).unwrap();
+    // Unresolved symlinks record raw read_link targets; regular/non-dangling files record abs paths.
+    assert!(
+        mf_text.contains("_main/pkg/sub/unres_rel ../real.txt\n"),
+        "expected raw relative target:\n{mf_text}"
+    );
+    assert!(
+        mf_text.contains("_main/pkg/sub/unres_abs /etc/hosts\n"),
+        "expected raw absolute target:\n{mf_text}"
+    );
+    assert!(
+        mf_text.contains(&format!(
+            "_main/pkg/real.txt {}\n",
+            execroot_dir.join("pkg/real.txt").display()
+        )),
+        "expected abs path for regular file:\n{mf_text}"
+    );
+    assert!(
+        mf_text.contains(&format!(
+            "_main/pkg/src_sym.txt {}\n",
+            execroot_dir.join("pkg/src_sym.txt").display()
+        )),
+        "expected abs path for non-dangling source symlink:\n{mf_text}"
+    );
+    assert!(
+        !mf_text.contains("bazel-out/k8-fastbuild/bin/pkg/sub/unres_rel"),
+        "dangling bazel-out path must not appear in manifest:\n{mf_text}"
+    );
+
+    // Building the runfiles tree (`enable_runfiles: false` and `true`) preserves the exact
+    // manifest bytes so a subsequent SourceSymlinkManifestAction hits the action cache and
+    // never overwrites the manifest with stale paths.
+    let mut unresolved_paths = BTreeSet::new();
+    unresolved_paths.insert(unres_rel_art.exec_path.path_string().to_string());
+    unresolved_paths.insert(unres_abs_art.exec_path.path_string().to_string());
+    for enable_runfiles in [false, true] {
+        zel_exec::runfiles_tree::build_runfiles_tree(
+            &execroot_dir,
+            &execroot_dir.join(exe_rel),
+            "_main",
+            &entries,
+            &zel_exec::runfiles_tree::RunfilesTreeOptions {
+                enable_runfiles,
+                unresolved_symlink_paths: unresolved_paths.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let in_tree_mf = std::fs::read_to_string(
+            execroot_dir.join("bazel-out/k8-fastbuild/bin/pkg/tool.runfiles/MANIFEST"),
+        )
+        .unwrap();
+        assert_eq!(in_tree_mf, mf_text);
+    }
+
+    // Re-running must hit the action cache (0 executed, 3 cache hits).
+    let sched2 = zel_exec::execute_actions(
+        &acts,
+        2,
+        false,
+        &execroot,
+        &fs,
+        &cache,
+        &reporter,
+        &ExecOptions::default(),
+    );
+    assert_eq!(sched2.failed(), 0, "{:?}", sched2.actions);
+    assert_eq!(sched2.cache_hits(), 3, "{:?}", sched2.actions);
+
+    // Changing the unresolved symlink target invalidates SourceSymlinkManifestAction and updates
+    // the on-disk manifest to the new raw target.
+    let sym_rel_act_v2 = ActionAnalysisMetadata::SymlinkAction {
+        owner,
+        input_path: PathFragment::create("../other.txt"),
+        output: unres_rel_art,
+        is_executable: false,
+    };
+    let acts_v2 = [&sym_rel_act_v2, &sym_abs_act, &mf_act];
+    let sched3 = zel_exec::execute_actions(
+        &acts_v2,
+        2,
+        false,
+        &execroot,
+        &fs,
+        &cache,
+        &reporter,
+        &ExecOptions::default(),
+    );
+    assert_eq!(sched3.failed(), 0, "{:?}", sched3.actions);
+    let mf_text_v2 = std::fs::read_to_string(&mf_abs).unwrap();
+    assert!(
+        mf_text_v2.contains("_main/pkg/sub/unres_rel ../other.txt\n"),
+        "expected updated raw relative target:\n{mf_text_v2}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
