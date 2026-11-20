@@ -113,6 +113,12 @@ where
     )
 }
 
+fn strip_ipv6_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
 impl TcpConnector {
     pub fn new(host: String, port: u16, connect_timeout: Duration) -> Self {
         Self {
@@ -128,11 +134,7 @@ impl TcpConnector {
         connect_timeout: Duration,
         io_timeout: Option<Duration>,
     ) -> io::Result<Transport> {
-        let lookup_host = self
-            .host
-            .strip_prefix('[')
-            .and_then(|h| h.strip_suffix(']'))
-            .unwrap_or(self.host.as_str());
+        let lookup_host = strip_ipv6_brackets(&self.host);
         let addrs = (lookup_host, self.port).to_socket_addrs()?;
         connect_addrs(addrs, connect_timeout, io_timeout)
     }
@@ -153,10 +155,11 @@ impl Connector for TcpConnector {
                 return ov.clone();
             }
         }
-        if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]:{}", self.host, self.port)
+        let bare = strip_ipv6_brackets(&self.host);
+        if bare.contains(':') {
+            format!("[{bare}]:{}", self.port)
         } else {
-            format!("{}:{}", self.host, self.port)
+            format!("{bare}:{}", self.port)
         }
     }
 }
@@ -343,19 +346,31 @@ fn strip_port_from_authority(auth: &str) -> &str {
     }
 }
 
+fn format_openssl_connect_target(host: &str, port: u16) -> (&str, String) {
+    let lookup_host = strip_ipv6_brackets(host);
+    let target = if lookup_host.contains(':') {
+        format!("[{lookup_host}]:{port}")
+    } else {
+        format!("{lookup_host}:{port}")
+    };
+    (lookup_host, target)
+}
+
+fn resolve_verify_peer<'a>(host: &'a str, authority_override: Option<&'a str>) -> &'a str {
+    authority_override
+        .filter(|s| !s.is_empty())
+        .map(strip_port_from_authority)
+        .map(strip_ipv6_brackets)
+        .unwrap_or_else(|| strip_ipv6_brackets(host))
+}
+
 impl Connector for TlsConnector {
     fn connect(&self) -> io::Result<Transport> {
         self.tls
             .validate()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-        let verify_peer = self
-            .tls
-            .authority_override
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(strip_port_from_authority)
-            .unwrap_or(self.host.as_str());
+        let verify_peer = resolve_verify_peer(&self.host, self.tls.authority_override.as_deref());
 
         let mut cmd = Command::new("openssl");
         cmd.arg("s_client")
@@ -368,11 +383,8 @@ impl Connector for TlsConnector {
             // Ensure hostname resolves first so DNS failures surface immediately and cleanly,
             // while passing the host to `openssl s_client` so OpenSSL can fall back across all
             // resolved addresses on dual-stack hosts.
-            let lookup_host = self
-                .host
-                .strip_prefix('[')
-                .and_then(|h| h.strip_suffix(']'))
-                .unwrap_or(self.host.as_str());
+            let (lookup_host, connect_target) =
+                format_openssl_connect_target(&self.host, self.port);
             let mut addrs = (lookup_host, self.port).to_socket_addrs()?;
             if addrs.next().is_none() {
                 return Err(io::Error::new(
@@ -380,13 +392,7 @@ impl Connector for TlsConnector {
                     "no addresses resolved",
                 ));
             }
-            let connect_host = if lookup_host.contains(':') {
-                format!("[{lookup_host}]")
-            } else {
-                lookup_host.to_string()
-            };
-            cmd.arg("-connect")
-                .arg(format!("{connect_host}:{}", self.port));
+            cmd.arg("-connect").arg(connect_target);
         }
 
         if let Ok(ip) = verify_peer.parse::<IpAddr>() {
@@ -465,10 +471,11 @@ impl Connector for TlsConnector {
                 return ov.clone();
             }
         }
-        let host_fmt = if self.host.contains(':') && !self.host.starts_with('[') {
-            format!("[{}]", self.host)
+        let bare = strip_ipv6_brackets(&self.host);
+        let host_fmt = if bare.contains(':') {
+            format!("[{bare}]")
         } else {
-            self.host.clone()
+            bare.to_string()
         };
         if self.port == 443 {
             host_fmt
@@ -744,6 +751,26 @@ mod tests {
         };
         assert!(half.validate().unwrap_err().contains("together"));
         let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            format_openssl_connect_target("example.com", 443),
+            ("example.com", "example.com:443".into())
+        );
+        assert_eq!(
+            format_openssl_connect_target("::1", 8443),
+            ("::1", "[::1]:8443".into())
+        );
+        assert_eq!(
+            format_openssl_connect_target("[::1]", 8443),
+            ("::1", "[::1]:8443".into())
+        );
+        assert_eq!(resolve_verify_peer("[::1]", None), "::1");
+        assert!(resolve_verify_peer("[::1]", None).parse::<IpAddr>().is_ok());
+        assert_eq!(resolve_verify_peer("127.0.0.1", Some("[::1]:9443")), "::1");
+        assert_eq!(
+            resolve_verify_peer("127.0.0.1", Some("override.example.com:9443")),
+            "override.example.com"
+        );
     }
 
     #[cfg(unix)]
