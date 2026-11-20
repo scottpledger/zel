@@ -4884,6 +4884,13 @@ mod test_bep_outputs_tests {
             Err(e) => panic!("{e}"),
         };
         let port = listener.local_addr().unwrap().port();
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SKIPPED: loopback connect not permitted ({e})");
+                return;
+            }
+            panic!("{e}");
+        }
         let reapi = FakeReapiServer::new();
         reapi.serve_tcp(listener);
 

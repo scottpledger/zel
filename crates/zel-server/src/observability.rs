@@ -2524,7 +2524,21 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
         let reapi_port = reapi_listener.local_addr().unwrap().port();
-        let bes_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", reapi_port)) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SKIPPED: loopback connect not permitted ({e})");
+                return;
+            }
+            panic!("{e}");
+        }
+        let bes_listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIPPED: loopback sockets not permitted ({e})");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
         let bes_port = bes_listener.local_addr().unwrap().port();
 
         let reapi = zel_remote::fake_server::FakeReapiServer::new();
@@ -2661,8 +2675,7 @@ mod tests {
 
             let reapi_headers = reapi
                 .last_headers("GetActionResult")
-                .or_else(|| reapi.last_headers("FindMissingBlobs"))
-                .unwrap_or_else(|| panic!("[{label}] no REAPI RPC headers recorded"));
+                .unwrap_or_else(|| panic!("[{label}] no REAPI GetActionResult headers recorded"));
             let reapi_rm = decode_request_metadata(&reapi_headers)
                 .unwrap_or_else(|| panic!("[{label}] missing REAPI RequestMetadata header"));
             assert_eq!(
