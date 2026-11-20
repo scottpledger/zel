@@ -4,6 +4,7 @@
 use std::{fs, io::Write, path::Path};
 
 fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) {
+    println!("cargo:rerun-if-changed={}", dir.display());
     let mut ents: Vec<_> = fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())

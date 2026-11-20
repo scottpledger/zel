@@ -51,6 +51,7 @@ fn cc_native(
         "solib_symlink_action" => cc_solib_symlink_action(st, pos, kw),
         "absolute_symlink" => cc_absolute_symlink(st, pos, kw),
         "check_toplevel" => Ok(Value::None),
+        "is_tree_artifact" => cc_is_tree_artifact(pos, kw),
         "expand_and_tokenize" => cc_expand_and_tokenize(st, pos, kw),
         "per_file_copts" | "collect_per_file_lto_backend_opts" => Ok(mk_list(vec![])),
         _ => return None,
@@ -366,6 +367,35 @@ fn cc_absolute_symlink(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<String, 
     Ok(Value::None)
 }
 
+/// `CcStarlarkInternal.isTreeArtifact`: `@Param(name = "artifact", allowedTypes = {Artifact.class})`
+/// (positional-only, mandatory `File`).
+fn cc_is_tree_artifact(pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
+    let first = match pos.first() {
+        Some(v) => Some(want_file(v, "is_tree_artifact", "artifact")?),
+        None => None,
+    };
+    if let Some(k) = kw.keys().next() {
+        if k == "artifact" {
+            return err(
+                "is_tree_artifact() got named argument for positional-only parameter 'artifact'",
+            );
+        }
+        return err(format!(
+            "is_tree_artifact() got unexpected keyword argument '{k}'"
+        ));
+    }
+    if pos.len() > 1 {
+        return err(format!(
+            "is_tree_artifact() accepts no more than 1 positional argument but got {}",
+            pos.len()
+        ));
+    }
+    let Some(artifact) = first else {
+        return err("is_tree_artifact() missing 1 required positional argument: artifact");
+    };
+    Ok(Value::Bool(artifact.is_tree_artifact))
+}
+
 /// `CcStarlarkInternal.expandAndTokenize`: make-variable + `$(location)` expansion, then shell
 /// tokenization of every flag.
 fn cc_expand_and_tokenize(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
@@ -403,4 +433,79 @@ fn cc_expand_and_tokenize(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Strin
         }
     }
     Ok(mk_list(out))
+}
+
+#[cfg(test)]
+mod cc_native_tests {
+    use super::*;
+    use crate::ArtifactRoot;
+
+    #[test]
+    fn is_tree_artifact_matches_bazel_positional_only_signature() {
+        let owner = Label::parse_canonical("//pkg:target").unwrap();
+        let reg = Artifact::derived_in_root(
+            "k8-fastbuild",
+            ArtifactRoot::Bin,
+            PathFragment::create("pkg/file.cc"),
+            owner.clone(),
+        );
+        let mut tree = Artifact::derived_in_root(
+            "k8-fastbuild",
+            ArtifactRoot::Bin,
+            PathFragment::create("pkg/tree_dir"),
+            owner,
+        );
+        tree.is_tree_artifact = true;
+
+        let reg_val = file_value(&reg);
+        let tree_val = file_value(&tree);
+
+        assert_eq!(
+            cc_is_tree_artifact(&[tree_val.clone()], &BTreeMap::new()).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            cc_is_tree_artifact(&[reg_val.clone()], &BTreeMap::new()).unwrap(),
+            Value::Bool(false)
+        );
+
+        // Bazel 9.3.2 CcStarlarkInternal.isTreeArtifact declares @Param(name = "artifact")
+        // with default named = false (positional-only), so `artifact = ...` must fail rather
+        // than silently returning False.
+        let mut named_artifact = BTreeMap::new();
+        named_artifact.insert("artifact".to_string(), tree_val.clone());
+        let err_named = cc_is_tree_artifact(&[], &named_artifact).unwrap_err();
+        assert_eq!(
+            err_named.0,
+            "is_tree_artifact() got named argument for positional-only parameter 'artifact'"
+        );
+
+        let mut named_file = BTreeMap::new();
+        named_file.insert("file".to_string(), tree_val.clone());
+        let err_file = cc_is_tree_artifact(&[], &named_file).unwrap_err();
+        assert_eq!(
+            err_file.0,
+            "is_tree_artifact() got unexpected keyword argument 'file'"
+        );
+
+        let err_missing = cc_is_tree_artifact(&[], &BTreeMap::new()).unwrap_err();
+        assert_eq!(
+            err_missing.0,
+            "is_tree_artifact() missing 1 required positional argument: artifact"
+        );
+
+        let err_extra = cc_is_tree_artifact(&[tree_val, reg_val], &BTreeMap::new()).unwrap_err();
+        assert_eq!(
+            err_extra.0,
+            "is_tree_artifact() accepts no more than 1 positional argument but got 2"
+        );
+
+        let err_type =
+            cc_is_tree_artifact(&[Value::String("not_a_file".into())], &BTreeMap::new())
+                .unwrap_err();
+        assert_eq!(
+            err_type.0,
+            "in call to is_tree_artifact(), parameter 'artifact' got value of type 'string', want 'File'"
+        );
+    }
 }

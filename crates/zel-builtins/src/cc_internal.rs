@@ -264,15 +264,34 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
             Ok(Value::Struct(Arc::new(StructValue::new(f))))
         }
         "is_tree_artifact" => {
-            let a = kwarg(&pos, &kw, 0, "artifact").unwrap_or(Value::None);
-            Ok(Value::Bool(match &a {
-                Value::Struct(s) => s
-                    .fields
-                    .get("is_directory")
-                    .map(|v| v.is_truthy())
-                    .unwrap_or(false),
-                _ => false,
-            }))
+            if let Some(v) = pos.first() {
+                if !matches!(v, Value::Host(k, _) if k == "file") {
+                    return err(format!(
+                        "in call to is_tree_artifact(), parameter 'artifact' got value of type '{}', want 'File'",
+                        v.type_name()
+                    ));
+                }
+            }
+            if let Some(k) = kw.keys().next() {
+                if k == "artifact" {
+                    return err(
+                        "is_tree_artifact() got named argument for positional-only parameter 'artifact'",
+                    );
+                }
+                return err(format!(
+                    "is_tree_artifact() got unexpected keyword argument '{k}'"
+                ));
+            }
+            if pos.len() > 1 {
+                return err(format!(
+                    "is_tree_artifact() accepts no more than 1 positional argument but got {}",
+                    pos.len()
+                ));
+            }
+            if pos.is_empty() {
+                return err("is_tree_artifact() missing 1 required positional argument: artifact");
+            }
+            err("cc_internal.is_tree_artifact requires an analysis-time File")
         }
         "cc_toolchain_variables" => {
             let vars = kwarg(&pos, &kw, 0, "vars").unwrap_or(Value::None);
@@ -468,5 +487,40 @@ mod tests {
             };
             assert!(l.lock().unwrap().is_frozen());
         }
+    }
+
+    #[test]
+    fn is_tree_artifact_enforces_positional_only_file_parameter() {
+        let mut kw_artifact = Kwargs::new();
+        kw_artifact.insert("artifact".into(), Value::None);
+        assert_eq!(
+            call("is_tree_artifact", vec![], kw_artifact).unwrap_err().0,
+            "is_tree_artifact() got named argument for positional-only parameter 'artifact'"
+        );
+
+        let mut kw_unknown = Kwargs::new();
+        kw_unknown.insert("file".into(), Value::None);
+        assert_eq!(
+            call("is_tree_artifact", vec![], kw_unknown).unwrap_err().0,
+            "is_tree_artifact() got unexpected keyword argument 'file'"
+        );
+
+        assert_eq!(
+            call("is_tree_artifact", vec![], Kwargs::new())
+                .unwrap_err()
+                .0,
+            "is_tree_artifact() missing 1 required positional argument: artifact"
+        );
+
+        assert_eq!(
+            call(
+                "is_tree_artifact",
+                vec![Value::String("x".into())],
+                Kwargs::new()
+            )
+            .unwrap_err()
+            .0,
+            "in call to is_tree_artifact(), parameter 'artifact' got value of type 'string', want 'File'"
+        );
     }
 }

@@ -2695,3 +2695,1083 @@ bad_empty_rule(name = "bad_rule")
         "{err}"
     );
 }
+
+#[test]
+fn filegroup_missing_output_group_returns_empty_and_collects_present_members() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _no_iface_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    other = ctx.actions.declare_file(ctx.label.name + ".other")
+    ctx.actions.write(out, "out")
+    ctx.actions.write(other, "other")
+    return [
+        DefaultInfo(files = depset([out])),
+        OutputGroupInfo(other_group = depset([other])),
+    ]
+
+def _with_iface_impl(ctx):
+    dll = ctx.actions.declare_file(ctx.label.name + ".dll")
+    iflib = ctx.actions.declare_file(ctx.label.name + ".if.lib")
+    ctx.actions.write(dll, "dll")
+    ctx.actions.write(iflib, "iflib")
+    return [
+        DefaultInfo(files = depset([dll])),
+        OutputGroupInfo(interface_library = depset([iflib])),
+    ]
+
+no_iface = rule(implementation = _no_iface_impl)
+with_iface = rule(implementation = _with_iface_impl)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "no_iface", "with_iface")
+no_iface(name = "plain")
+with_iface(name = "dll_target")
+filegroup(
+    name = "missing_only",
+    srcs = [":plain"],
+    output_group = "interface_library",
+)
+filegroup(
+    name = "mixed_srcs",
+    srcs = [":plain", ":dll_target"],
+    output_group = "interface_library",
+)
+"#,
+        ),
+    ]);
+
+    let missing = ws.analyze("//:missing_only").unwrap();
+    assert!(
+        missing.default_info.files.is_empty(),
+        "expected empty files for missing output_group, got {:?}",
+        missing.default_info.files
+    );
+
+    let mixed = ws.analyze("//:mixed_srcs").unwrap();
+    let paths: Vec<String> = mixed
+        .default_info
+        .files
+        .iter()
+        .map(|f| f.root_relative_path.path_string().to_string())
+        .collect();
+    assert_eq!(paths, vec!["dll_target.if.lib"]);
+}
+
+#[test]
+fn filegroup_rejects_internal_output_group_suffix() {
+    let ws = Ws::new(&[
+        ("a.txt", "hello"),
+        (
+            "BUILD",
+            r#"
+filegroup(
+    name = "fg_hidden",
+    srcs = [],
+    output_group = "_hidden_top_level_INTERNAL_",
+)
+filegroup(
+    name = "fg_bare_suffix",
+    srcs = ["a.txt"],
+    output_group = "_INTERNAL_",
+)
+"#,
+        ),
+    ]);
+
+    let err_hidden = ws.analyze("//:fg_hidden").unwrap_err();
+    assert!(
+        err_hidden.contains(
+            "in output_group attribute of filegroup rule //:fg_hidden: Output group _hidden_top_level_INTERNAL_ is not permitted for reference in filegroups."
+        ),
+        "unexpected error: {err_hidden}"
+    );
+
+    let err_bare = ws.analyze("//:fg_bare_suffix").unwrap_err();
+    assert!(
+        err_bare.contains(
+            "in output_group attribute of filegroup rule //:fg_bare_suffix: Output group _INTERNAL_ is not permitted for reference in filegroups."
+        ),
+        "unexpected error: {err_bare}"
+    );
+}
+
+const CC_COMMON_TEST_HELPERS_BZL: &str = r#"
+def make_cc_toolchain(
+        ctx,
+        *,
+        cpu,
+        compiler = "clang",
+        feature_names = [],
+        enabled_features = [],
+        action_configs = [],
+        artifact_name_patterns = [],
+        tools_directory = "external/test_cc_tc",
+        if_so_builder = None):
+    features = [
+        struct(
+            name = fname,
+            enabled = fname in enabled_features,
+            flag_sets = [],
+            env_sets = [],
+            requires = [],
+            implies = [],
+            provides = [],
+        )
+        for fname in feature_names
+    ]
+    config_info = struct(
+        _features_DO_NOT_USE = features,
+        _action_configs_DO_NOT_USE = action_configs,
+        _artifact_name_patterns_DO_NOT_USE = artifact_name_patterns,
+    )
+    toolchain_features = cc_common.cc_toolchain_features(
+        toolchain_config_info = config_info,
+        tools_directory = tools_directory,
+    )
+    solib_dir = "_solib_" + cpu
+    return cc_common.CcToolchainInfo(
+        needs_pic_for_dynamic_libraries = lambda *, feature_configuration: cc_common.is_enabled(
+            feature_configuration = feature_configuration,
+            feature_name = "supports_pic",
+        ),
+        built_in_include_directories = [],
+        all_files = depset(),
+        static_runtime_lib = lambda *, feature_configuration: depset(),
+        dynamic_runtime_lib = lambda *, feature_configuration: depset(),
+        sysroot = None,
+        compiler = compiler,
+        libc = "local",
+        cpu = cpu,
+        target_gnu_system_name = cpu,
+        toolchain_id = "test-" + cpu,
+        dynamic_runtime_solib_dir = ctx.bin_dir.path + "/" + solib_dir,
+        objcopy_executable = "",
+        compiler_executable = "",
+        preprocessor_executable = "",
+        nm_executable = "",
+        objdump_executable = "",
+        ar_executable = "",
+        strip_executable = "",
+        ld_executable = "",
+        gcov_executable = "",
+        generate_modmap = None,
+        _as_files = depset(),
+        _ar_files = depset(),
+        _strip_files = depset(),
+        _tool_paths = {},
+        _solib_dir = solib_dir,
+        _linker_files = depset(),
+        _coverage_files = depset(),
+        _fdo_context = struct(
+            branch_fdo_profile = None,
+            propeller_optimize_info = None,
+            memprof_profile_artifact = None,
+            afdo_instrument = None,
+            cs_fdo_instrument = None,
+        ),
+        _compiler_files = depset(),
+        _dwp_files = depset(),
+        _builtin_include_files = [],
+        _legacy_cc_flags_make_variable = "",
+        _additional_make_variables = {},
+        _all_files_including_libc = depset(),
+        _abi = "local",
+        _abi_glibc_version = "local",
+        _crosstool_top_path = tools_directory,
+        _build_info_files = None,
+        _supports_header_parsing = False,
+        _supports_param_files = False,
+        _toolchain_features = toolchain_features,
+        _toolchain_label = ctx.label,
+        _cpp_configuration = ctx.fragments.cpp,
+        _link_dynamic_library_tool = None,
+        _grep_includes = None,
+        _if_so_builder = if_so_builder,
+        _is_tool_configuration = False,
+        _is_sibling_repository_layout = False,
+        _stamp_binaries = False,
+        _static_runtime_lib_depset = None,
+        _dynamic_runtime_lib_depset = None,
+        _compiler_files_without_includes = depset(),
+        _build_variables_dict = {},
+        _build_variables = cc_common.cc_toolchain_variables(vars = {}),
+        _allowlist_for_layering_check = None,
+        _cc_info = struct(compilation_context = cc_common.create_compilation_context()),
+        _objcopy_files = depset(),
+        _aggregate_ddi = None,
+        _extra_allowlisted_feature_layering_check_macros = [],
+        _force_layering_check_features = False,
+    )
+
+WINDOWS_ARTIFACT_PATTERNS = [
+    struct(category_name = "object_file", prefix = "", extension = ".obj"),
+    struct(category_name = "static_library", prefix = "", extension = ".lib"),
+    struct(category_name = "alwayslink_static_library", prefix = "", extension = ".lo.lib"),
+    struct(category_name = "executable", prefix = "", extension = ".exe"),
+    struct(category_name = "dynamic_library", prefix = "", extension = ".dll"),
+    struct(category_name = "interface_library", prefix = "", extension = ".if.lib"),
+]
+"#;
+
+struct LocalWs {
+    dir: std::path::PathBuf,
+    root: PathFragment,
+}
+
+impl LocalWs {
+    fn new(tag: &str, files: &[(&str, &str)]) -> Self {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "zel-cc-common-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (rel, contents) in files {
+            let full = dir.join(rel);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full, contents.as_bytes()).unwrap();
+        }
+        let root = PathFragment::create(&dir.to_string_lossy());
+        Self { dir, root }
+    }
+
+    fn resolver_with(
+        &self,
+        cfg: BuildConfigurationKey,
+        acfg: AnalysisConfig,
+    ) -> (Arc<TargetResolver>, BuildConfigurationKey) {
+        let lc = LoaderConfig::new(
+            Arc::new(zel_vfs::LocalFileSystem::default()),
+            Arc::new(SimpleRepoResolver::new(self.root.clone())),
+        );
+        let loader = PackageLoader::new(lc);
+        assert_eq!(loader.builtins_error(), None);
+        (TargetResolver::new(loader, acfg), cfg)
+    }
+
+    fn analyze(&self, label: &str) -> Result<Arc<ConfiguredTarget>, String> {
+        let (r, cfg) = self.resolver_with(
+            BuildConfigurationKey::target("k8", "fastbuild"),
+            AnalysisConfig::new(),
+        );
+        r.analyze(&Label::parse_canonical(label).unwrap(), &cfg)
+    }
+}
+
+impl Drop for LocalWs {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[test]
+fn builtin_cc_common_create_library_to_link_unix_and_windows() {
+    let ws = LocalWs::new(
+        "ltl",
+        &[
+            ("tc_helpers.bzl", CC_COMMON_TEST_HELPERS_BZL),
+            (
+                "defs.bzl",
+                r#"
+load(":tc_helpers.bzl", "WINDOWS_ARTIFACT_PATTERNS", "make_cc_toolchain")
+
+LibResultInfo = provider(fields = [
+    "dyn_short",
+    "resolved_dyn_short",
+    "iface_short",
+    "resolved_iface_short",
+    "alwayslink",
+])
+
+def _unix_impl(ctx):
+    tc = make_cc_toolchain(
+        ctx,
+        cpu = "k8",
+        feature_names = ["supports_dynamic_linker", "supports_interface_shared_libraries"],
+        enabled_features = ["supports_dynamic_linker", "supports_interface_shared_libraries"],
+    )
+    fc = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = tc,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features,
+    )
+    static_a = ctx.actions.declare_file("libfoo.a")
+    dyn_so = ctx.actions.declare_file("libfoo.so")
+    iface_so = ctx.actions.declare_file("libfoo.ifso")
+    ctx.actions.write(static_a, "a")
+    ctx.actions.write(dyn_so, "so")
+    ctx.actions.write(iface_so, "ifso")
+
+    ltl = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        static_library = static_a,
+        dynamic_library = dyn_so,
+        interface_library = iface_so,
+        alwayslink = True,
+    )
+    return [
+        DefaultInfo(files = depset([ltl.dynamic_library, ltl.interface_library])),
+        LibResultInfo(
+            dyn_short = ltl.dynamic_library.short_path,
+            resolved_dyn_short = ltl.resolved_symlink_dynamic_library.short_path,
+            iface_short = ltl.interface_library.short_path,
+            resolved_iface_short = ltl.resolved_symlink_interface_library.short_path,
+            alwayslink = ltl.alwayslink,
+        ),
+    ]
+
+def _win_impl(ctx):
+    tc = make_cc_toolchain(
+        ctx,
+        cpu = "x64_windows",
+        compiler = "msvc-cl",
+        feature_names = [
+            "targets_windows",
+            "supports_dynamic_linker",
+            "supports_interface_shared_libraries",
+        ],
+        enabled_features = [
+            "targets_windows",
+            "supports_dynamic_linker",
+            "supports_interface_shared_libraries",
+        ],
+        artifact_name_patterns = WINDOWS_ARTIFACT_PATTERNS,
+    )
+    fc = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = tc,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features,
+    )
+    dll = ctx.actions.declare_file("foo.dll")
+    iflib = ctx.actions.declare_file("foo.if.lib")
+    ctx.actions.write(dll, "dll")
+    ctx.actions.write(iflib, "iflib")
+
+    ltl = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        dynamic_library = dll,
+        interface_library = iflib,
+    )
+    return [
+        DefaultInfo(files = depset([ltl.dynamic_library, ltl.interface_library])),
+        LibResultInfo(
+            dyn_short = ltl.dynamic_library.short_path,
+            resolved_dyn_short = "NONE" if ltl.resolved_symlink_dynamic_library == None else ltl.resolved_symlink_dynamic_library.short_path,
+            iface_short = ltl.interface_library.short_path,
+            resolved_iface_short = "NONE" if ltl.resolved_symlink_interface_library == None else ltl.resolved_symlink_interface_library.short_path,
+            alwayslink = ltl.alwayslink,
+        ),
+    ]
+
+def _bad_ext_impl(ctx):
+    tc = make_cc_toolchain(
+        ctx,
+        cpu = "k8",
+        feature_names = ["supports_dynamic_linker"],
+        enabled_features = ["supports_dynamic_linker"],
+    )
+    fc = cc_common.configure_features(ctx = ctx, cc_toolchain = tc)
+    bad = ctx.actions.declare_file("libfoo.invalid_ext")
+    ctx.actions.write(bad, "bad")
+    cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        dynamic_library = bad,
+    )
+    return []
+
+unix_ltl = rule(implementation = _unix_impl, fragments = ["cpp"])
+win_ltl = rule(implementation = _win_impl, fragments = ["cpp"])
+bad_ext_ltl = rule(implementation = _bad_ext_impl, fragments = ["cpp"])
+"#,
+            ),
+            (
+                "BUILD",
+                r#"
+load(":defs.bzl", "bad_ext_ltl", "unix_ltl", "win_ltl")
+unix_ltl(name = "unix_case")
+win_ltl(name = "win_case")
+bad_ext_ltl(name = "bad_ext_case")
+"#,
+            ),
+        ],
+    );
+
+    let unix_ct = ws.analyze("//:unix_case").unwrap();
+    let Value::ProviderInstance { fields, .. } = &unix_ct.providers["//:defs.bzl%LibResultInfo"]
+    else {
+        panic!("expected LibResultInfo on unix_case");
+    };
+    assert_eq!(
+        fields["dyn_short"].as_str(),
+        Some("_solib_k8/_U_S_S_Cunix_Ucase___U/libfoo.so")
+    );
+    assert_eq!(fields["resolved_dyn_short"].as_str(), Some("libfoo.so"));
+    assert_eq!(
+        fields["iface_short"].as_str(),
+        Some("_solib_k8/_U_S_S_Cunix_Ucase___U/libfoo.ifso")
+    );
+    assert_eq!(fields["resolved_iface_short"].as_str(), Some("libfoo.ifso"));
+    assert_eq!(fields["alwayslink"], Value::Bool(true));
+    assert_eq!(
+        unix_ct
+            .typed_actions
+            .iter()
+            .filter(|a| matches!(a.kind, ActionKind::Symlink { .. }))
+            .count(),
+        2
+    );
+
+    let win_ct = ws.analyze("//:win_case").unwrap();
+    let Value::ProviderInstance {
+        fields: wfields, ..
+    } = &win_ct.providers["//:defs.bzl%LibResultInfo"]
+    else {
+        panic!("expected LibResultInfo on win_case");
+    };
+    assert_eq!(wfields["dyn_short"].as_str(), Some("foo.dll"));
+    assert_eq!(wfields["resolved_dyn_short"].as_str(), Some("NONE"));
+    assert_eq!(wfields["iface_short"].as_str(), Some("foo.if.lib"));
+    assert_eq!(wfields["resolved_iface_short"].as_str(), Some("NONE"));
+    assert_eq!(wfields["alwayslink"], Value::Bool(false));
+    assert_eq!(
+        win_ct
+            .typed_actions
+            .iter()
+            .filter(|a| matches!(a.kind, ActionKind::Symlink { .. }))
+            .count(),
+        0
+    );
+
+    let bad_err = ws.analyze("//:bad_ext_case").unwrap_err();
+    assert!(
+        bad_err.contains("does not have any of the allowed extensions"),
+        "expected extension validation error, got: {bad_err}"
+    );
+}
+
+#[test]
+fn builtin_cc_common_create_library_to_link_rejects_solib_interface_library() {
+    let ws = LocalWs::new(
+        "solib-iface",
+        &[
+            ("tc_helpers.bzl", CC_COMMON_TEST_HELPERS_BZL),
+            (
+                "defs.bzl",
+                r#"
+load(":tc_helpers.bzl", "make_cc_toolchain")
+
+def _make_tc_and_fc(ctx):
+    tc = make_cc_toolchain(
+        ctx,
+        cpu = "k8",
+        feature_names = ["supports_dynamic_linker", "supports_interface_shared_libraries"],
+        enabled_features = ["supports_dynamic_linker", "supports_interface_shared_libraries"],
+    )
+    fc = cc_common.configure_features(ctx = ctx, cc_toolchain = tc)
+    return tc, fc
+
+def _solib_iface_only_impl(ctx):
+    tc, fc = _make_tc_and_fc(ctx)
+    raw_iface = ctx.actions.declare_file("libonly.ifso")
+    ctx.actions.write(raw_iface, "ifso")
+    first = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        interface_library = raw_iface,
+    )
+    # Passing the _solib_ symlink back with dynamic_library = None and custom interface_library_symlink_path.
+    cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        interface_library = first.interface_library,
+        interface_library_symlink_path = "custom/libonly.ifso",
+    )
+    return []
+
+def _solib_iface_with_valid_dyn_impl(ctx):
+    tc, fc = _make_tc_and_fc(ctx)
+    raw_dyn = ctx.actions.declare_file("libvalid.so")
+    raw_iface = ctx.actions.declare_file("libbad.ifso")
+    ctx.actions.write(raw_dyn, "so")
+    ctx.actions.write(raw_iface, "ifso")
+    first = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        interface_library = raw_iface,
+    )
+    # Both dynamic_library (valid) and interface_library (_solib_ symlink) are set:
+    # the error must name interface_library and libbad.ifso, not dynamic_library or libvalid.so.
+    cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        dynamic_library = raw_dyn,
+        interface_library = first.interface_library,
+        interface_library_symlink_path = "custom/libbad.ifso",
+    )
+    return []
+
+solib_iface_only = rule(implementation = _solib_iface_only_impl, fragments = ["cpp"])
+solib_iface_with_valid_dyn = rule(implementation = _solib_iface_with_valid_dyn_impl, fragments = ["cpp"])
+"#,
+            ),
+            (
+                "BUILD",
+                r#"
+load(":defs.bzl", "solib_iface_only", "solib_iface_with_valid_dyn")
+solib_iface_only(name = "iface_only")
+solib_iface_with_valid_dyn(name = "iface_with_dyn")
+"#,
+            ),
+        ],
+    );
+
+    let err_only = ws.analyze("//:iface_only").unwrap_err();
+    assert!(
+        err_only.contains(
+            "interface_library must not be a symbolic link in the solib directory. Got '_solib_k8/_U_S_S_Ciface_Uonly___U/libonly.ifso'"
+        ),
+        "expected solib interface_library error when dynamic_library is None, got: {err_only}"
+    );
+    assert!(
+        !err_only.contains("NoneType"),
+        "unexpected NoneType crash: {err_only}"
+    );
+
+    let err_both = ws.analyze("//:iface_with_dyn").unwrap_err();
+    assert!(
+        err_both.contains(
+            "interface_library must not be a symbolic link in the solib directory. Got '_solib_k8/_U_S_S_Ciface_Uwith_Udyn___U/libbad.ifso'"
+        ),
+        "expected solib interface_library error naming libbad.ifso when both are set, got: {err_both}"
+    );
+    assert!(
+        !err_both.contains("libvalid.so"),
+        "error message named dynamic_library instead of interface_library: {err_both}"
+    );
+}
+
+#[test]
+fn builtin_cc_common_link_windows_dll_and_interface_library_workflow() {
+    let ws = LocalWs::new(
+        "win-dll",
+        &[
+            ("tc_helpers.bzl", CC_COMMON_TEST_HELPERS_BZL),
+            ("hellolib.cc", "int greet() { return 42; }\n"),
+            ("hellolib.h", "int greet();\n"),
+            (
+                "hello.cc",
+                "#include \"hellolib.h\"\nint main() { return greet(); }\n",
+            ),
+            (
+                "windows_dll_defs.bzl",
+                r#"
+load(":tc_helpers.bzl", "WINDOWS_ARTIFACT_PATTERNS", "make_cc_toolchain")
+
+CustomCcInfo = provider(fields = ["compilation_context", "linking_context"])
+
+def _msvc_action_configs():
+    cl_flags = struct(
+        actions = [],
+        flag_groups = [struct(
+            flags = ["/c", "%{source_file}", "/Fo%{output_file}"],
+            iterate_over = None,
+            expand_if_available = None,
+            expand_if_not_available = None,
+            expand_if_true = None,
+            expand_if_false = None,
+            expand_if_equal = None,
+            flag_groups = [],
+        )],
+        with_features = [],
+    )
+    implib_group = struct(
+        flags = ["/IMPLIB:%{interface_library_output_path}"],
+        iterate_over = None,
+        expand_if_available = "interface_library_output_path",
+        expand_if_not_available = None,
+        expand_if_true = None,
+        expand_if_false = None,
+        expand_if_equal = None,
+        flag_groups = [],
+    )
+    libs_group = struct(
+        flags = ["%{libraries_to_link.name}"],
+        iterate_over = "libraries_to_link",
+        expand_if_available = "libraries_to_link",
+        expand_if_not_available = None,
+        expand_if_true = None,
+        expand_if_false = None,
+        expand_if_equal = None,
+        flag_groups = [],
+    )
+    out_group = struct(
+        flags = ["/OUT:%{output_execpath}"],
+        iterate_over = None,
+        expand_if_available = "output_execpath",
+        expand_if_not_available = None,
+        expand_if_true = None,
+        expand_if_false = None,
+        expand_if_equal = None,
+        flag_groups = [],
+    )
+    dll_link_flags = struct(
+        actions = [],
+        flag_groups = [
+            struct(
+                flags = ["/DLL"],
+                iterate_over = None,
+                expand_if_available = None,
+                expand_if_not_available = None,
+                expand_if_true = None,
+                expand_if_false = None,
+                expand_if_equal = None,
+                flag_groups = [],
+            ),
+            implib_group,
+            libs_group,
+            out_group,
+        ],
+        with_features = [],
+    )
+    exe_link_flags = struct(
+        actions = [],
+        flag_groups = [libs_group, out_group],
+        with_features = [],
+    )
+    return [
+        struct(
+            action_name = "c++-compile",
+            enabled = True,
+            tools = [struct(path = "C:/MSVC/bin/cl.exe", with_features = [], execution_requirements = [])],
+            flag_sets = [cl_flags],
+            implies = [],
+        ),
+        struct(
+            action_name = "c++-link-dynamic-library",
+            enabled = True,
+            tools = [struct(path = "C:/MSVC/bin/link.exe", with_features = [], execution_requirements = [])],
+            flag_sets = [dll_link_flags],
+            implies = [],
+        ),
+        struct(
+            action_name = "c++-link-executable",
+            enabled = True,
+            tools = [struct(path = "C:/MSVC/bin/link.exe", with_features = [], execution_requirements = [])],
+            flag_sets = [exe_link_flags],
+            implies = [],
+        ),
+    ]
+
+def _win_tc(ctx, support_iface = True):
+    fnames = [
+        "targets_windows",
+        "supports_dynamic_linker",
+        "has_configured_linker_path",
+        "copy_dynamic_libraries_to_binary",
+    ]
+    if support_iface:
+        fnames.append("supports_interface_shared_libraries")
+    ifso_tool = ctx.actions.declare_file(ctx.label.name + "_ifso_builder.exe")
+    ctx.actions.write(ifso_tool, "", is_executable = True)
+    return make_cc_toolchain(
+        ctx,
+        cpu = "x64_windows",
+        compiler = "msvc-cl",
+        feature_names = fnames,
+        enabled_features = fnames,
+        action_configs = _msvc_action_configs(),
+        artifact_name_patterns = WINDOWS_ARTIFACT_PATTERNS,
+        if_so_builder = ifso_tool,
+    )
+
+def _win_dll_impl(ctx):
+    tc = _win_tc(ctx, support_iface = ctx.attr.support_iface)
+    fc = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = tc,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features,
+    )
+    comp_ctx, comp_outputs = cc_common.compile(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        srcs = ctx.files.srcs,
+        public_hdrs = ctx.files.hdrs,
+        name = ctx.label.name,
+    )
+    main_out = ctx.actions.declare_file(ctx.label.name) if ctx.label.name.endswith(".dll") else None
+    link_outputs = cc_common.link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        compilation_outputs = comp_outputs,
+        name = ctx.label.name,
+        output_type = "dynamic_library",
+        main_output = main_out,
+    )
+    ltl = link_outputs.library_to_link
+    out_groups = {}
+    if ltl != None and ltl.interface_library != None:
+        out_groups["interface_library"] = depset([ltl.interface_library])
+    return [
+        DefaultInfo(files = depset([ltl.dynamic_library])),
+        OutputGroupInfo(**out_groups),
+        CustomCcInfo(compilation_context = comp_ctx, linking_context = None),
+    ]
+
+def _win_import_impl(ctx):
+    tc = _win_tc(ctx, support_iface = True)
+    fc = cc_common.configure_features(ctx = ctx, cc_toolchain = tc)
+    ltl = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        dynamic_library = ctx.file.shared_library,
+        interface_library = ctx.file.interface_library,
+    )
+    linker_input = cc_common.create_linker_input(
+        owner = ctx.label,
+        libraries = depset([ltl]),
+    )
+    linking_ctx = cc_common.create_linking_context(
+        linker_inputs = depset([linker_input]),
+    )
+    comp_ctx, _ = cc_common.compile(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        public_hdrs = ctx.files.hdrs,
+        name = ctx.label.name,
+    )
+    return [
+        DefaultInfo(files = depset([ctx.file.shared_library])),
+        CustomCcInfo(compilation_context = comp_ctx, linking_context = linking_ctx),
+    ]
+
+def _win_exe_impl(ctx):
+    tc = _win_tc(ctx, support_iface = True)
+    fc = cc_common.configure_features(ctx = ctx, cc_toolchain = tc)
+    dep_comp = [d[CustomCcInfo].compilation_context for d in ctx.attr.deps]
+    dep_link = [d[CustomCcInfo].linking_context for d in ctx.attr.deps if d[CustomCcInfo].linking_context != None]
+    _, comp_outputs = cc_common.compile(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        srcs = ctx.files.srcs,
+        compilation_contexts = dep_comp,
+        name = ctx.label.name,
+    )
+    link_outputs = cc_common.link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        compilation_outputs = comp_outputs,
+        linking_contexts = dep_link,
+        name = ctx.label.name,
+        output_type = "executable",
+    )
+    return [DefaultInfo(executable = link_outputs.executable, files = depset([link_outputs.executable]))]
+
+win_dll = rule(
+    implementation = _win_dll_impl,
+    fragments = ["cpp"],
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        "hdrs": attr.label_list(allow_files = True),
+        "support_iface": attr.bool(default = True),
+    },
+)
+
+win_dll_import = rule(
+    implementation = _win_import_impl,
+    fragments = ["cpp"],
+    attrs = {
+        "hdrs": attr.label_list(allow_files = True),
+        "shared_library": attr.label(allow_single_file = True, mandatory = True),
+        "interface_library": attr.label(allow_single_file = True, mandatory = True),
+    },
+)
+
+win_exe = rule(
+    implementation = _win_exe_impl,
+    executable = True,
+    fragments = ["cpp"],
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+        "deps": attr.label_list(providers = [CustomCcInfo]),
+    },
+)
+
+def windows_dll_library(name, srcs = [], hdrs = []):
+    dll_name = name + ".dll"
+    import_lib_name = name + "_import_lib"
+    win_dll(
+        name = dll_name,
+        srcs = srcs,
+        hdrs = hdrs,
+    )
+    native.filegroup(
+        name = import_lib_name,
+        srcs = [":" + dll_name],
+        output_group = "interface_library",
+    )
+    win_dll_import(
+        name = name,
+        hdrs = hdrs,
+        shared_library = ":" + dll_name,
+        interface_library = ":" + import_lib_name,
+    )
+"#,
+            ),
+            (
+                "BUILD",
+                r#"
+load(":windows_dll_defs.bzl", "win_dll", "win_exe", "windows_dll_library")
+
+windows_dll_library(
+    name = "hellolib",
+    srcs = ["hellolib.cc"],
+    hdrs = ["hellolib.h"],
+)
+
+win_exe(
+    name = "hello",
+    srcs = ["hello.cc"],
+    deps = [":hellolib"],
+)
+
+win_dll(
+    name = "no_iface_feature.dll",
+    srcs = ["hellolib.cc"],
+    hdrs = ["hellolib.h"],
+    support_iface = False,
+)
+
+filegroup(
+    name = "no_iface_feature_import_lib",
+    srcs = [":no_iface_feature.dll"],
+    output_group = "interface_library",
+)
+"#,
+            ),
+        ],
+    );
+
+    // 1. DLL target emits both hellolib.dll and hellolib.dll.if.lib via CppLink with MSVC tool path.
+    let dll_ct = ws.analyze("//:hellolib.dll").unwrap();
+    let link_action = dll_ct
+        .typed_actions
+        .iter()
+        .find(|a| a.mnemonic == "CppLink")
+        .expect("expected CppLink action on //:hellolib.dll");
+    let (argv, _) = link_action.command_line();
+    assert_eq!(argv[0], "C:/MSVC/bin/link.exe");
+    assert!(
+        argv.iter()
+            .any(|arg| arg.starts_with("/IMPLIB:") && arg.ends_with("hellolib.dll.if.lib")),
+        "expected /IMPLIB:...hellolib.dll.if.lib in {argv:?}"
+    );
+    assert!(
+        argv.iter()
+            .any(|arg| arg.starts_with("/OUT:") && arg.ends_with("hellolib.dll")),
+        "expected /OUT:...hellolib.dll in {argv:?}"
+    );
+    let link_outs: Vec<String> = link_action
+        .outputs
+        .iter()
+        .map(|o| o.root_relative_path.path_string().to_string())
+        .collect();
+    assert!(
+        link_outs.contains(&"hellolib.dll".to_string()),
+        "{link_outs:?}"
+    );
+    assert!(
+        link_outs.contains(&"hellolib.dll.if.lib".to_string()),
+        "{link_outs:?}"
+    );
+
+    // 2. filegroup(..., output_group = "interface_library") extracts hellolib.dll.if.lib.
+    let import_fg = ws.analyze("//:hellolib_import_lib").unwrap();
+    let fg_files: Vec<String> = import_fg
+        .default_info
+        .files
+        .iter()
+        .map(|f| f.root_relative_path.path_string().to_string())
+        .collect();
+    assert_eq!(fg_files, vec!["hellolib.dll.if.lib"]);
+
+    // 3. Client executable links against hellolib.dll.if.lib (the import library, not raw hellolib.dll).
+    let exe_ct = ws.analyze("//:hello").unwrap();
+    assert_eq!(
+        exe_ct
+            .default_info
+            .executable
+            .as_ref()
+            .unwrap()
+            .root_relative_path
+            .path_string(),
+        "hello.exe"
+    );
+    let exe_link = exe_ct
+        .typed_actions
+        .iter()
+        .find(|a| a.mnemonic == "CppLink")
+        .expect("expected CppLink action on //:hello");
+    let (exe_argv, _) = exe_link.command_line();
+    let exe_inputs: Vec<String> = exe_link
+        .inputs
+        .iter()
+        .map(|i| i.root_relative_path.path_string().to_string())
+        .collect();
+    assert!(
+        exe_inputs
+            .iter()
+            .any(|p| p.ends_with("hellolib.dll.if.lib")),
+        "expected hellolib.dll.if.lib in exe link inputs: {exe_inputs:?}"
+    );
+    assert!(
+        !exe_inputs.iter().any(|p| p.ends_with("hellolib.dll")),
+        "raw DLL should not be passed as linker input when import library is provided: {exe_inputs:?}"
+    );
+    assert!(
+        exe_argv.iter().any(|a| a.ends_with("hellolib.dll.if.lib")),
+        "expected hellolib.dll.if.lib on exe link command line: {exe_argv:?}"
+    );
+
+    // 4. Without supports_interface_shared_libraries, no interface library is emitted and
+    //    filegroup(output_group = "interface_library") cleanly resolves to empty.
+    let no_feat_fg = ws.analyze("//:no_iface_feature_import_lib").unwrap();
+    assert!(no_feat_fg.default_info.files.is_empty());
+
+    // 5. With --nointerface_shared_objects (options["interface_shared_objects"] = "false"),
+    //    hellolib.dll suppresses interface library generation as well.
+    let mut no_iface_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    no_iface_cfg
+        .options
+        .insert("interface_shared_objects".into(), "false".into());
+    let (no_iface_resolver, cfg_key) = ws.resolver_with(no_iface_cfg, AnalysisConfig::new());
+    let no_iface_fg = no_iface_resolver
+        .analyze(
+            &Label::parse_canonical("//:hellolib_import_lib").unwrap(),
+            &cfg_key,
+        )
+        .unwrap();
+    assert!(no_iface_fg.default_info.files.is_empty());
+}
+
+#[test]
+fn cc_internal_is_tree_artifact_analysis_time_parity() {
+    let ws = LocalWs::new(
+        "is-tree-artifact",
+        &[
+            (
+                "defs.bzl",
+                r#"
+ProbeInfo = provider(fields = ["is_tree", "is_reg"])
+
+def _ok_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    tree_dir = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(outputs = [tree_dir], command = "mkdir -p " + tree_dir.path)
+    reg_file = ctx.actions.declare_file(ctx.label.name + ".cc")
+    ctx.actions.write(output = reg_file, content = "")
+    return [
+        DefaultInfo(files = depset([tree_dir, reg_file])),
+        ProbeInfo(
+            is_tree = cc_internal.is_tree_artifact(tree_dir),
+            is_reg = cc_internal.is_tree_artifact(reg_file),
+        ),
+    ]
+
+probe_ok = rule(implementation = _ok_impl)
+
+def _bad_named_artifact_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    tree_dir = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(outputs = [tree_dir], command = "mkdir -p " + tree_dir.path)
+    cc_internal.is_tree_artifact(artifact = tree_dir)
+    return []
+
+probe_bad_named_artifact = rule(implementation = _bad_named_artifact_impl)
+
+def _bad_unknown_kw_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    tree_dir = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(outputs = [tree_dir], command = "mkdir -p " + tree_dir.path)
+    cc_internal.is_tree_artifact(file = tree_dir)
+    return []
+
+probe_bad_unknown_kw = rule(implementation = _bad_unknown_kw_impl)
+"#,
+            ),
+            (
+                "BUILD",
+                r#"
+load(":defs.bzl", "probe_ok", "probe_bad_named_artifact", "probe_bad_unknown_kw")
+
+probe_ok(name = "ok")
+probe_bad_named_artifact(name = "bad_named_artifact")
+probe_bad_unknown_kw(name = "bad_unknown_kw")
+"#,
+            ),
+        ],
+    );
+
+    let ok_ct = ws.analyze("//:ok").unwrap();
+    let zel_starlark::Value::ProviderInstance { fields, .. } =
+        &ok_ct.providers["//:defs.bzl%ProbeInfo"]
+    else {
+        panic!("expected ProbeInfo provider");
+    };
+    assert_eq!(
+        fields.get("is_tree"),
+        Some(&zel_starlark::Value::Bool(true))
+    );
+    assert_eq!(
+        fields.get("is_reg"),
+        Some(&zel_starlark::Value::Bool(false))
+    );
+
+    let err_named = ws
+        .analyze("//:bad_named_artifact")
+        .expect_err("named `artifact = ...` must be rejected as positional-only");
+    let msg_named = err_named.to_string();
+    assert!(
+        msg_named.contains(
+            "is_tree_artifact() got named argument for positional-only parameter 'artifact'"
+        ),
+        "unexpected error for named `artifact`: {msg_named}"
+    );
+
+    let err_unknown = ws
+        .analyze("//:bad_unknown_kw")
+        .expect_err("unknown keyword `file = ...` must be rejected");
+    let msg_unknown = err_unknown.to_string();
+    assert!(
+        msg_unknown.contains("is_tree_artifact() got unexpected keyword argument 'file'"),
+        "unexpected error for unknown keyword `file`: {msg_unknown}"
+    );
+}

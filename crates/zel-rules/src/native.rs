@@ -202,23 +202,18 @@ pub(crate) fn filegroup(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let srcs = n.deps("srcs", false)?;
     let data = n.deps("data", false)?;
     let group = n.string("output_group")?;
+    if group.ends_with("_INTERNAL_") {
+        return Err(n.attr_err(
+            "output_group",
+            &format!("Output group {group} is not permitted for reference in filegroups."),
+        ));
+    }
     let mut files = Vec::new();
     for s in &srcs {
         if group.is_empty() {
             files.extend(s.default_info.files.iter().cloned());
-        } else {
-            match s.output_groups.groups.get(&group) {
-                Some(g) => files.extend(g.iter().cloned()),
-                None => {
-                    return Err(n.err(
-                        "output_group",
-                        &format!(
-                            "Output group '{group}' not found in dependency '{}'",
-                            s.label.canonical_form()
-                        ),
-                    ))
-                }
-            }
+        } else if let Some(g) = s.output_groups.groups.get(&group) {
+            files.extend(g.iter().cloned());
         }
     }
     let files = dedup(files);

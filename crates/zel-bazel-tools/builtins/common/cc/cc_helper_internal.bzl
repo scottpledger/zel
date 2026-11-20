@@ -18,6 +18,35 @@ Utility functions for C++ rules that don't depend on cc_common.
 Only use those within C++ implementation. The others need to go through cc_common.
 """
 
+load(":common/paths.bzl", "paths")
+
+_cc_internal = _builtins.internal.cc_internal
+
+def is_path_absolute(path):
+    """Checks whether a path is absolute or not."""
+    if path.startswith("/"):
+        return True
+    return len(path) >= 3 and \
+           path[0].isalpha() and \
+           path[1] == ":" and \
+           path[2] in ("/", "\\")
+
+def check_private_api():
+    _cc_internal.check_private_api(allowlist = PRIVATE_STARLARKIFICATION_ALLOWLIST, depth = 2)
+
+def wrap_with_check_private_api(symbol):
+    """Protects the symbol so it can only be used internally."""
+
+    def callback():
+        _cc_internal.check_private_api(allowlist = PRIVATE_STARLARKIFICATION_ALLOWLIST)
+        return symbol
+
+    return callback
+
+CPP_SOURCE_TYPE_HEADER = "HEADER"
+CPP_SOURCE_TYPE_SOURCE = "SOURCE"
+CPP_SOURCE_TYPE_CLIF_INPUT_PROTO = "CLIF_INPUT_PROTO"
+
 CREATE_COMPILE_ACTION_API_ALLOWLISTED_PACKAGES = [
     ("", "devtools/rust/cc_interop"),
     ("", "third_party/crubit"),
@@ -35,7 +64,9 @@ PRIVATE_STARLARKIFICATION_ALLOWLIST = [
     # Apple rules
     ("", "third_party/bazel_rules/rules_apple"),
     ("apple_support", ""),
+    ("build_bazel_apple_support", ""),
     ("rules_apple", ""),
+    ("build_bazel_rules_apple", ""),
     # C++ rules
     ("", "bazel_internal/test_rules/cc"),
     ("", "third_party/bazel_rules/rules_cc"),
@@ -56,11 +87,226 @@ PRIVATE_STARLARKIFICATION_ALLOWLIST = [
     ("com_google_protobuf", ""),
     # Rust rules
     ("", "rust/private"),
+    ("", "third_party/bazel_rules/rules_rust/rust/private"),
     ("rules_rust", "rust/private"),
     # Python rules
     ("", "third_party/bazel_rules/rules_python"),
     # Various
     ("", "research/colab"),
+    ("", "javatests/com/google/devtools/grok/kythe"),
 ] + CREATE_COMPILE_ACTION_API_ALLOWLISTED_PACKAGES
+
+_CC_SOURCE = [".cc", ".cpp", ".cxx", ".c++", ".C", ".cu", ".cl"]
+_C_SOURCE = [".c"]
+_OBJC_SOURCE = [".m"]
+_OBJCPP_SOURCE = [".mm"]
+_CLIF_INPUT_PROTO = [".ipb"]
+_CLIF_OUTPUT_PROTO = [".opb"]
+_CC_HEADER = [".h", ".hh", ".hpp", ".ipp", ".hxx", ".h++", ".inc", ".inl", ".tlh", ".tli", ".H", ".tcc"]
+_CC_TEXTUAL_INCLUDE = [".inc"]
+_ASSEMBLER_WITH_C_PREPROCESSOR = [".S"]
+_ASSEMBLER = [".s", ".asm"]
+_ARCHIVE = [".a", ".lib"]
+_PIC_ARCHIVE = [".pic.a"]
+_ALWAYSLINK_LIBRARY = [".lo"]
+_ALWAYSLINK_PIC_LIBRARY = [".pic.lo"]
+_SHARED_LIBRARY = [".so", ".dylib", ".dll", ".pyd", ".wasm"]
+_INTERFACE_SHARED_LIBRARY = [".ifso", ".tbd", ".lib", ".dll.a"]
+_OBJECT_FILE = [".o", ".obj"]
+_PIC_OBJECT_FILE = [".pic.o"]
+_CPP_MODULE = [".pcm", ".gcm", ".ifc"]
+_CPP_MODULE_MAP = [".cppmap"]
+_LTO_INDEXING_OBJECT_FILE = [".indexing.o"]
+
+_CC_AND_OBJC = []
+_CC_AND_OBJC.extend(_CC_SOURCE)
+_CC_AND_OBJC.extend(_C_SOURCE)
+_CC_AND_OBJC.extend(_OBJC_SOURCE)
+_CC_AND_OBJC.extend(_OBJCPP_SOURCE)
+_CC_AND_OBJC.extend(_CC_HEADER)
+_CC_AND_OBJC.extend(_ASSEMBLER)
+_CC_AND_OBJC.extend(_ASSEMBLER_WITH_C_PREPROCESSOR)
+
+_DISALLOWED_HDRS_FILES = []
+_DISALLOWED_HDRS_FILES.extend(_ARCHIVE)
+_DISALLOWED_HDRS_FILES.extend(_PIC_ARCHIVE)
+_DISALLOWED_HDRS_FILES.extend(_ALWAYSLINK_LIBRARY)
+_DISALLOWED_HDRS_FILES.extend(_ALWAYSLINK_PIC_LIBRARY)
+_DISALLOWED_HDRS_FILES.extend(_SHARED_LIBRARY)
+_DISALLOWED_HDRS_FILES.extend(_INTERFACE_SHARED_LIBRARY)
+_DISALLOWED_HDRS_FILES.extend(_OBJECT_FILE)
+_DISALLOWED_HDRS_FILES.extend(_PIC_OBJECT_FILE)
+
+extensions = struct(
+    CC_SOURCE = _CC_SOURCE,
+    C_SOURCE = _C_SOURCE,
+    OBJC_SOURCE = _OBJC_SOURCE,
+    OBJCPP_SOURCE = _OBJCPP_SOURCE,
+    CC_HEADER = _CC_HEADER,
+    CC_TEXTUAL_INCLUDE = _CC_TEXTUAL_INCLUDE,
+    ASSEMBLER_WITH_C_PREPROCESSOR = _ASSEMBLER_WITH_C_PREPROCESSOR,
+    ASSESMBLER_WITH_C_PREPROCESSOR = _ASSEMBLER_WITH_C_PREPROCESSOR,
+    ASSEMBLER = _ASSEMBLER,
+    CLIF_INPUT_PROTO = _CLIF_INPUT_PROTO,
+    CLIF_OUTPUT_PROTO = _CLIF_OUTPUT_PROTO,
+    ARCHIVE = _ARCHIVE,
+    PIC_ARCHIVE = _PIC_ARCHIVE,
+    ALWAYSLINK_LIBRARY = _ALWAYSLINK_LIBRARY,
+    ALWAYSLINK_PIC_LIBRARY = _ALWAYSLINK_PIC_LIBRARY,
+    SHARED_LIBRARY = _SHARED_LIBRARY,
+    OBJECT_FILE = _OBJECT_FILE,
+    PIC_OBJECT_FILE = _PIC_OBJECT_FILE,
+    CC_AND_OBJC = _CC_AND_OBJC,
+    DISALLOWED_HDRS_FILES = _DISALLOWED_HDRS_FILES,
+    CPP_MODULE = _CPP_MODULE,
+    CPP_MODULE_MAP = _CPP_MODULE_MAP,
+    LTO_INDEXING_OBJECT_FILE = _LTO_INDEXING_OBJECT_FILE,
+)
+
+def _artifact_category_info_init(name, default_prefix, *extensions):
+    return {
+        "allowed_extensions": extensions,
+        "default_extension": extensions[0],
+        "default_prefix": default_prefix,
+        "name": name,
+    }
+
+_ArtifactCategoryInfo, _unused_new_aci = provider(
+    doc = "A category of artifacts that are candidate input/output to an action.",
+    fields = ["name", "default_prefix", "default_extension", "allowed_extensions"],
+    init = _artifact_category_info_init,
+)
+
+_artifact_categories = [
+    _ArtifactCategoryInfo("STATIC_LIBRARY", "lib", ".a", ".lib"),
+    _ArtifactCategoryInfo("ALWAYSLINK_STATIC_LIBRARY", "lib", ".lo", ".lo.lib"),
+    _ArtifactCategoryInfo("DYNAMIC_LIBRARY", "lib", ".so", ".dylib", ".dll", ".pyd", ".wasm"),
+    _ArtifactCategoryInfo("EXECUTABLE", "", "", ".exe", ".wasm"),
+    _ArtifactCategoryInfo("INTERFACE_LIBRARY", "lib", ".ifso", ".tbd", ".if.lib", ".lib"),
+    _ArtifactCategoryInfo("PIC_FILE", "", ".pic"),
+    _ArtifactCategoryInfo("INCLUDED_FILE_LIST", "", ".d"),
+    _ArtifactCategoryInfo("SERIALIZED_DIAGNOSTICS_FILE", "", ".dia"),
+    _ArtifactCategoryInfo("OBJECT_FILE", "", ".o", ".obj"),
+    _ArtifactCategoryInfo("PIC_OBJECT_FILE", "", ".pic.o"),
+    _ArtifactCategoryInfo("CPP_MODULE", "", ".pcm", ".gcm", ".ifc"),
+    _ArtifactCategoryInfo("CPP_MODULES_INFO", "", ".CXXModules.json"),
+    _ArtifactCategoryInfo("CPP_MODULES_DDI", "", ".ddi"),
+    _ArtifactCategoryInfo("CPP_MODULES_MODMAP", "", ".modmap"),
+    _ArtifactCategoryInfo("CPP_MODULES_MODMAP_INPUT", "", ".modmap.input"),
+    _ArtifactCategoryInfo("GENERATED_ASSEMBLY", "", ".s", ".asm"),
+    _ArtifactCategoryInfo("PROCESSED_HEADER", "", ".processed"),
+    _ArtifactCategoryInfo("GENERATED_HEADER", "", ".h"),
+    _ArtifactCategoryInfo("PREPROCESSED_C_SOURCE", "", ".i"),
+    _ArtifactCategoryInfo("PREPROCESSED_CPP_SOURCE", "", ".ii"),
+    _ArtifactCategoryInfo("COVERAGE_DATA_FILE", "", ".gcno"),
+    _ArtifactCategoryInfo("CLIF_OUTPUT_PROTO", "", ".opb"),
+]
+
+artifact_category_names = struct(**{ac.name: ac.name for ac in _artifact_categories})
+
+output_subdirectories = struct(
+    OBJS = "_objs",
+    PIC_OBJS = "_pic_objs",
+    DOTD_FILES = "_dotd",
+    PIC_DOTD_FILES = "_pic_dotd",
+    DIA_FILES = "_dia",
+    PIC_DIA_FILES = "_pic_dia",
+)
+
+def should_create_per_object_debug_info(feature_configuration, cpp_configuration):
+    return cpp_configuration.fission_active_for_current_compilation_mode() and \
+           feature_configuration.is_enabled("per_object_debug_info")
+
+def is_versioned_shared_library_extension_valid(shared_library_name):
+    """Validates the name against the regex "^.+\\.((so)|(dylib))(\\.\\d\\w*)+$"."""
+    for ext in (".so.", ".dylib."):
+        name, _, version = shared_library_name.rpartition(ext)
+        if name and version:
+            version_parts = version.split(".")
+            for part in version_parts:
+                if not part[0].isdigit():
+                    return False
+                for c in part[1:].elems():
+                    if not (c.isalnum() or c == "_"):
+                        return False
+            return True
+    return False
+
+def _is_repository_main(repository):
+    return repository == ""
+
+def package_source_root(repository, package, sibling_repository_layout):
+    """Determines the source root for a given repository and package."""
+    if _is_repository_main(repository) or sibling_repository_layout:
+        return package
+    if repository.startswith("@"):
+        repository = repository[1:]
+    return get_relative_path(get_relative_path("external", repository), package)
+
+def repository_exec_path(repository, sibling_repository_layout):
+    """Determines the exec path for a given repository."""
+    if _is_repository_main(repository):
+        return ""
+    prefix = "external"
+    if sibling_repository_layout:
+        prefix = ".."
+    if repository.startswith("@"):
+        repository = repository[1:]
+    return get_relative_path(prefix, repository)
+
+def is_stamping_enabled(ctx):
+    """Returns the tri-state of whether to encode build information into the binary."""
+    if ctx.configuration.is_tool_configuration():
+        return 0
+    stamp = 0
+    if hasattr(ctx.attr, "stamp"):
+        stamp = ctx.attr.stamp
+    return stamp
+
+def should_stamp(ctx):
+    """Returns whether stamping should actually be performed based on stamp attribute and config."""
+    stamping_tri_state = is_stamping_enabled(ctx)
+    return False if ctx.configuration.is_tool_configuration() else (
+        stamping_tri_state == 1 or (stamping_tri_state == -1 and ctx.configuration.stamp_binaries())
+    )
+
+def is_shared_library(file):
+    return file.extension in ["so", "dylib", "dll", "pyd", "wasm", "tgt", "vpi"]
+
+def is_versioned_shared_library(file):
+    if ".so." not in file.basename and ".dylib." not in file.basename:
+        return False
+    return is_versioned_shared_library_extension_valid(file.basename)
+
+def use_pic_for_binaries(cpp_config, feature_configuration):
+    """Returns whether binaries must be compiled with position independent code."""
+    return cpp_config.force_pic() or (
+        feature_configuration.is_enabled("supports_pic") and
+        (cpp_config.compilation_mode() != "opt" or feature_configuration.is_enabled("prefer_pic_for_opt_binaries"))
+    )
+
+def use_pic_for_dynamic_libs(cpp_config, feature_configuration):
+    """Determines if we should apply -fPIC for this rule's C++ compilations."""
+    return (cpp_config.force_pic() or
+            feature_configuration.is_enabled("supports_pic"))
+
+def get_relative_path(path_a, path_b):
+    if is_path_absolute(path_b):
+        return path_b
+    return paths.normalize(paths.join(path_a, path_b))
+
+def path_contains_up_level_references(path):
+    return path.startswith("..") and (len(path) == 2 or path[2] == "/")
+
+def root_relative_path(file):
+    """Returns the path of `file` relative to its root."""
+    if not file.is_source:
+        return file.path[len(file.root.path) + 1:]
+    short_path = file.short_path
+    if not short_path.startswith("../"):
+        return short_path
+
+    # This is a file in an external repo, skip over the repo name.
+    return short_path[short_path.index("/", 3) + 1:]
 
 # LINT.ThenChange(@rules_cc//cc/common/cc_helper_internal.bzl:forked_exports)

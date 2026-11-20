@@ -340,8 +340,14 @@ impl ToolchainFeatures {
                     Some(tv) => (tool_path(&tv).unwrap_or_default(), false),
                     None => {
                         let p = opt_str(field(&t, "path")).unwrap_or_default();
-                        let rel = !p.starts_with('/');
-                        (p, rel)
+                        let b = p.as_bytes();
+                        let is_abs = p.starts_with('/')
+                            || p.starts_with("\\\\")
+                            || (b.len() >= 3
+                                && b[0].is_ascii_alphabetic()
+                                && b[1] == b':'
+                                && (b[2] == b'/' || b[2] == b'\\'));
+                        (p, !is_abs)
                     }
                 };
                 tools.push(Tool {
@@ -1183,5 +1189,74 @@ mod tests {
             fc.command_line("c-compile", &vars, &|_| None).unwrap(),
             vec!["-O2"]
         );
+    }
+
+    #[test]
+    fn windows_drive_and_unc_tool_paths_are_not_crosstool_prefixed() {
+        let mk_ac = |name: &str, tool_path: &str| {
+            let tool = mk_struct(vec![("path", Value::String(tool_path.into()))]);
+            mk_struct(vec![
+                ("action_name", Value::String(name.into())),
+                ("enabled", Value::Bool(true)),
+                ("tools", mk_list(vec![tool])),
+            ])
+        };
+        let acs = vec![
+            mk_ac("win-fwd", "C:/MSVC/bin/link.exe"),
+            mk_ac("win-back", r"D:\LLVM\bin\lld-link.exe"),
+            mk_ac("win-unc", r"\\buildsrv\msvc\cl.exe"),
+            mk_ac("rel-tool", "bin/clang"),
+        ];
+        let tf = Arc::new(
+            ToolchainFeatures::new(&[], &acs, &[], "external/msvc_tc", &|_| None).unwrap(),
+        );
+        let fc = tf
+            .configure(&[
+                "win-fwd".into(),
+                "win-back".into(),
+                "win-unc".into(),
+                "rel-tool".into(),
+            ])
+            .unwrap();
+        assert_eq!(
+            fc.tool_path_for_action("win-fwd").unwrap(),
+            "C:/MSVC/bin/link.exe"
+        );
+        assert_eq!(
+            fc.tool_path_for_action("win-back").unwrap(),
+            r"D:\LLVM\bin\lld-link.exe"
+        );
+        assert_eq!(
+            fc.tool_path_for_action("win-unc").unwrap(),
+            r"\\buildsrv\msvc\cl.exe"
+        );
+        assert_eq!(
+            fc.tool_path_for_action("rel-tool").unwrap(),
+            "external/msvc_tc/bin/clang"
+        );
+    }
+
+    #[test]
+    fn legacy_cc_flags_make_variable_returns_string_or_empty() {
+        let with_flags = mk_struct(vec![(
+            "_legacy_cc_flags_make_variable",
+            Value::String("-m64 -pthread".into()),
+        )]);
+        let got = crate::natives::call(
+            "cc_common.legacy_cc_flags_make_variable_do_not_use",
+            vec![with_flags],
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(got, Value::String("-m64 -pthread".into()));
+
+        let without_flags = mk_struct(vec![]);
+        let empty = crate::natives::call(
+            "cc_common.legacy_cc_flags_make_variable_do_not_use",
+            vec![],
+            BTreeMap::from([("cc_toolchain".to_string(), without_flags)]),
+        )
+        .unwrap();
+        assert_eq!(empty, Value::String(String::new()));
     }
 }
