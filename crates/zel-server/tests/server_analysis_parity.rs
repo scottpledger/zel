@@ -235,3 +235,359 @@ filegroup(name = "sel", srcs = select({":j17": ["a.txt"], "//conditions:default"
         "{err2}"
     );
 }
+
+#[test]
+fn build_info_translation_reads_execution_time_status_and_preserves_constant_metadata() {
+    let w = Ws::new("build-info");
+    let status_script = if cfg!(windows) {
+        w.write(
+            "status.bat",
+            "@echo off\r\necho STABLE_CUSTOM v1.2.3 with spaces\r\necho BUILD_SCM_REVISION deadbeef\r\necho BUILD_SCM_STATUS clean\r\n",
+        );
+        "status.bat"
+    } else {
+        w.write(
+            "status.sh",
+            "#!/bin/sh\necho 'STABLE_CUSTOM v1.2.3 with spaces'\necho 'BUILD_SCM_REVISION deadbeef'\necho 'BUILD_SCM_STATUS clean'\n",
+        );
+        "status.sh"
+    };
+    w.write("tmpl_v.txt", "ts={TS};date={DATE};rev={REV}\n");
+    w.write("tmpl_s.txt", "label={LBL};custom={CUSTOM}\n");
+    let combine_snippet = if cfg!(windows) {
+        let comspec = std::env::var("ComSpec")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".to_string())
+            .replace('\\', "/");
+        format!(
+            r#"    ctx.actions.run(
+        executable = "{comspec}",
+        arguments = ["/d", "/s", "/c", "copy /y /b %s+%s %s >nul" % (vf.path.replace("/", "\\"), sf.path.replace("/", "\\"), combined.path.replace("/", "\\"))],
+        inputs = [vf, sf],
+        outputs = [combined],
+        mnemonic = "CombineBuildInfo",
+    )"#
+        )
+    } else {
+        r#"    ctx.actions.run_shell(
+        inputs = [vf, sf],
+        outputs = [combined],
+        command = "cat '%s' '%s' > '%s'" % (vf.path, sf.path, combined.path),
+        mnemonic = "CombineBuildInfo",
+    )"#
+        .to_string()
+    };
+    w.write(
+        "defs.bzl",
+        &format!(
+            r#"
+def _tr_v(d):
+    return {{
+        "{{TS}}": d.get("BUILD_TIMESTAMP", "?"),
+        "{{DATE}}": d.get("FORMATTED_DATE", "?"),
+        "{{REV}}": d.get("BUILD_SCM_REVISION", "?"),
+    }}
+
+def _tr_s(d):
+    return {{
+        "{{LBL}}": d.get("BUILD_EMBED_LABEL", "?"),
+        "{{CUSTOM}}": d.get("STABLE_CUSTOM", "?"),
+    }}
+
+def _impl(ctx):
+    vf = ctx.actions.transform_version_file(
+        transform_func = _tr_v,
+        template = ctx.file.tv,
+        output_file_name = "volatile_out.txt",
+    )
+    sf = ctx.actions.transform_info_file(
+        transform_func = _tr_s,
+        template = ctx.file.ts,
+        output_file_name = "stable_out.txt",
+    )
+    combined = ctx.actions.declare_file("combined.txt")
+{combine_snippet}
+    return [DefaultInfo(files = depset([vf, sf, combined]))]
+
+stamp_probe = rule(
+    implementation = _impl,
+    attrs = {{
+        "tv": attr.label(default = ":tmpl_v.txt", allow_single_file = True),
+        "ts": attr.label(default = ":tmpl_s.txt", allow_single_file = True),
+    }},
+)
+
+def _cc_java_probe_impl(ctx):
+    cc_p = ctx.attr.cc_bi[OutputGroupInfo]
+    java_p = ctx.attr.java_bi[OutputGroupInfo]
+    files = depset(transitive = [cc_p.non_redacted_build_info_files, java_p.non_redacted_build_info_files])
+    return [DefaultInfo(files = files)]
+
+cc_java_probe = rule(
+    implementation = _cc_java_probe_impl,
+    attrs = {{
+        "cc_bi": attr.label(default = "@bazel_tools//tools/build_defs/build_info:cc_build_info"),
+        "java_bi": attr.label(default = "@bazel_tools//tools/build_defs/build_info:java_build_info"),
+    }},
+)
+"#
+        ),
+    );
+    w.write(
+        "BUILD",
+        r#"
+load(":defs.bzl", "stamp_probe", "cc_java_probe")
+stamp_probe(name = "probe")
+cc_java_probe(name = "builtin_bi")
+"#,
+    );
+
+    let status_flag = format!(
+        "--workspace_status_command={}",
+        PathFragment::create(w.ws.join(status_script).to_str().unwrap())
+    );
+
+    let (code1, _, err1, _) = w.run(&[
+        "build",
+        "--stamp",
+        "--embed_label=rel-9.3.2",
+        "--client_env=SOURCE_DATE_EPOCH=1700000000",
+        &status_flag,
+        "//:probe",
+        "//:builtin_bi",
+    ]);
+    assert_eq!(code1, 0, "{err1}");
+
+    let execroot = w.rt.dirs.execroot();
+    let find_out = |name: &str| -> PathBuf {
+        fn walk(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let p = entry.path();
+                if p.file_name().is_some_and(|n| n == name) && p.is_file() {
+                    return Some(p);
+                }
+                if p.is_dir() {
+                    if let Some(found) = walk(&p, name) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        walk(std::path::Path::new(execroot.path_string()), name)
+            .unwrap_or_else(|| panic!("missing output {name}"))
+    };
+
+    let v1 = std::fs::read_to_string(find_out("volatile_out.txt")).unwrap();
+    let s1 = std::fs::read_to_string(find_out("stable_out.txt")).unwrap();
+    let c1 = std::fs::read_to_string(find_out("combined.txt")).unwrap();
+    assert_eq!(
+        v1,
+        "ts=1700000000;date=2023 Nov 14 22 13 20 Tue;rev=deadbeef\n"
+    );
+    assert_eq!(s1, "label=rel-9.3.2;custom=v1.2.3 with spaces\n");
+    assert_eq!(c1, format!("{v1}{s1}"));
+
+    let java_bi_props = std::fs::read_to_string(find_out("non_volatile_file.properties")).unwrap();
+    assert!(
+        java_bi_props.contains("build.label=rel-9.3.2"),
+        "{java_bi_props}"
+    );
+    let cc_vol_hdr = std::fs::read_to_string(find_out("volatile_file.h")).unwrap();
+    assert!(cc_vol_hdr.contains("1700000000"), "{cc_vol_hdr}");
+    assert!(cc_vol_hdr.contains("deadbeef"), "{cc_vol_hdr}");
+
+    // Rebuild with only volatile timestamp changed: `volatile_out.txt` updates unconditionally,
+    // while `CombineBuildInfo` stays cached because `volatile_out.txt` has constant metadata.
+    let explain_path = PathBuf::from(
+        PathFragment::create(w.root.join("explain2.txt").to_str().unwrap()).path_string(),
+    );
+    let explain_flag = format!("--explain={}", explain_path.display());
+    let (code2, _, err2, _) = w.run(&[
+        "build",
+        "--stamp",
+        "--embed_label=rel-9.3.2",
+        "--client_env=SOURCE_DATE_EPOCH=1700000500",
+        &status_flag,
+        &explain_flag,
+        "//:probe",
+    ]);
+    assert_eq!(code2, 0, "{err2}");
+    let v2 = std::fs::read_to_string(find_out("volatile_out.txt")).unwrap();
+    let c2 = std::fs::read_to_string(find_out("combined.txt")).unwrap();
+    assert!(v2.contains("ts=1700000500;"), "{v2}");
+    assert!(
+        c2.contains("ts=1700000000;"),
+        "downstream action must not be invalidated solely by volatile constant-metadata change: {c2}"
+    );
+    let explain2 = std::fs::read_to_string(&explain_path).unwrap_or_default();
+    assert!(!explain2.contains("CombineBuildInfo"), "{explain2}");
+
+    // Rebuild with stable `--embed_label` changed (also exercising `~/` expansion via `--client_env=HOME`):
+    // stable file changes, invalidating `CombineBuildInfo`, which then consumes both the new stable
+    // output and the updated volatile output.
+    let home_root_flag = format!(
+        "--client_env=HOME={}",
+        PathFragment::create(w.root.to_str().unwrap()).path_string()
+    );
+    let tilde_status_flag = format!("--workspace_status_command=~/ws/{status_script}");
+    let (code3, _, err3, _) = w.run(&[
+        "build",
+        "--stamp",
+        "--embed_label=rel-9.3.3",
+        "--client_env=SOURCE_DATE_EPOCH=1700000900",
+        &home_root_flag,
+        &tilde_status_flag,
+        "//:probe",
+    ]);
+    assert_eq!(code3, 0, "{err3}");
+    let c3 = std::fs::read_to_string(find_out("combined.txt")).unwrap();
+    assert!(c3.contains("ts=1700000900;"), "{c3}");
+    assert!(c3.contains("label=rel-9.3.3;"), "{c3}");
+}
+
+#[test]
+fn launcher_flag_alias_forwards_cc_and_default_providers_for_target_and_exec() {
+    let w = Ws::new("java-launcher-alias");
+    let rc_dir = w.root.join("rules_cc");
+    std::fs::create_dir_all(rc_dir.join("cc/common")).unwrap();
+    std::fs::write(
+        rc_dir.join("MODULE.bazel"),
+        "module(name = \"rules_cc\", version = \"0.2.25\")\n",
+    )
+    .unwrap();
+    std::fs::write(rc_dir.join("cc/common/BUILD"), "").unwrap();
+    std::fs::write(
+        rc_dir.join("cc/common/cc_info.bzl"),
+        "CcInfo = provider(fields = [\"tag\"])\n",
+    )
+    .unwrap();
+    std::fs::write(
+        rc_dir.join("cc/common/cc_common.bzl"),
+        "CcLauncherInfo = provider(fields = [\"tag\"])\ncc_common = struct(launcher_provider = CcLauncherInfo)\n",
+    )
+    .unwrap();
+    let rc_dir_starlark = PathFragment::create(rc_dir.to_str().unwrap())
+        .path_string()
+        .to_string();
+    w.write(
+        "MODULE.bazel",
+        &format!(
+            "module(name = \"w\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.25\")\nlocal_path_override(module_name = \"rules_cc\", path = \"{rc_dir_starlark}\")\n"
+        ),
+    );
+    w.write("data_t.txt", "target-data\n");
+    w.write("data_h.txt", "host-data\n");
+    w.write(
+        "defs.bzl",
+        r#"
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+
+CcLauncherInfo = cc_common.launcher_provider
+
+def _fake_launcher_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".bin")
+    ctx.actions.write(exe, ctx.attr.tag, is_executable = True)
+    rf = ctx.runfiles(files = ctx.files.data)
+    return [
+        DefaultInfo(executable = exe, files = depset([exe]), runfiles = rf),
+        CcInfo(tag = ctx.attr.tag),
+        CcLauncherInfo(tag = ctx.attr.tag + "_LI"),
+    ]
+
+fake_launcher = rule(
+    implementation = _fake_launcher_impl,
+    executable = True,
+    attrs = {
+        "tag": attr.string(mandatory = True),
+        "data": attr.label_list(allow_files = True),
+    },
+)
+
+def _consumer_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".summary")
+    t_has_cc = CcInfo in ctx.attr.target_alias
+    t_has_li = CcLauncherInfo in ctx.attr.target_alias
+    h_has_cc = CcInfo in ctx.attr.exec_alias
+    h_has_li = CcLauncherInfo in ctx.attr.exec_alias
+    t_tag = ctx.attr.target_alias[CcInfo].tag if t_has_cc else ""
+    t_li = ctx.attr.target_alias[CcLauncherInfo].tag if t_has_li else ""
+    h_tag = ctx.attr.exec_alias[CcInfo].tag if h_has_cc else ""
+    h_li = ctx.attr.exec_alias[CcLauncherInfo].tag if h_has_li else ""
+    t_files = [f.basename for f in ctx.attr.target_alias[DefaultInfo].files.to_list()]
+    h_files = [f.basename for f in ctx.attr.exec_alias[DefaultInfo].files.to_list()]
+    t_rf = [f.basename for f in ctx.attr.target_alias[DefaultInfo].default_runfiles.files.to_list()]
+    h_rf = [f.basename for f in ctx.attr.exec_alias[DefaultInfo].default_runfiles.files.to_list()]
+    ctx.actions.write(
+        out,
+        "t=%s,%s,%s,%s,%s,%s\nh=%s,%s,%s,%s,%s,%s\n" % (
+            t_has_cc, t_has_li, t_tag, t_li, t_files, t_rf,
+            h_has_cc, h_has_li, h_tag, h_li, h_files, h_rf,
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    attrs = {
+        "target_alias": attr.label(default = ":alias"),
+        "exec_alias": attr.label(default = ":alias", cfg = "exec"),
+    },
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        r#"
+load("@bazel_tools//tools/jdk:launcher_flag_alias.bzl", "launcher_flag_alias")
+load(":defs.bzl", "fake_launcher", "consumer")
+launcher_flag_alias(name = "alias")
+fake_launcher(name = "tgt_launcher", tag = "TGT_L", data = ["data_t.txt"])
+fake_launcher(name = "exec_launcher", tag = "EXEC_L", data = ["data_h.txt"])
+consumer(name = "check")
+"#,
+    );
+
+    // 1. Unset flags: `launcher_flag_alias` returns empty DefaultInfo without CcInfo/CcLauncherInfo.
+    let (code0, _, err0, _) = w.run(&["build", "//:check"]);
+    assert_eq!(code0, 0, "{err0}");
+
+    let execroot = w.rt.dirs.execroot();
+    let find_summary = || -> String {
+        fn walk(dir: &std::path::Path) -> Option<PathBuf> {
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let p = entry.path();
+                if p.file_name().is_some_and(|n| n == "check.summary") && p.is_file() {
+                    return Some(p);
+                }
+                if p.is_dir() {
+                    if let Some(found) = walk(&p) {
+                        return Some(found);
+                    }
+                }
+            }
+            None
+        }
+        let p = walk(std::path::Path::new(execroot.path_string())).expect("check.summary");
+        std::fs::read_to_string(p).unwrap()
+    };
+    let s0 = find_summary();
+    assert_eq!(s0, "t=False,False,,,[],[]\nh=False,False,,,[],[]\n");
+
+    // 2. `--java_launcher` (relative `:tgt_launcher`) and `--host_java_launcher` (`//:exec_launcher`):
+    // target alias forwards `tgt_launcher`, exec alias forwards `exec_launcher`.
+    let (code1, _, err1, _) = w.run(&[
+        "build",
+        "--java_launcher=:tgt_launcher",
+        "--host_java_launcher=//:exec_launcher",
+        "//:check",
+    ]);
+    assert_eq!(code1, 0, "{err1}");
+    let s1 = find_summary();
+    assert_eq!(
+        s1,
+        "t=True,True,TGT_L,TGT_L_LI,[\"tgt_launcher.bin\"],[\"tgt_launcher.bin\", \"data_t.txt\"]\nh=True,True,EXEC_L,EXEC_L_LI,[\"exec_launcher.bin\"],[\"exec_launcher.bin\", \"data_h.txt\"]\n"
+    );
+}

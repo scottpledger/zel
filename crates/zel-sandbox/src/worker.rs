@@ -1251,7 +1251,11 @@ impl WorkerProcess {
                 *arg0 = exec_root.join(p).to_string_lossy().into_owned();
             }
         }
-        let mut cmd = Command::new(&args[0]);
+        #[cfg(windows)]
+        let prog = crate::process_wrapper::normalize_windows_argv0(&args[0]);
+        #[cfg(not(windows))]
+        let prog = args[0].clone();
+        let mut cmd = Command::new(&prog);
         cmd.args(&args[1..])
             .current_dir(&exec_root)
             .env_clear()

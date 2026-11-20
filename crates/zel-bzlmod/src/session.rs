@@ -101,6 +101,88 @@ fn split_pair(v: &str) -> Option<(String, String)> {
         .map(|(a, b)| (a.to_string(), b.to_string()))
 }
 
+fn resolve_user_home(client_env: &BTreeMap<String, String>) -> Option<String> {
+    let non_empty = |v: Option<&String>| v.filter(|s| !s.is_empty()).cloned();
+    let non_empty_env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+    non_empty(client_env.get("HOME"))
+        .or_else(|| non_empty(client_env.get("USERPROFILE")))
+        .or_else(|| {
+            if client_env.contains_key("HOME") || client_env.contains_key("USERPROFILE") {
+                None
+            } else {
+                non_empty_env("HOME").or_else(|| non_empty_env("USERPROFILE"))
+            }
+        })
+}
+
+/// Expands `%workspace%` and `~` / `~/` (plus `%workspace%\` and `~\` on Windows) matching
+/// Bazel's `OptionsUtils.PathFragmentConverter` and `CredentialHelperOptionConverter`.
+pub(crate) fn expand_option_path(
+    p: &str,
+    workspace: &Path,
+    user_home: Option<&str>,
+    windows_mode: bool,
+) -> PathBuf {
+    let trim_dir = |base: &str| -> PathBuf {
+        if windows_mode && base.len() > 3 {
+            PathBuf::from(base.trim_end_matches(['/', '\\']))
+        } else {
+            PathBuf::from(base)
+        }
+    };
+    if let Some(rest) = p.strip_prefix("%workspace%/").or_else(|| {
+        if windows_mode {
+            p.strip_prefix("%workspace%\\")
+        } else {
+            None
+        }
+    }) {
+        trim_dir(&workspace.display().to_string()).join(rest)
+    } else if p == "%workspace%" {
+        workspace.to_path_buf()
+    } else if p == "~" {
+        if let Some(home) = user_home {
+            PathBuf::from(home)
+        } else {
+            workspace.join(p)
+        }
+    } else if let Some(rest) = p.strip_prefix("~/").or_else(|| {
+        if windows_mode {
+            p.strip_prefix("~\\")
+        } else {
+            None
+        }
+    }) {
+        if let Some(home) = user_home {
+            trim_dir(home).join(rest)
+        } else {
+            workspace.join(p)
+        }
+    } else {
+        let pb = PathBuf::from(p);
+        let has_win_drive = windows_mode
+            && p.as_bytes().get(0..3).is_some_and(|b| {
+                b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+            });
+        if pb.is_absolute() || has_win_drive {
+            pb
+        } else {
+            trim_dir(&workspace.display().to_string()).join(pb)
+        }
+    }
+}
+
+/// Formats an expanded option path in Bazel `PathFragment.getPathString()` form (`/` separators
+/// and uppercased drive letter on Windows) for Starlark `local_repository(path = ...)` attributes.
+pub(crate) fn format_option_path_fragment(p: &Path, windows_mode: bool) -> String {
+    let raw = p.display().to_string();
+    if windows_mode {
+        crate::rt::normalize_windows_starlark_path(&raw)
+    } else {
+        raw
+    }
+}
+
 impl BzlmodConfig {
     pub fn from_parsed(
         parsed: &ParsedCommandOptions,
@@ -108,19 +190,10 @@ impl BzlmodConfig {
         output_base: &Path,
         client_env: BTreeMap<String, String>,
     ) -> Result<Self, String> {
+        let user_home = resolve_user_home(&client_env);
+        let windows_mode = cfg!(windows);
         let abs = |p: &str| -> PathBuf {
-            if let Some(rest) = p.strip_prefix("%workspace%/") {
-                workspace.join(rest)
-            } else if p == "%workspace%" {
-                workspace.to_path_buf()
-            } else {
-                let pb = PathBuf::from(p);
-                if pb.is_absolute() {
-                    pb
-                } else {
-                    workspace.join(pb)
-                }
-            }
+            expand_option_path(p, workspace, user_home.as_deref(), windows_mode)
         };
         let mode_str = |n: &str, d: &str| {
             parsed.get_str(n).map(String::from).unwrap_or_else(|| {
@@ -169,16 +242,8 @@ impl BzlmodConfig {
                 .map(|v| {
                     split_pair(v)
                         .map(|(a, b)| {
-                            let b_path = if let Some(rest) = b.strip_prefix("%workspace%/") {
-                                workspace.join(rest)
-                            } else if b == "%workspace%" {
-                                workspace.to_path_buf()
-                            } else if Path::new(&b).is_absolute() {
-                                PathBuf::from(&b)
-                            } else {
-                                workspace.join(&b)
-                            };
-                            (a, b_path.display().to_string())
+                            let b_path = abs(&b);
+                            (a, format_option_path_fragment(&b_path, windows_mode))
                         })
                         .ok_or_else(|| {
                             let kind = if n == "override_module" { "Module overrides" } else { "Module injections" };
@@ -281,10 +346,19 @@ impl BzlmodConfig {
             semantics_fingerprint: crate::semantics_fp::stable_fingerprint(
                 &crate::semantics_fp::bool_overrides(parsed),
             ),
-            downloader_rewriter: crate::download::UrlRewriter::from_config_paths(
-                workspace,
-                &raw(parsed, "downloader_config"),
-            )?,
+            downloader_rewriter: {
+                let downloader_configs: Vec<String> = raw(parsed, "downloader_config")
+                    .into_iter()
+                    .map(|c| {
+                        if c.is_empty() {
+                            c
+                        } else {
+                            abs(&c).display().to_string()
+                        }
+                    })
+                    .collect();
+                crate::download::UrlRewriter::from_config_paths(workspace, &downloader_configs)?
+            },
             download_retries: parsed
                 .get_int("experimental_repository_downloader_retries")
                 .map(|v| v.max(0) as u32)
@@ -337,21 +411,50 @@ pub fn check_downloader_config(
     args: &[String],
     workspace: &Path,
 ) -> Result<(), String> {
-    check_repo_contents_cache_location(command, args, workspace)?;
-    check_override_flags(command, args, workspace)?;
+    let client_env = ParsedCommandOptions::extract_client_env(args);
+    check_downloader_config_with_env(command, args, workspace, &client_env)
+}
+
+/// Like [`check_downloader_config`] using a pre-extracted `--client_env` map so tilde expansion
+/// uses the exact same `HOME` / `USERPROFILE` resolution as [`BzlmodConfig::from_parsed`].
+pub fn check_downloader_config_with_env(
+    command: &str,
+    args: &[String],
+    workspace: &Path,
+    client_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    check_repo_contents_cache_location(command, args, workspace, client_env)?;
+    check_override_flags(command, args, workspace, client_env)?;
     if !args.iter().any(|a| a.contains("downloader_config")) {
         return Ok(());
     }
     let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
         return Ok(());
     };
-    crate::download::UrlRewriter::from_config_paths(workspace, &raw(&parsed, "downloader_config"))
-        .map(|_| ())
+    let user_home = resolve_user_home(client_env);
+    let downloader_configs: Vec<String> = raw(&parsed, "downloader_config")
+        .into_iter()
+        .map(|c| {
+            if c.is_empty() {
+                c
+            } else {
+                expand_option_path(&c, workspace, user_home.as_deref(), cfg!(windows))
+                    .display()
+                    .to_string()
+            }
+        })
+        .collect();
+    crate::download::UrlRewriter::from_config_paths(workspace, &downloader_configs).map(|_| ())
 }
 
 /// Option-parsing failures of `--override_repository`, `--override_module` and the `--inject_*` flags
 /// (`While parsing option --x=y: ...`), reported before any command runs.
-fn check_override_flags(command: &str, args: &[String], workspace: &Path) -> Result<(), String> {
+fn check_override_flags(
+    command: &str,
+    args: &[String],
+    workspace: &Path,
+    client_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
     if !args.iter().any(|a| {
         a.starts_with("--override_repository")
             || a.starts_with("--override_module")
@@ -366,7 +469,7 @@ fn check_override_flags(command: &str, args: &[String], workspace: &Path) -> Res
         &parsed,
         workspace,
         Path::new("/nonexistent-output-base"),
-        BTreeMap::new(),
+        client_env.clone(),
     ) {
         Err(e)
             if e.starts_with("While parsing option --override_")
@@ -384,23 +487,21 @@ fn check_repo_contents_cache_location(
     command: &str,
     args: &[String],
     workspace: &Path,
+    client_env: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    if !args
-        .iter()
-        .any(|a| a.starts_with("--repository_cache=") || a.starts_with("--repo_contents_cache="))
-    {
+    if !args.iter().any(|a| {
+        a == "--repository_cache"
+            || a.starts_with("--repository_cache=")
+            || a == "--repo_contents_cache"
+            || a.starts_with("--repo_contents_cache=")
+    }) {
         return Ok(());
     }
     let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
         return Ok(());
     };
-    let abs = |s: &str| {
-        if Path::new(s).is_absolute() {
-            PathBuf::from(s)
-        } else {
-            workspace.join(s)
-        }
-    };
+    let user_home = resolve_user_home(client_env);
+    let abs = |s: &str| expand_option_path(s, workspace, user_home.as_deref(), cfg!(windows));
     let contents = match raw(&parsed, "repo_contents_cache").last() {
         Some(s) if !s.is_empty() => abs(s),
         Some(_) => return Ok(()),
@@ -519,10 +620,13 @@ impl Session {
             let rt = Rt::new(boot_opts.clone(), empty);
             let canonical = format!("{name}+");
             let dir = rt.repo_dir(&canonical);
+            let is_local = rt.is_local_rule(spec);
+            let can_use_cached = !boot_opts.force && (!is_local || boot_opts.nofetch);
             let fp = rt.predeclared_input_hash(&canonical, spec);
             let marker = rt.external_dir().join(format!("@{canonical}.marker"));
             let _ = std::fs::create_dir_all(rt.external_dir());
-            if dir.exists()
+            if can_use_cached
+                && dir.exists()
                 && std::fs::read_to_string(&marker)
                     .map(|m| {
                         crate::fetch::marker_is_current(
@@ -534,12 +638,11 @@ impl Session {
                         )
                     })
                     .unwrap_or(false)
-                && !boot_opts.force
             {
                 return Ok(dir);
             }
             if let Some(rcc_dir) = &boot_opts.repo_contents_cache {
-                if !boot_opts.force {
+                if can_use_cached && !is_local {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                     let candidates = cache.get_candidate_repos(&fp);
                     for cand in candidates {
@@ -583,7 +686,7 @@ impl Session {
                 marker_text.push_str(&format!("{k} {val}\n"));
             }
             std::fs::write(&marker, &marker_text).map_err(|e| e.to_string())?;
-            if is_reproducible {
+            if is_reproducible && !is_local {
                 if let Some(rcc_dir) = &boot_opts.repo_contents_cache {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                     let _ = cache.move_to_cache(&dir, &marker, &fp);
@@ -893,6 +996,9 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     };
     let mut err = warn_lines(&session.warnings);
     let rt = session.rt.clone();
+    if configure {
+        rt.state.lock().unwrap().force_configure = true;
+    }
     let result: Result<String, (i32, String)> = (|| {
         if !targets.is_empty() {
             return fetch_targets(&session, &targets, &working_dir_rel)
@@ -1386,73 +1492,23 @@ impl Rt {
         v
     }
 
-    /// Whether `canonical` is created by a `local=True`-like rule (excluded from vendoring).
+    /// Whether `canonical` is created by a `local=True` or `configure=True` rule (excluded from vendoring).
     pub fn is_local_repo(self: &Arc<Self>, canonical: &str) -> bool {
         if self.opts.override_repository.keys().any(|k| k == canonical) {
             return true;
         }
         match self.repo_spec_for(canonical) {
-            Ok(Some(s)) => {
-                if matches!(
-                    s.rule_name.as_str(),
-                    "local_repository" | "new_local_repository"
-                ) && s.bzl_file.contains("bazel_tools")
-                {
-                    return true;
-                }
-                let (repo, pkg, name) = {
-                    let r = s.bzl_file.trim_start_matches('@');
-                    let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
-                    let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
-                    (repo.to_string(), pkg.to_string(), name.to_string())
-                };
-                let key = format!("@@{repo}//{pkg}:{name}");
-                match self.eval_bzl_fresh(&key, &repo, &pkg, &name) {
-                    Ok(c) => match c.globals.get(&s.rule_name) {
-                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
-                            .parse::<usize>()
-                            .ok()
-                            .map(|i| {
-                                let d = &self.state.lock().unwrap().rule_defs[i];
-                                d.local || d.configure
-                            })
-                            .unwrap_or(false),
-                        _ => false,
-                    },
-                    Err(_) => false,
-                }
-            }
+            Ok(Some(s)) => self.is_local_rule(&s) || self.is_configure_rule(&s),
             _ => false,
         }
     }
 
     pub fn is_configure_repo(self: &Arc<Self>, canonical: &str) -> Result<bool, String> {
-        match self.repo_spec_for(canonical) {
-            Ok(Some(s)) => {
-                if s.bzl_file.contains("bazel_tools") {
-                    return Ok(false);
-                }
-                let (repo, pkg, name) = {
-                    let r = s.bzl_file.trim_start_matches('@');
-                    let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
-                    let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
-                    (repo.to_string(), pkg.to_string(), name.to_string())
-                };
-                let key = format!("@@{repo}//{pkg}:{name}");
-                let c = self
-                    .eval_bzl_fresh(&key, &repo, &pkg, &name)
-                    .map_err(|e| e.to_string())?;
-                Ok(match c.globals.get(&s.rule_name) {
-                    Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
-                        .parse::<usize>()
-                        .ok()
-                        .map(|i| self.state.lock().unwrap().rule_defs[i].configure)
-                        .unwrap_or(false),
-                    _ => false,
-                })
-            }
-            Ok(None) => Ok(false),
-            Err(e) => Err(e),
+        match self.repo_spec_for(canonical)? {
+            Some(s) => Ok(self
+                .rule_meta_result(&s)?
+                .is_some_and(|(_, configure, _)| configure)),
+            None => Ok(false),
         }
     }
 }
@@ -1706,5 +1762,227 @@ mod repo_env_tests {
                 "expected None for {escaping_or_invalid}"
             );
         }
+    }
+
+    #[test]
+    fn tilde_paths_expand_home_and_windows_userprofile() {
+        let cfg_of = |client: &[(&str, &str)], args: &[&str]| -> BzlmodConfig {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let parsed = ParsedCommandOptions::parse_for_command("build", &args).unwrap();
+            let client = client
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            BzlmodConfig::from_parsed(&parsed, Path::new("/ws"), Path::new("/ob"), client).unwrap()
+        };
+
+        // Windows-style environment where HOME is unset (or empty) and USERPROFILE is set.
+        let win_cfg = cfg_of(
+            &[("USERPROFILE", "/users/win_alice")],
+            &[
+                "--repository_cache=~/bazel_cache",
+                "--repo_contents_cache=~",
+                "--distdir=~/dists",
+                "--credential_helper=example.com=~/bin/cred-helper",
+                "--override_repository=ext=~/repos/ext",
+                "--override_module=mod_a=~/mods/mod_a",
+            ],
+        );
+        assert_eq!(
+            win_cfg.repository_cache.as_deref(),
+            Some(Path::new("/users/win_alice/bazel_cache"))
+        );
+        assert_eq!(
+            win_cfg.repo_contents_cache.as_deref(),
+            Some(Path::new("/users/win_alice"))
+        );
+        assert_eq!(
+            win_cfg.distdirs,
+            vec![PathBuf::from("/users/win_alice/dists")]
+        );
+        assert_eq!(
+            win_cfg.credential_helpers,
+            vec![(
+                "example.com".to_string(),
+                PathBuf::from("/users/win_alice/bin/cred-helper")
+            )]
+        );
+        assert_eq!(
+            win_cfg.override_repository.get("ext").map(PathBuf::as_path),
+            Some(Path::new("/users/win_alice/repos/ext"))
+        );
+        assert_eq!(
+            win_cfg.override_modules,
+            vec![(
+                "mod_a".to_string(),
+                "/users/win_alice/mods/mod_a".to_string()
+            )]
+        );
+
+        // When both HOME and USERPROFILE are set, HOME takes precedence; empty HOME falls back to USERPROFILE.
+        let both_cfg = cfg_of(
+            &[("HOME", "/home/alice"), ("USERPROFILE", "/users/win_alice")],
+            &["--repository_cache=~/cache"],
+        );
+        assert_eq!(
+            both_cfg.repository_cache.as_deref(),
+            Some(Path::new("/home/alice/cache"))
+        );
+        let empty_home_cfg = cfg_of(
+            &[("HOME", ""), ("USERPROFILE", "/users/win_alice")],
+            &["--repository_cache=~/cache"],
+        );
+        assert_eq!(
+            empty_home_cfg.repository_cache.as_deref(),
+            Some(Path::new("/users/win_alice/cache"))
+        );
+
+        // When neither home variable is non-empty, literal ~/... falls back to workspace-relative.
+        let no_home_cfg = cfg_of(
+            &[("HOME", ""), ("USERPROFILE", "")],
+            &["--repository_cache=~/cache"],
+        );
+        assert_eq!(
+            no_home_cfg.repository_cache.as_deref(),
+            Some(Path::new("/ws/~/cache"))
+        );
+
+        // Windows backslash forms (`~\...`, `%workspace%\...`, drive-letter `USERPROFILE`) normalize
+        // to Bazel PathFragment `/` separators and uppercase drive letters.
+        let win_tilde = expand_option_path(
+            r"~\mods\mod_a",
+            Path::new(r"d:\ws"),
+            Some(r"c:\Users\win_alice\"),
+            true,
+        );
+        assert_eq!(
+            format_option_path_fragment(&win_tilde, true),
+            "C:/Users/win_alice/mods/mod_a"
+        );
+        let win_ws = expand_option_path(
+            r"%workspace%\sub\mod_b",
+            Path::new(r"d:\ws\"),
+            Some(r"c:\Users\win_alice"),
+            true,
+        );
+        assert_eq!(
+            format_option_path_fragment(&win_ws, true),
+            "D:/ws/sub/mod_b"
+        );
+    }
+
+    #[test]
+    fn early_option_checks_expand_tilde_from_client_env_matching_from_parsed() {
+        let root = std::env::temp_dir().join(format!(
+            "zel-bzlmod-tilde-client-env-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        let ob = root.join("ob");
+        let custom_home = root.join("custom_home");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&ob).unwrap();
+        std::fs::create_dir_all(&custom_home).unwrap();
+        std::fs::write(custom_home.join("valid_dl.cfg"), "rewrite (.*) $1\n").unwrap();
+        std::fs::write(custom_home.join("bad_dl.cfg"), "invalid_directive foo\n").unwrap();
+
+        assert_ne!(
+            std::env::var("HOME").ok().as_deref(),
+            custom_home.to_str(),
+            "custom_home must differ from process HOME"
+        );
+
+        let run_both = |raw_args: &[String]| -> (Result<(), String>, Result<BzlmodConfig, String>) {
+            let early = check_downloader_config("build", raw_args, &ws);
+            let client_env = ParsedCommandOptions::extract_client_env(raw_args);
+            let parsed = ParsedCommandOptions::parse_for_command("build", raw_args).unwrap();
+            let full = BzlmodConfig::from_parsed(&parsed, &ws, &ob, client_env);
+            (early, full)
+        };
+
+        // Valid `--downloader_config=~/...` under custom `--client_env=HOME=...` succeeds in both.
+        let valid_dl_args = vec![
+            format!("--client_env=HOME={}", custom_home.display()),
+            "--downloader_config=~/valid_dl.cfg".to_string(),
+        ];
+        let (early_ok, full_ok) = run_both(&valid_dl_args);
+        assert!(early_ok.is_ok(), "{early_ok:?}");
+        assert!(
+            full_ok.expect("from_parsed").downloader_rewriter.is_some(),
+            "downloader rewriter should be loaded from custom client HOME"
+        );
+
+        // Malformed `--downloader_config=~/...` under custom `--client_env=HOME=...` fails identically.
+        let bad_dl_args = vec![
+            format!("--client_env=HOME={}", custom_home.display()),
+            "--downloader_config=~/bad_dl.cfg".to_string(),
+        ];
+        let (early_bad, full_bad) = run_both(&bad_dl_args);
+        assert_eq!(early_bad.unwrap_err(), full_bad.unwrap_err());
+
+        // Windows-style `--client_env=HOME=` + `--client_env=USERPROFILE=<custom_home>` also matches.
+        let userprofile_dl_args = vec![
+            "--client_env=HOME=".to_string(),
+            format!("--client_env=USERPROFILE={}", custom_home.display()),
+            "--downloader_config=~/valid_dl.cfg".to_string(),
+        ];
+        let (early_up, full_up) = run_both(&userprofile_dl_args);
+        assert!(early_up.is_ok(), "{early_up:?}");
+        assert!(full_up.is_ok(), "{full_up:?}");
+
+        // `--repo_contents_cache=~/...` expanding inside `ws` via `--client_env=HOME=<root>` is
+        // rejected by early check (both `=` and two-token forms), matching `from_parsed`'s path.
+        let inside_cache_args = vec![
+            format!("--client_env=HOME={}", root.display()),
+            "--repo_contents_cache=~/ws/cache_inside".to_string(),
+        ];
+        let (early_inside, full_inside) = run_both(&inside_cache_args);
+        let expected_inside = ws.join("cache_inside");
+        assert_eq!(
+            full_inside
+                .expect("from_parsed")
+                .repo_contents_cache
+                .as_deref(),
+            Some(expected_inside.as_path())
+        );
+        let inside_err = early_inside.expect_err("cache inside main repo must fail");
+        assert!(
+            inside_err
+                .replace('\\', "/")
+                .contains(&expected_inside.to_string_lossy().replace('\\', "/"))
+                && inside_err.contains("is inside the main repo"),
+            "{inside_err}"
+        );
+
+        let two_token_inside_args = vec![
+            "--client_env".to_string(),
+            format!("HOME={}", root.display()),
+            "--repo_contents_cache".to_string(),
+            "~/ws/cache_inside".to_string(),
+        ];
+        let two_token_err =
+            check_downloader_config("build", &two_token_inside_args, &ws).unwrap_err();
+        assert!(
+            two_token_err.contains("is inside the main repo"),
+            "{two_token_err}"
+        );
+
+        // `--repo_contents_cache=~/...` expanding outside `ws` via `--client_env=HOME=<custom_home>` succeeds.
+        let outside_cache_args = vec![
+            format!("--client_env=HOME={}", custom_home.display()),
+            "--repo_contents_cache=~/cache_outside".to_string(),
+        ];
+        let (early_outside, full_outside) = run_both(&outside_cache_args);
+        assert!(early_outside.is_ok(), "{early_outside:?}");
+        assert_eq!(
+            full_outside
+                .expect("from_parsed")
+                .repo_contents_cache
+                .as_deref(),
+            Some(custom_home.join("cache_outside").as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

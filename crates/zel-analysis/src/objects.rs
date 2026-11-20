@@ -82,7 +82,9 @@ impl Artifact {
 fn file_key(a: &Artifact) -> (String, u8) {
     (
         a.exec_path.path_string().to_string(),
-        (a.is_tree_artifact as u8) | ((a.is_unresolved_symlink as u8) << 1),
+        (a.is_tree_artifact as u8)
+            | ((a.is_unresolved_symlink as u8) << 1)
+            | ((a.is_constant_metadata as u8) << 2),
     )
 }
 

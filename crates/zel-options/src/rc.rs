@@ -569,7 +569,13 @@ pub fn discover_and_load_rc_files(
             home_dir
                 .map(PathFragment::create)
                 .unwrap_or_else(|| cwd.get_relative_str("~"))
-        } else if let Some(rest) = custom_rc.strip_prefix("~/") {
+        } else if let Some(rest) = custom_rc.strip_prefix("~/").or_else(|| {
+            if Os::current() == Os::Windows {
+                custom_rc.strip_prefix("~\\")
+            } else {
+                None
+            }
+        }) {
             match home_dir {
                 Some(h) => PathFragment::create(h).get_relative_str(rest),
                 None => cwd.get_relative_str(custom_rc),

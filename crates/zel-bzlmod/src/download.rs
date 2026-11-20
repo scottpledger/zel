@@ -1054,10 +1054,17 @@ impl Downloader {
 
         let finish =
             |data: &[u8], url: String, from_cache: bool| -> Result<DownloadResult, String> {
+                let integrity = if !req.integrity.is_empty() {
+                    req.integrity.clone()
+                } else if let Some(c) = &checksum {
+                    c.to_integrity()
+                } else {
+                    format!("sha256-{}", base64_encode(&crate::hash::sha256(data)))
+                };
                 Ok(DownloadResult {
                     path: req.output.clone(),
                     sha256: crate::hash::sha256_hex(data),
-                    integrity: format!("sha256-{}", base64_encode(&crate::hash::sha256(data))),
+                    integrity,
                     url,
                     from_cache,
                 })
@@ -1138,7 +1145,7 @@ impl Downloader {
             let mut last_err = String::new();
             let mut any_retryable = false;
             for url in &urls {
-                match self.fetch_one(url, req) {
+                match self.fetch_one(url, req, attempt) {
                     Ok(data) => {
                         if let Some(c) = &checksum {
                             if let Err(e) = c.verify(&data) {
@@ -1241,60 +1248,89 @@ impl Downloader {
         self.set_mode(out, exec)
     }
 
+    fn connect_timeout_for(&self, attempt: u32) -> Duration {
+        let secs = (1u64 << attempt.min(4)).min(10);
+        Duration::from_secs(secs).min(self.timeout)
+    }
+
     fn headers_for(&self, url: &str, req: &DownloadRequest, parsed: &Url) -> Vec<(String, String)> {
         let mut h: Vec<(String, String)> = req
             .headers
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        if let Some(a) = req.auth.get(url) {
-            let login = a.get("login").cloned().unwrap_or_default();
-            let password = a.get("password").cloned().unwrap_or_default();
-            match a.get("type").map(|s| s.as_str()) {
-                Some("basic") => h.push((
-                    "Authorization".into(),
-                    format!(
-                        "Basic {}",
-                        base64_encode(format!("{}:{}", login, password).as_bytes())
-                    ),
-                )),
-                Some("pattern") => {
-                    let p = a.get("pattern").cloned().unwrap_or_default();
-                    h.push((
-                        "Authorization".into(),
-                        p.replace("<login>", &login)
-                            .replace("<password>", &password),
-                    ));
+        // Mirrors `CredentialHelperCredentials.getRequestMetadata` +
+        // `HttpConnectorMultiplexer.getHeaderFunction`:
+        // - When a `--credential_helper` matches `url`, its headers override matching keys in
+        //   `req.headers` (`buildKeepingLast`) and fallback credentials (`req.auth`, URL
+        //   userinfo, `.netrc`) are never consulted — even if the helper returned `{}` or
+        //   only non-`Authorization` headers, or failed with an `IOException`.
+        // - Only when no `--credential_helper` matches `url` (`Ok(None)`) do we fall back to
+        //   `req.auth`, URL userinfo, and `.netrc`.
+        match crate::netrc::resolve_credential_helper_headers(
+            url,
+            &self.credential_helpers,
+            &self.client_env,
+        ) {
+            Ok(Some(extra)) => {
+                for (k, _) in &extra {
+                    h.retain(|(existing, _)| !existing.eq_ignore_ascii_case(k));
                 }
-                _ => {}
+                h.extend(extra);
+                return h;
             }
-        } else if let Some(ui) = &parsed.userinfo {
-            if !h
-                .iter()
+            Err(_) => {
+                return h;
+            }
+            Ok(None) => {}
+        }
+        let has_auth = |hdrs: &[(String, String)]| {
+            hdrs.iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            {
+        };
+        if !has_auth(&h) {
+            if let Some(a) = req.auth.get(url) {
+                let login = a.get("login").cloned().unwrap_or_default();
+                let password = a.get("password").cloned().unwrap_or_default();
+                match a.get("type").map(|s| s.as_str()) {
+                    Some("basic") => h.push((
+                        "Authorization".into(),
+                        format!(
+                            "Basic {}",
+                            base64_encode(format!("{}:{}", login, password).as_bytes())
+                        ),
+                    )),
+                    Some("pattern") => {
+                        let p = a.get("pattern").cloned().unwrap_or_default();
+                        h.push((
+                            "Authorization".into(),
+                            p.replace("<login>", &login)
+                                .replace("<password>", &password),
+                        ));
+                    }
+                    _ => {}
+                }
+            } else if let Some(ui) = &parsed.userinfo {
                 h.push((
                     "Authorization".into(),
                     format!("Basic {}", base64_encode(percent_decode(ui).as_bytes())),
                 ));
             }
         }
-        if !h
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-        {
-            if let Ok(extra) =
-                crate::netrc::resolve_auth_headers(url, &self.credential_helpers, &self.client_env)
-            {
-                for (k, v) in extra {
-                    h.push((k, v));
-                }
+        if !has_auth(&h) {
+            for (k, v) in crate::netrc::resolve_netrc_headers(url, &self.client_env) {
+                h.push((k, v));
             }
         }
         h
     }
 
-    fn fetch_one(&self, url: &str, req: &DownloadRequest) -> Result<Vec<u8>, FetchError> {
+    fn fetch_one(
+        &self,
+        url: &str,
+        req: &DownloadRequest,
+        attempt: u32,
+    ) -> Result<Vec<u8>, FetchError> {
         let parsed = Url::parse(url).map_err(|e| fe(e, false))?;
         match parsed.scheme.as_str() {
             "file" => {
@@ -1304,11 +1340,11 @@ impl Downloader {
             }
             "http" => {
                 let headers = self.headers_for(url, req, &parsed);
-                self.http_get(&parsed, &headers)
+                self.http_get(&parsed, &headers, attempt)
             }
             "https" => {
                 let headers = self.headers_for(url, req, &parsed);
-                self.curl_get(&parsed.to_url_string_without_userinfo(), &headers)
+                self.curl_get(&parsed.to_url_string_without_userinfo(), &headers, attempt)
             }
             other => Err(fe(
                 format!("Unsupported URL scheme '{}' in {}", other, url),
@@ -1317,22 +1353,47 @@ impl Downloader {
         }
     }
 
-    fn curl_get(&self, url: &str, headers: &[(String, String)]) -> Result<Vec<u8>, FetchError> {
+    fn curl_get(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        attempt: u32,
+    ) -> Result<Vec<u8>, FetchError> {
         let tmp = std::env::temp_dir().join(format!(
             "zel-curl-{}-{}",
             std::process::id(),
             next_counter()
         ));
+        let connect_secs = self.connect_timeout_for(attempt).as_secs_f64().max(0.1);
+        let connect_str = if (connect_secs.fract()).abs() < 1e-6 {
+            format!("{}", connect_secs as u64)
+        } else {
+            format!("{connect_secs:.3}")
+        };
         let mut cmd = Command::new(&self.curl_binary);
         cmd.args([
             "-fsSL",
             "--connect-timeout",
-            "2",
+            &connect_str,
             "--max-redirs",
             &self.max_redirects.to_string(),
-            "-o",
-        ])
-        .arg(&tmp);
+        ]);
+        let speed_secs = self.timeout.as_secs();
+        if speed_secs > 0 {
+            cmd.args([
+                "--speed-time",
+                &speed_secs.to_string(),
+                "--speed-limit",
+                "1",
+            ]);
+        }
+        if !headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+        {
+            cmd.args(["-A", "bazel/9.3.2"]);
+        }
+        cmd.arg("-o").arg(&tmp);
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
         }
@@ -1377,10 +1438,16 @@ impl Downloader {
         data
     }
 
-    fn http_get(&self, start: &Url, headers: &[(String, String)]) -> Result<Vec<u8>, FetchError> {
+    fn http_get(
+        &self,
+        start: &Url,
+        headers: &[(String, String)],
+        attempt: u32,
+    ) -> Result<Vec<u8>, FetchError> {
         let mut url = start.clone();
         let mut visited: Vec<String> = vec![start.to_url_string()];
         let mut headers: Vec<(String, String)> = headers.to_vec();
+        let connect_timeout = self.connect_timeout_for(attempt);
         for _ in 0..=self.max_redirects {
             let addr_str = format!("{}:{}", url.host, url.port.unwrap_or(80));
             let addrs: Vec<_> = addr_str
@@ -1390,7 +1457,7 @@ impl Downloader {
             let mut stream = None;
             let mut last = String::from("no addresses");
             for a in addrs {
-                match TcpStream::connect_timeout(&a, self.timeout.min(Duration::from_secs(20))) {
+                match TcpStream::connect_timeout(&a, connect_timeout) {
                     Ok(s) => {
                         stream = Some(s);
                         break;
@@ -1409,10 +1476,17 @@ impl Downloader {
             let _ = stream.set_write_timeout(Some(self.timeout));
             let mut w = stream.try_clone().map_err(|e| fe(e.to_string(), true))?;
             let mut reqs = format!(
-                "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: zel\r\nAccept: */*\r\nConnection: close\r\n",
+                "GET {} HTTP/1.1\r\nHost: {}\r\n",
                 url.path_and_query,
                 url.host_header()
             );
+            if !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+            {
+                reqs.push_str("User-Agent: bazel/9.3.2\r\n");
+            }
+            reqs.push_str("Accept: */*\r\nConnection: close\r\n");
             for (k, v) in &headers {
                 if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
                     return Err(fe("Invalid header containing newline", false));
@@ -1465,6 +1539,7 @@ impl Downloader {
                         return self.curl_get(
                             &next.to_url_string_without_userinfo(),
                             &strip_auth(&headers, &url, &next),
+                            attempt,
                         );
                     }
                     s => return Err(fe(format!("Redirect to unsupported scheme '{}'", s), false)),
@@ -2203,6 +2278,168 @@ mod tests {
             PathBuf::from("/a")
         );
         assert!(file_url_to_path(&Url::parse("file://remote/a").unwrap()).is_err());
+    }
+
+    #[test]
+    fn integrity_preserved_user_agent_timeout_and_credential_helper_priority() {
+        let d = tmpdir("dl-parity");
+        fs::write(d.join("payload"), b"hello-integrity").unwrap();
+        let sha512_sri = format!(
+            "sha512-{}",
+            base64_encode(&crate::hash::sha512(b"hello-integrity"))
+        );
+        let dl = Downloader {
+            repo_cache: Some(RepositoryCache::new(d.join("cache"))),
+            timeout: Duration::from_secs(30),
+            ..quick()
+        };
+        assert_eq!(dl.connect_timeout_for(0), Duration::from_secs(1));
+        assert_eq!(dl.connect_timeout_for(1), Duration::from_secs(2));
+        assert_eq!(dl.connect_timeout_for(2), Duration::from_secs(4));
+        assert_eq!(dl.connect_timeout_for(3), Duration::from_secs(8));
+        assert_eq!(dl.connect_timeout_for(4), Duration::from_secs(10));
+        assert_eq!(dl.connect_timeout_for(9), Duration::from_secs(10));
+
+        let mut r1 = req(vec![file_url(&d.join("payload"))], d.join("o1"));
+        r1.integrity = sha512_sri.clone();
+        let res1 = dl.download(&r1).unwrap();
+        assert_eq!(res1.integrity, sha512_sri);
+
+        // Cache hit also preserves caller-supplied SHA-512 integrity.
+        let mut r2 = req(vec![file_url(&d.join("missing"))], d.join("o2"));
+        r2.integrity = sha512_sri.clone();
+        let res2 = dl.download(&r2).unwrap();
+        assert!(res2.from_cache);
+        assert_eq!(res2.integrity, sha512_sri);
+
+        #[cfg(unix)]
+        if net_ok() {
+            use std::os::unix::fs::PermissionsExt;
+            let helper = d.join("cred_helper.sh");
+            fs::write(
+                &helper,
+                "#!/bin/sh\n[ \"$1\" = \"get\" ] || exit 2\necho '{\"headers\":{\"Authorization\":[\"Bearer FROM-HELPER\"],\"X-Helper\":[\"ok\"]}}'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+            let netrc = d.join(".netrc");
+            fs::write(&netrc, "machine 127.0.0.1 login netrc_u password netrc_p\n").unwrap();
+
+            let (port, seen) = serve(1, |_, _| ok(b"authed-body"));
+            let url = format!("http://127.0.0.1:{port}/pkg.tgz");
+            let mut r = req(vec![url.clone()], d.join("authed_out"));
+            r.headers.insert(
+                "Authorization".to_string(),
+                "Bearer FROM-STARLARK".to_string(),
+            );
+            r.headers
+                .insert("X-Starlark-Keep".to_string(), "kept".to_string());
+            let mut auth_entry = BTreeMap::new();
+            auth_entry.insert("type".to_string(), "basic".to_string());
+            auth_entry.insert("login".to_string(), "auth_u".to_string());
+            auth_entry.insert("password".to_string(), "auth_p".to_string());
+            r.auth.insert(url, auth_entry);
+
+            let mut client_env = BTreeMap::new();
+            client_env.insert("NETRC".to_string(), netrc.to_string_lossy().into_owned());
+            let dl_http = Downloader {
+                credential_helpers: vec![("127.0.0.1".to_string(), helper)],
+                client_env: client_env.clone(),
+                ..quick()
+            };
+            dl_http.download(&r).unwrap();
+            let reqtext = seen.lock().unwrap()[0].clone();
+            assert!(reqtext.contains("User-Agent: bazel/9.3.2\r\n"), "{reqtext}");
+            assert!(
+                reqtext.contains("Authorization: Bearer FROM-HELPER\r\n"),
+                "{reqtext}"
+            );
+            assert!(!reqtext.contains("FROM-STARLARK"), "{reqtext}");
+            assert!(reqtext.contains("X-Starlark-Keep: kept\r\n"), "{reqtext}");
+            assert!(reqtext.contains("X-Helper: ok\r\n"), "{reqtext}");
+
+            // Matching `--credential_helper` returning non-Authorization custom headers or `{}`
+            // must NOT attach `.netrc` or Starlark `auth` `Authorization`, whereas a non-matching
+            // `--credential_helper` (`other.example.com`) MUST still fall back to `.netrc`.
+            let custom_only_helper = d.join("cred_helper_custom_only.sh");
+            fs::write(
+                &custom_only_helper,
+                "#!/bin/sh\n[ \"$1\" = \"get\" ] || exit 2\necho '{\"headers\":{\"X-Custom-Auth\":[\"custom-only\"]}}'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&custom_only_helper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let empty_helper = d.join("cred_helper_empty.sh");
+            fs::write(
+                &empty_helper,
+                "#!/bin/sh\n[ \"$1\" = \"get\" ] || exit 2\necho '{}'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&empty_helper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let (port2, seen2) = serve(3, |_, _| ok(b"body2"));
+            let url2 = format!("http://127.0.0.1:{port2}/pkg2.tgz");
+
+            // 1. Matching helper with custom header only (both Starlark `auth` and `.netrc` set).
+            let mut r_custom = req(vec![url2.clone()], d.join("custom_only_out"));
+            let mut fallback_auth = BTreeMap::new();
+            fallback_auth.insert("type".to_string(), "basic".to_string());
+            fallback_auth.insert("login".to_string(), "auth_u".to_string());
+            fallback_auth.insert("password".to_string(), "auth_p".to_string());
+            r_custom.auth.insert(url2.clone(), fallback_auth.clone());
+            Downloader {
+                credential_helpers: vec![("127.0.0.1".to_string(), custom_only_helper.clone())],
+                client_env: client_env.clone(),
+                ..quick()
+            }
+            .download(&r_custom)
+            .unwrap();
+
+            // 2. Matching helper returning `{}` (both Starlark `auth` and `.netrc` set).
+            let mut r_empty = req(vec![url2.clone()], d.join("empty_helper_out"));
+            r_empty.auth.insert(url2.clone(), fallback_auth);
+            Downloader {
+                credential_helpers: vec![("127.0.0.1".to_string(), empty_helper)],
+                client_env: client_env.clone(),
+                ..quick()
+            }
+            .download(&r_empty)
+            .unwrap();
+
+            // 3. Non-matching helper (`other.example.com`) falls back to `.netrc` for `127.0.0.1`.
+            let r_non_match = req(vec![url2], d.join("non_match_out"));
+            Downloader {
+                credential_helpers: vec![("other.example.com".to_string(), custom_only_helper)],
+                client_env,
+                ..quick()
+            }
+            .download(&r_non_match)
+            .unwrap();
+
+            let reqs2 = seen2.lock().unwrap().clone();
+            assert!(
+                reqs2[0].contains("X-Custom-Auth: custom-only\r\n"),
+                "{}",
+                reqs2[0]
+            );
+            assert!(
+                !reqs2[0].to_ascii_lowercase().contains("authorization:"),
+                "matching custom-header helper must not attach fallback auth:\n{}",
+                reqs2[0]
+            );
+            assert!(
+                !reqs2[1].to_ascii_lowercase().contains("authorization:"),
+                "matching empty helper must not attach fallback auth:\n{}",
+                reqs2[1]
+            );
+            let expected_netrc_b64 = base64_encode(b"netrc_u:netrc_p");
+            assert!(
+                reqs2[2].contains(&format!("Authorization: Basic {expected_netrc_b64}\r\n")),
+                "non-matching helper must still fall back to .netrc:\n{}",
+                reqs2[2]
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
     }
 }
 

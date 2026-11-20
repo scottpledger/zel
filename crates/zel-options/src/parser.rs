@@ -14,7 +14,9 @@
 
 //! Schema-driven options parser matching Bazel's `OptionsParserImpl.java`.
 
-use crate::converters::{convert_flag_alias, convert_option};
+use crate::converters::{
+    convert_flag_alias, convert_option_with_home, expand_tilde_path_with_home, resolve_user_home,
+};
 use crate::definition::{OptionDefinition, OptionValueDescription};
 use crate::error::OptionsParsingError;
 use crate::flag_tables::{
@@ -116,6 +118,9 @@ pub struct ParsedCommandOptions {
     pub skipped_args: Vec<SkippedArg>,
     /// All `--flag_alias=name=target` mappings (including native flag targets) for shorthand swap.
     command_line_aliases: BTreeMap<String, String>,
+    /// Effective home directory for `~` expansion in `PathFragment`-based converters (`--client_env`
+    /// `HOME` / `USERPROFILE` overriding process `HOME` / `USERPROFILE`).
+    user_home: Option<String>,
 }
 
 /// `--jobs` default (`auto` = `HOST_CPUS`, capped at `MAX_JOBS`); kept as a plain number for the
@@ -160,6 +165,7 @@ impl Default for ParsedCommandOptions {
             post_double_dash_residue: Vec::new(),
             skipped_args: Vec::new(),
             command_line_aliases: BTreeMap::new(),
+            user_home: resolve_user_home(None),
         }
     }
 }
@@ -323,6 +329,8 @@ impl ParsedCommandOptions {
         initial_aliases: Option<&BTreeMap<String, String>>,
     ) -> Result<Self, OptionsParsingError> {
         let mut opts = Self::default();
+        let mut initial_client_env = Self::extract_client_env(args);
+        opts.user_home = resolve_user_home(Some(&initial_client_env));
         if let Some(aliases) = initial_aliases {
             for (k, v) in aliases {
                 opts.command_line_aliases.insert(k.clone(), v.clone());
@@ -345,6 +353,10 @@ impl ParsedCommandOptions {
                 let (rc_expanded, _) =
                     crate::config_expander::expand_command_args(&override_rc, command, &[])?;
                 if !rc_expanded.is_empty() {
+                    let mut rc_env = Self::extract_client_env(&rc_expanded);
+                    rc_env.extend(initial_client_env.clone());
+                    initial_client_env = rc_env;
+                    opts.user_home = resolve_user_home(Some(&initial_client_env));
                     let rc_prio = OptionPriority::lowest_at_category(PriorityCategory::RcFile);
                     let _ =
                         opts.parse_into(command, &rc_expanded, rc_prio, "rc_override", None, None)?;
@@ -359,6 +371,8 @@ impl ParsedCommandOptions {
                         command,
                         &remaining,
                     )?;
+                    initial_client_env.extend(Self::extract_client_env(&effective_args_owned));
+                    opts.user_home = resolve_user_home(Some(&initial_client_env));
                 } else {
                     effective_args_owned = remaining;
                 }
@@ -896,12 +910,13 @@ impl ParsedCommandOptions {
                     }
                 }
             }
-            let converted = convert_option(&raw_value, def).map_err(|e| {
-                OptionsParsingError::new(format!(
-                    "While parsing option {command_line_form}: {}",
-                    e.message
-                ))
-            })?;
+            let converted = convert_option_with_home(&raw_value, def, self.user_home.as_deref())
+                .map_err(|e| {
+                    OptionsParsingError::new(format!(
+                        "While parsing option {command_line_form}: {}",
+                        e.message
+                    ))
+                })?;
 
             // Register flag alias mappings (used by `swap_shorthand_alias`).
             if def.name == "flag_alias" && implicit_dependent.is_none() {
@@ -1041,7 +1056,9 @@ impl ParsedCommandOptions {
             // 8. Implicit requirements run AFTER the parent is stored, at child priority.
             if def.has_implicit_requirements() {
                 if let Some(default_raw) = def.default_value {
-                    if let Ok(default_val) = convert_option(default_raw, def) {
+                    if let Ok(default_val) =
+                        convert_option_with_home(default_raw, def, self.user_home.as_deref())
+                    {
                         if converted == default_val {
                             self.warnings.push(format!(
                                 "{command_line_form} sets option '--{}' to its default value. Since this option has implicit requirements that are ignored when it is set to its default value, this has no effect. Specifically, this options expands to {{{}}}.",
@@ -1141,7 +1158,8 @@ impl ParsedCommandOptions {
 
                     if should_apply {
                         for val_str in &sv.flag_values {
-                            let converted = convert_option(val_str, def)?;
+                            let converted =
+                                convert_option_with_home(val_str, def, self.user_home.as_deref())?;
                             self.update_legacy_field(def.name, &converted, val_str);
                             let priority = OptionPriority::lowest_at_category(
                                 PriorityCategory::InvocationPolicy,
@@ -1197,7 +1215,7 @@ impl ParsedCommandOptions {
         let shown_policy_values = format!("[{}]", policy_values.join(", "));
         let mut converted_policy: Vec<String> = Vec::new();
         for v in policy_values {
-            match convert_option(v, def)? {
+            match convert_option_with_home(v, def, self.user_home.as_deref())? {
                 OptionValue::List(items) if def.allow_multiple => {
                     converted_policy.extend(items.iter().map(|i| i.to_string_repr()))
                 }
@@ -1212,7 +1230,7 @@ impl ParsedCommandOptions {
         };
         let default_repr = def
             .default_value
-            .and_then(|d| convert_option(d, def).ok())
+            .and_then(|d| convert_option_with_home(d, def, self.user_home.as_deref()).ok())
             .map(|v| v.to_string_repr());
         if !def.allow_multiple {
             if let Some(d) = &default_repr {
@@ -1283,7 +1301,7 @@ impl ParsedCommandOptions {
         def: &'static OptionDefinition,
         raw: &str,
     ) -> Result<(), OptionsParsingError> {
-        let converted = convert_option(raw, def)?;
+        let converted = convert_option_with_home(raw, def, self.user_home.as_deref())?;
         self.clear_policy_value(def);
         self.update_legacy_field(def.name, &converted, raw);
         let canonical = if def.option_type == OptionType::Boolean {
@@ -1385,8 +1403,9 @@ impl ParsedCommandOptions {
                 self.build_event_json_file = if raw_val.is_empty() {
                     None
                 } else {
-                    Some(PathFragment::create(&crate::converters::expand_tilde_path(
+                    Some(PathFragment::create(&expand_tilde_path_with_home(
                         raw_val,
+                        self.user_home.as_deref(),
                     )))
                 };
             }

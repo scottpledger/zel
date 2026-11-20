@@ -738,6 +738,14 @@ enum Data {
     Zip(usize, usize, u16, String),
     /// Uncompressed bytes at buf[start..start+len].
     Raw(usize, usize),
+    /// GNU oldgnu sparse tar payload: packed bytes at `buf[data_start..data_start+stored_size]`,
+    /// expanded length `realsize`, and `(offset, numbytes)` chunks.
+    Sparse {
+        data_start: usize,
+        stored_size: usize,
+        realsize: usize,
+        chunks: Vec<(usize, usize)>,
+    },
     /// Deflated bytes at buf[start..start+len]; expected uncompressed size and crc.
     #[allow(dead_code)]
     Deflated(usize, usize, usize, u32),
@@ -760,6 +768,45 @@ fn entry_data(buf: &[u8], d: &Data, archive: &Path, name: &str) -> Result<Vec<u8
         Data::None => Ok(Vec::new()),
         Data::Zip(lho, size, method, base) => zip_entry_bytes(buf, *lho, *size, *method, base),
         Data::Raw(s, l) => Ok(buf[*s..*s + *l].to_vec()),
+        Data::Sparse {
+            data_start,
+            stored_size,
+            realsize,
+            chunks,
+        } => {
+            let packed = buf
+                .get(*data_start..data_start.saturating_add(*stored_size))
+                .ok_or_else(|| {
+                    format!(
+                        "{}: Unexpected end of tar archive (entry {})",
+                        archive.display(),
+                        name
+                    )
+                })?;
+            let mut out = vec![0u8; *realsize];
+            let mut src_pos = 0usize;
+            for &(offset, numbytes) in chunks {
+                if numbytes == 0 {
+                    continue;
+                }
+                let src_end = src_pos.checked_add(numbytes).filter(|&e| e <= packed.len());
+                let dst_end = offset.checked_add(numbytes).filter(|&e| e <= out.len());
+                match (src_end, dst_end) {
+                    (Some(se), Some(de)) => {
+                        out[offset..de].copy_from_slice(&packed[src_pos..se]);
+                        src_pos = se;
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{}: Corrupted GNU sparse tar entry {}",
+                            archive.display(),
+                            name
+                        ));
+                    }
+                }
+            }
+            Ok(out)
+        }
         Data::Deflated(s, l, size, crc) => {
             let (out, _) = inflate_limit(&buf[*s..*s + *l], *size)
                 .map_err(|e| format!("{}: {} (entry {})", archive.display(), e, name))?;
@@ -804,7 +851,13 @@ fn entry_data(buf: &[u8], d: &Data, archive: &Path, name: &str) -> Result<Vec<u8
 pub(crate) fn join_rel(root: &Path, segs: &[String]) -> PathBuf {
     let mut p = root.to_path_buf();
     for s in segs {
-        p.push(s);
+        if s == ".." {
+            if !p.pop() {
+                p.push("..");
+            }
+        } else {
+            p.push(s);
+        }
     }
     p
 }
@@ -879,12 +932,6 @@ fn extract_entries(
         let rel = dp.segs;
         if dp.skip || rel.is_empty() {
             continue;
-        }
-        if rel.first().map(|s| s == "..").unwrap_or(false) {
-            return Err(format!(
-                "Failed to extract {}, path is escaping the destination directory",
-                rel.join("/")
-            ));
         }
         let out_path = join_rel(root, &rel);
         if let Some(parent) = out_path.parent() {
@@ -1024,7 +1071,7 @@ fn extract_entries(
 
 fn cstr(b: &[u8]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf8_lossy(&b[..end]).to_string()
+    b[..end].iter().map(|&c| c as char).collect()
 }
 
 fn parse_octal(b: &[u8]) -> Result<u64, String> {
@@ -1119,7 +1166,39 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
                 size = v;
             }
         }
-        let data_start = pos + 512;
+        let mut cur = pos + 512;
+        let mut sparse_meta: Option<(usize, Vec<(usize, usize)>)> = None;
+        if typeflag == b'S' {
+            let mut chunks = Vec::new();
+            for i in 0..4 {
+                let base = 386 + i * 24;
+                let off = parse_octal(&hdr[base..base + 12])? as usize;
+                let num = parse_octal(&hdr[base + 12..base + 24])? as usize;
+                if off > 0 || num > 0 {
+                    chunks.push((off, num));
+                }
+            }
+            let mut is_extended = hdr[482] != 0 && hdr[482] != b'0';
+            let realsize = parse_octal(&hdr[483..495])? as usize;
+            while is_extended {
+                if cur + 512 > buf.len() {
+                    return Err("Unexpected end of tar archive".to_string());
+                }
+                let ext = &buf[cur..cur + 512];
+                cur += 512;
+                for i in 0..21 {
+                    let base = i * 24;
+                    let off = parse_octal(&ext[base..base + 12])? as usize;
+                    let num = parse_octal(&ext[base + 12..base + 24])? as usize;
+                    if off > 0 || num > 0 {
+                        chunks.push((off, num));
+                    }
+                }
+                is_extended = ext[504] != 0 && ext[504] != b'0';
+            }
+            sparse_meta = Some((realsize, chunks));
+        }
+        let data_start = cur;
         let data_end = data_start
             .checked_add(size)
             .filter(|&e| e <= buf.len())
@@ -1168,6 +1247,7 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
                     Kind::File
                 }
             }
+            b'S' => Kind::File,
             b'5' => Kind::Dir,
             b'2' => Kind::Symlink(link),
             b'1' => Kind::Hardlink(link),
@@ -1177,6 +1257,13 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
         let data = if matches!(kind, Kind::File) {
             if matches!(typeflag, b'3' | b'4' | b'6') {
                 Data::None
+            } else if let Some((realsize, chunks)) = sparse_meta {
+                Data::Sparse {
+                    data_start,
+                    stored_size: size,
+                    realsize,
+                    chunks,
+                }
             } else {
                 Data::Raw(data_start, size)
             }
@@ -1653,11 +1740,8 @@ fn extract_ar(
         }
         let name = opts.rename_files.get(&name).cloned().unwrap_or(name);
         let segs = normalize(&name);
-        if segs.is_empty() || segs[0] == ".." {
-            return Err(format!(
-                "Failed to extract {}, path is escaping the destination directory",
-                name
-            ));
+        if segs.is_empty() {
+            return Err(format!("Failed to extract {}, empty file path", name));
         }
         let out = join_rel(root, &segs);
         if let Some(p) = out.parent() {
@@ -1765,11 +1849,8 @@ fn extract_single_file(
     };
     let name = opts.rename_files.get(&name).cloned().unwrap_or(name);
     let segs = normalize(&name);
-    if segs.is_empty() || segs[0] == ".." {
-        return Err(format!(
-            "Failed to extract {}, path is escaping the destination directory",
-            name
-        ));
+    if segs.is_empty() {
+        return Err(format!("Failed to extract {}, empty file path", name));
     }
     let out = join_rel(root, &segs);
     if let Some(p) = out.parent() {
@@ -2094,15 +2175,19 @@ mod tests {
     }
 
     #[test]
-    fn path_traversal_rejected() {
+    fn path_traversal_matches_bazel_9_3_2_decompressors() {
         let d = tmpdir("traversal");
         let mut t = Vec::new();
-        tar_add(&mut t, "../evil", b'0', b"x", 0o644, "");
+        tar_add(&mut t, "../sibling.txt", b'0', b"x", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("x.tar"), &t).unwrap();
-        let e = extract(&d.join("x.tar"), &d.join("out"), &ExtractOptions::default()).unwrap_err();
-        assert!(e.contains("escaping the destination directory"), "{}", e);
-        assert!(!d.join("evil").exists());
+        extract(
+            &d.join("x.tar"),
+            &d.join("box1/out"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(d.join("box1/sibling.txt")).unwrap(), b"x");
 
         let mut t = Vec::new();
         tar_add(&mut t, "a/l", b'2', b"", 0o777, "../../etc/passwd");
@@ -2118,17 +2203,18 @@ mod tests {
         #[cfg(unix)]
         assert!(fs::read_link(d.join("out2/a/l")).is_ok());
 
-        // `a/../../b` normalises to ../b
+        // `a/../../b` normalises to `../b`
         let mut t = Vec::new();
-        tar_add(&mut t, "a/../../b", b'0', b"x", 0o644, "");
+        tar_add(&mut t, "a/../../b", b'0', b"y", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("z.tar"), &t).unwrap();
-        assert!(extract(
+        extract(
             &d.join("z.tar"),
-            &d.join("out3"),
-            &ExtractOptions::default()
+            &d.join("box3/out3"),
+            &ExtractOptions::default(),
         )
-        .is_err());
+        .unwrap();
+        assert_eq!(fs::read(d.join("box3/b")).unwrap(), b"y");
 
         // absolute entry names are made relative
         let mut t = Vec::new();
@@ -2142,6 +2228,97 @@ mod tests {
         )
         .unwrap();
         assert!(d.join("out4/abs/f").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn tar_iso8859_1_names_and_gnu_sparse_members() {
+        let d = tmpdir("tar-latin1-sparse");
+        let mut t = Vec::new();
+
+        // 1. USTAR member with raw ISO-8859-1 byte 0xfc ('ü'), not valid UTF-8.
+        let mut h1 = tar_header("x", b'0', 5, 0o644, "");
+        h1[..9].copy_from_slice(b"f\xfcbar.txt");
+        h1[9] = 0;
+        h1[148..156].copy_from_slice(b"        ");
+        let s1: u32 = h1.iter().map(|&b| b as u32).sum();
+        h1[148..156].copy_from_slice(format!("{:06o}\0 ", s1).as_bytes());
+        t.extend_from_slice(&h1);
+        t.extend_from_slice(b"latin");
+        t.extend(vec![0u8; 512 - 5]);
+
+        // 2. GNU 'L' longname with ISO-8859-1 byte 0xe9 ('é').
+        let mut ln = b"long_caf\xe9_".to_vec();
+        ln.extend(std::iter::repeat_n(b'a', 110));
+        ln.push(0);
+        tar_add(&mut t, "././@LongLink", b'L', &ln, 0o644, "");
+        tar_add(&mut t, "ignored", b'0', b"longlatin", 0o644, "");
+
+        // 3. GNU oldgnu sparse member (typeflag 'S') with 6 chunks (4 inline + 2 in extension block).
+        let chunks: [(usize, &[u8]); 6] = [
+            (0, b"AA"),
+            (100, b"BB"),
+            (200, b"CC"),
+            (300, b"DD"),
+            (400, b"EE"),
+            (1020, b"FF"),
+        ];
+        let realsize = 1024usize;
+        let mut packed = Vec::new();
+        for (_, bytes) in chunks {
+            packed.extend_from_slice(bytes);
+        }
+        let mut hs = vec![0u8; 512];
+        hs[..10].copy_from_slice(b"sparse.bin");
+        hs[100..108].copy_from_slice(b"0000644\0");
+        hs[108..116].copy_from_slice(b"0000000\0");
+        hs[116..124].copy_from_slice(b"0000000\0");
+        hs[124..136].copy_from_slice(format!("{:011o}\0", packed.len()).as_bytes());
+        hs[136..148].copy_from_slice(b"00000000000\0");
+        hs[148..156].copy_from_slice(b"        ");
+        hs[156] = b'S';
+        hs[257..265].copy_from_slice(b"ustar  \0");
+        for (i, &(off, bytes)) in chunks[..4].iter().enumerate() {
+            let base = 386 + i * 24;
+            hs[base..base + 12].copy_from_slice(format!("{:011o}\0", off).as_bytes());
+            hs[base + 12..base + 24].copy_from_slice(format!("{:011o}\0", bytes.len()).as_bytes());
+        }
+        hs[482] = 1; // isextended = true
+        hs[483..495].copy_from_slice(format!("{:011o}\0", realsize).as_bytes());
+        let ss: u32 = hs.iter().map(|&b| b as u32).sum();
+        hs[148..156].copy_from_slice(format!("{:06o}\0 ", ss).as_bytes());
+        t.extend_from_slice(&hs);
+
+        let mut ext = vec![0u8; 512];
+        for (i, &(off, bytes)) in chunks[4..].iter().enumerate() {
+            let base = i * 24;
+            ext[base..base + 12].copy_from_slice(format!("{:011o}\0", off).as_bytes());
+            ext[base + 12..base + 24].copy_from_slice(format!("{:011o}\0", bytes.len()).as_bytes());
+        }
+        ext[504] = 0; // isextended = false
+        t.extend_from_slice(&ext);
+
+        t.extend_from_slice(&packed);
+        t.extend(vec![0u8; (512 - packed.len() % 512) % 512]);
+        tar_end(&mut t);
+
+        fs::write(d.join("s.tar"), &t).unwrap();
+        extract(&d.join("s.tar"), &d.join("out"), &ExtractOptions::default()).unwrap();
+
+        assert_eq!(fs::read(d.join("out/fübar.txt")).unwrap(), b"latin");
+        let expected_long = format!("long_café_{}", "a".repeat(110));
+        assert_eq!(
+            fs::read(d.join("out").join(expected_long)).unwrap(),
+            b"longlatin"
+        );
+        let sparse_out = fs::read(d.join("out/sparse.bin")).unwrap();
+        assert_eq!(sparse_out.len(), realsize);
+        let mut expected_sparse = vec![0u8; realsize];
+        for (off, bytes) in chunks {
+            expected_sparse[off..off + bytes.len()].copy_from_slice(bytes);
+        }
+        assert_eq!(sparse_out, expected_sparse);
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -2306,11 +2483,13 @@ mod tests {
             deflate: false,
         }]);
         fs::write(d.join("z.zip"), &z).unwrap();
-        assert!(
-            extract(&d.join("z.zip"), &d.join("o"), &ExtractOptions::default())
-                .unwrap_err()
-                .contains("escaping")
-        );
+        extract(
+            &d.join("z.zip"),
+            &d.join("zbox/o"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(d.join("zbox/f")).unwrap(), b"data");
         // default perms when no unix attrs: 0o755 (ZipDecompressor.getPermissions)
         let z = build_zip(&[ZE {
             name: "plain",

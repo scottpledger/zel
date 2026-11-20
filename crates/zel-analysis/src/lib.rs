@@ -170,10 +170,21 @@ impl BuildConfigurationKey {
     /// Returns the string rendering of option `name` from `options`, `native`, or the default in
     /// `build_options_table`.
     pub fn option_str(&self, name: &str) -> Option<String> {
+        let null_default = build_options::find_option(name)
+            .map(|(_, o)| o.default == "null")
+            .unwrap_or(false);
         if let Some(v) = self.options.get(name) {
+            if null_default && (v == "null" || v == NULL_VALUE) {
+                return None;
+            }
             return Some(v.clone());
         }
-        if let Some(n) = self.native.get(name) {
+        let native_name = if self.is_exec && name == "java_launcher" {
+            "host_java_launcher"
+        } else {
+            name
+        };
+        if let Some(n) = self.native.get(native_name) {
             return match &n.value {
                 build_options::ConfigValue::Null => None,
                 other => Some(other.display()),
@@ -280,8 +291,20 @@ impl BuildConfigurationKey {
         out.cpu = native("host_cpu")
             .or_else(|| self.options.get("host_cpu").cloned())
             .unwrap_or_else(|| build_options::auto_host_cpu().to_string());
-        // JavaOptions.getExec: --plugin is not propagated to the exec configuration (avoids cycles).
+        // JavaOptions.getExec: --plugin is not propagated to the exec configuration (avoids cycles),
+        // while `java_launcher` in the exec configuration comes from `host_java_launcher`.
         out.options.remove("plugin");
+        let host_launcher = self
+            .options
+            .get("host_java_launcher")
+            .cloned()
+            .or_else(|| native("host_java_launcher"))
+            .filter(|s| !s.is_empty() && s != "null" && s != NULL_VALUE);
+        if let Some(hl) = host_launcher {
+            out.options.insert("java_launcher".to_string(), hl);
+        } else {
+            out.options.remove("java_launcher");
+        }
         const KEY: &str = "//command_line_option:platforms";
         // `SkyframeExecutor.setBaselineConfiguration`: BASELINE_EXEC_CONFIGURATION is the exec
         // transition applied to the top-level options with the *host platform* as exec platform,
@@ -509,9 +532,20 @@ impl BuildConfigurationKey {
                 continue;
             }
             if let Some((_, opt)) = find_option(name) {
-                let raws: Vec<String> = if opt.java_type.starts_with("List<")
-                    || opt.java_type.starts_with("ImmutableList<")
-                {
+                let is_list = opt.java_type.starts_with("List<")
+                    || opt.java_type.starts_with("ImmutableList<");
+                if opt.default == "null" && (raw == "null" || raw == NULL_VALUE) {
+                    o.set(
+                        name,
+                        if is_list {
+                            ConfigValue::List(vec![])
+                        } else {
+                            ConfigValue::Null
+                        },
+                    );
+                    continue;
+                }
+                let raws: Vec<String> = if is_list {
                     raw.split(',')
                         .filter(|p| !p.is_empty())
                         .map(str::to_string)
@@ -714,6 +748,10 @@ pub struct Artifact {
     pub root: ArtifactRoot,
     /// `declare_symlink()` artifact: an unresolved (possibly dangling) symlink.
     pub is_unresolved_symlink: bool,
+    /// `ConstantMetadataArtifact` (`volatile-status.txt` and outputs of `transform_version_file`):
+    /// action cache digesting tracks existence rather than content so volatile updates do not
+    /// invalidate downstream actions.
+    pub is_constant_metadata: bool,
     /// Path relative to `$EXECROOT/_main` (e.g. `src/main.rs` or `bazel-out/darwin_arm64-fastbuild/bin/src/app`).
     pub exec_path: PathFragment,
     /// Path relative to the owning root (`src/main.rs` or `src/app`).
@@ -743,6 +781,7 @@ impl Artifact {
             is_tree_artifact: false,
             root: ArtifactRoot::Source,
             is_unresolved_symlink: false,
+            is_constant_metadata: false,
             exec_path,
             root_relative_path,
             owner_label,
@@ -778,6 +817,7 @@ impl Artifact {
             is_tree_artifact: false,
             root: ArtifactRoot::Bin,
             is_unresolved_symlink: false,
+            is_constant_metadata: false,
             exec_path,
             root_relative_path,
             owner_label,
@@ -806,6 +846,7 @@ impl Artifact {
             is_tree_artifact: false,
             root,
             is_unresolved_symlink: false,
+            is_constant_metadata: false,
             exec_path,
             root_relative_path,
             owner_label,
@@ -872,6 +913,7 @@ impl Artifact {
         self.is_source == other.is_source
             && self.is_tree_artifact == other.is_tree_artifact
             && self.is_unresolved_symlink == other.is_unresolved_symlink
+            && self.is_constant_metadata == other.is_constant_metadata
             && self.root == other.root
             && self.exec_path == other.exec_path
     }
@@ -956,6 +998,127 @@ pub struct JavaCompileSpec {
     pub deps_proto: String,
 }
 
+/// Execution-time Starlark translator callback for `actions.transform_version_file` and
+/// `actions.transform_info_file` (`BuildInfoFileWriteAction`).
+pub type BuildInfoTranslateFn = std::sync::Arc<
+    dyn Fn(&BTreeMap<String, String>) -> Result<Vec<(String, String)>, String> + Send + Sync,
+>;
+
+#[derive(Clone)]
+pub struct BuildInfoTranslator {
+    pub key: String,
+    func: BuildInfoTranslateFn,
+}
+
+impl BuildInfoTranslator {
+    pub fn new(key: impl Into<String>, func: BuildInfoTranslateFn) -> Self {
+        Self {
+            key: key.into(),
+            func,
+        }
+    }
+
+    pub fn translate(
+        &self,
+        status_map: &BTreeMap<String, String>,
+    ) -> Result<Vec<(String, String)>, String> {
+        (self.func)(status_map)
+    }
+}
+
+impl fmt::Debug for BuildInfoTranslator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BuildInfoTranslator")
+            .field("key", &self.key)
+            .finish()
+    }
+}
+
+impl PartialEq for BuildInfoTranslator {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for BuildInfoTranslator {}
+
+/// Parses workspace status file bytes (`stable-status.txt` / `volatile-status.txt`) into `out`,
+/// matching `BuildInfoTranslationHelper::ParseFile`: splits each `' '`-bearing line on the first
+/// `' '` without trimming values and fails with `<key> is duplicated in the file.` if `key` is
+/// already present, while lines without `' '` insert `(line, "")` only if absent (ignoring later
+/// spaceless repeats without overwriting existing values).
+pub fn parse_workspace_status_file(
+    bytes: &[u8],
+    out: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let text = String::from_utf8_lossy(bytes);
+    let body = text.strip_suffix('\n').unwrap_or(&text);
+    if body.is_empty() {
+        return Ok(());
+    }
+    for raw_line in body.split('\n') {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((key, val)) = line.split_once(' ') {
+            if out.contains_key(key) {
+                return Err(format!("{key} is duplicated in the file."));
+            }
+            out.insert(key.to_string(), val.to_string());
+        } else {
+            out.entry(line.to_string()).or_default();
+        }
+    }
+    Ok(())
+}
+
+/// Reads and parses a workspace status file from `fs`, returning `Could not open file: <path>`
+/// without modifying `out` when `path` cannot be opened.
+pub fn read_workspace_status_file(
+    fs: &dyn zel_vfs::FileSystem,
+    path: &PathFragment,
+    out: &mut BTreeMap<String, String>,
+) -> Result<(), String> {
+    let bytes = fs
+        .read_file(path)
+        .map_err(|_| format!("Could not open file: {path}"))?;
+    parse_workspace_status_file(&bytes, out)
+}
+
+/// Formats a UTC Unix epoch timestamp in Bazel's `FORMATTED_DATE` layout (`yyyy MMM d HH mm ss EEE`,
+/// e.g. `1970 Jan 1 00 00 00 Thu`).
+pub fn format_utc_build_date(epoch_secs: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let days = epoch_secs.div_euclid(86_400);
+    let sod = epoch_secs.rem_euclid(86_400);
+    let hour = sod / 3_600;
+    let minute = (sod % 3_600) / 60;
+    let second = sod % 60;
+    let wday = (days + 4).rem_euclid(7) as usize;
+    // Howard Hinnant's civil_from_days (UTC proleptic Gregorian).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    if m <= 2 {
+        y += 1;
+    }
+    format!(
+        "{y:04} {} {d} {hour:02} {minute:02} {second:02} {}",
+        MONTHS[(m - 1) as usize],
+        WEEKDAYS[wday],
+    )
+}
+
 /// Action specification generated during the Analysis phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAnalysisMetadata {
@@ -998,6 +1161,14 @@ pub enum ActionAnalysisMetadata {
         substitutions: Vec<(String, String)>,
         is_executable: bool,
     },
+    BuildInfoTranslateAction {
+        owner: Label,
+        template: Artifact,
+        status_file: Artifact,
+        output: Artifact,
+        is_volatile: bool,
+        translator: BuildInfoTranslator,
+    },
 }
 
 impl ActionAnalysisMetadata {
@@ -1007,6 +1178,7 @@ impl ActionAnalysisMetadata {
             Self::FileWriteAction { .. } => "FileWrite",
             Self::SymlinkAction { .. } => "Symlink",
             Self::TemplateExpansionAction { .. } => "TemplateExpand",
+            Self::BuildInfoTranslateAction { .. } => "TranslateBuildInfo",
         }
     }
 
@@ -1015,7 +1187,8 @@ impl ActionAnalysisMetadata {
             Self::SpawnAction { owner, .. }
             | Self::FileWriteAction { owner, .. }
             | Self::SymlinkAction { owner, .. }
-            | Self::TemplateExpansionAction { owner, .. } => owner,
+            | Self::TemplateExpansionAction { owner, .. }
+            | Self::BuildInfoTranslateAction { owner, .. } => owner,
         }
     }
 
@@ -1023,6 +1196,11 @@ impl ActionAnalysisMetadata {
         match self {
             Self::SpawnAction { inputs, .. } => inputs.clone(),
             Self::TemplateExpansionAction { template, .. } => vec![template.clone()],
+            Self::BuildInfoTranslateAction {
+                status_file,
+                template,
+                ..
+            } => vec![status_file.clone(), template.clone()],
             Self::FileWriteAction { .. } | Self::SymlinkAction { .. } => Vec::new(),
         }
     }
@@ -1039,7 +1217,8 @@ impl ActionAnalysisMetadata {
             Self::SpawnAction { outputs, .. } => outputs.clone(),
             Self::FileWriteAction { output, .. }
             | Self::SymlinkAction { output, .. }
-            | Self::TemplateExpansionAction { output, .. } => vec![output.clone()],
+            | Self::TemplateExpansionAction { output, .. }
+            | Self::BuildInfoTranslateAction { output, .. } => vec![output.clone()],
         }
     }
 
@@ -1107,6 +1286,20 @@ impl ActionAnalysisMetadata {
                     fp.add_str(k).add_str(v);
                 }
             }
+            Self::BuildInfoTranslateAction {
+                template,
+                status_file,
+                output,
+                is_volatile,
+                translator,
+                ..
+            } => {
+                fp.add_str(template.exec_path.path_string())
+                    .add_str(status_file.exec_path.path_string())
+                    .add_str(output.exec_path.path_string())
+                    .add_bool(*is_volatile)
+                    .add_str(&translator.key);
+            }
         }
         if let Self::SpawnAction {
             java_compile: Some(jc),
@@ -1153,6 +1346,13 @@ impl ActionAnalysisMetadata {
             }
             Self::TemplateExpansionAction { output, .. } => {
                 format!("Expanding template {}", output.exec_path)
+            }
+            Self::BuildInfoTranslateAction { is_volatile, .. } => {
+                if *is_volatile {
+                    "Translating volatile BuildInfo file".to_string()
+                } else {
+                    "Translating stable BuildInfo file".to_string()
+                }
             }
         }
     }
@@ -1411,5 +1611,103 @@ mod tests {
         };
         let act2 = act1.clone();
         assert_eq!(act1.action_key(), act2.action_key());
+    }
+
+    #[test]
+    fn workspace_status_parser_and_utc_date_formatting_match_bazel() {
+        assert_eq!(format_utc_build_date(0), "1970 Jan 1 00 00 00 Thu");
+        assert_eq!(
+            format_utc_build_date(1_700_000_000),
+            "2023 Nov 14 22 13 20 Tue"
+        );
+        let mut map = BTreeMap::new();
+        parse_workspace_status_file(
+            b"BUILD_EMBED_LABEL rel 1.2.3\nEMPTY_KEY\n\nSTABLE_SPACE  leading_and_inner spaces \r\n",
+            &mut map,
+        )
+        .unwrap();
+        assert_eq!(map.get("BUILD_EMBED_LABEL").unwrap(), "rel 1.2.3");
+        assert_eq!(map.get("EMPTY_KEY").unwrap(), "");
+        assert_eq!(
+            map.get("STABLE_SPACE").unwrap(),
+            " leading_and_inner spaces "
+        );
+        let mut spaceless_repeat = BTreeMap::new();
+        parse_workspace_status_file(b"FOO\nFOO\n", &mut spaceless_repeat).unwrap();
+        assert_eq!(spaceless_repeat.get("FOO").map(String::as_str), Some(""));
+
+        let mut val_then_spaceless = BTreeMap::new();
+        parse_workspace_status_file(b"FOO val\nFOO\n", &mut val_then_spaceless).unwrap();
+        assert_eq!(
+            val_then_spaceless.get("FOO").map(String::as_str),
+            Some("val")
+        );
+
+        let mut spaceless_then_val = BTreeMap::new();
+        assert_eq!(
+            parse_workspace_status_file(b"FOO\nFOO val\n", &mut spaceless_then_val),
+            Err("FOO is duplicated in the file.".to_string())
+        );
+
+        let mut bad = BTreeMap::new();
+        assert_eq!(
+            parse_workspace_status_file(b"DUP_KEY a\nDUP_KEY b\n", &mut bad),
+            Err("DUP_KEY is duplicated in the file.".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_transition_treats_null_host_java_launcher_as_unset() {
+        let host_cpu = build_options::auto_host_cpu();
+        let baseline_exec = BuildConfigurationKey::target(host_cpu, "fastbuild").to_exec();
+
+        let mut cfg = BuildConfigurationKey::target(host_cpu, "fastbuild");
+        cfg.options
+            .insert("java_launcher".into(), "@@//pkg:target_launcher".into());
+        cfg.native.insert(
+            "java_launcher".into(),
+            NativeSetting {
+                raw: "//pkg:target_launcher".into(),
+                value: build_options::ConfigValue::Scalar("@@//pkg:target_launcher".into()),
+            },
+        );
+        cfg.options
+            .insert("host_java_launcher".into(), "null".into());
+        cfg.native.insert(
+            "host_java_launcher".into(),
+            NativeSetting {
+                raw: String::new(),
+                value: build_options::ConfigValue::Null,
+            },
+        );
+
+        let exec_cfg = cfg.to_exec();
+        assert!(
+            !exec_cfg.options.contains_key("java_launcher"),
+            "exec options should omit unset java_launcher: {:?}",
+            exec_cfg.options
+        );
+        assert_eq!(exec_cfg.option_str("java_launcher"), None);
+        assert_eq!(
+            fragments::late_bound_label("java", "launcher", &exec_cfg),
+            None
+        );
+        assert_eq!(
+            exec_cfg.build_options().get("java_launcher"),
+            Some(&build_options::ConfigValue::Null)
+        );
+        assert_eq!(exec_cfg.checksum(), baseline_exec.checksum());
+
+        cfg.options
+            .insert("host_java_launcher".into(), "@@//pkg:host_launcher".into());
+        let exec_with_host = cfg.to_exec();
+        assert_eq!(
+            exec_with_host.option_str("java_launcher").as_deref(),
+            Some("@@//pkg:host_launcher")
+        );
+        assert_eq!(
+            fragments::late_bound_label("java", "launcher", &exec_with_host),
+            Some(Label::parse_canonical("@@//pkg:host_launcher").unwrap())
+        );
     }
 }

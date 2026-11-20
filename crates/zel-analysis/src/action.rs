@@ -227,6 +227,14 @@ pub enum ActionKind {
         /// `computed_substitutions`, applied after plain ones.
         computed_substitutions: Vec<(String, String)>,
     },
+    /// `ctx.actions.transform_version_file` / `ctx.actions.transform_info_file`
+    /// (`BuildInfoFileWriteAction`).
+    BuildInfoTranslate {
+        template: Artifact,
+        status_file: Artifact,
+        is_volatile: bool,
+        translator: crate::BuildInfoTranslator,
+    },
 }
 
 /// Target type for `SymlinkAction` (`SymlinkAction.TargetType`) / `UnresolvedSymlinkAction`.
@@ -508,6 +516,18 @@ impl Action {
                     fp.add_str(k).add_str(v);
                 }
             }
+            ActionKind::BuildInfoTranslate {
+                template,
+                status_file,
+                is_volatile,
+                translator,
+            } => {
+                fp.add_str("TranslateBuildInfo")
+                    .add_str(template.exec_path.path_string())
+                    .add_str(status_file.exec_path.path_string())
+                    .add_bool(*is_volatile)
+                    .add_str(&translator.key);
+            }
         }
         for (k, v) in &self.env {
             fp.add_str(k).add_str(v);
@@ -707,6 +727,7 @@ impl Action {
                         is_tree_artifact: false,
                         root: crate::ArtifactRoot::Bin,
                         is_unresolved_symlink: false,
+                        is_constant_metadata: false,
                         exec_path: PathFragment::create(&path),
                         root_relative_path: PathFragment::create(
                             path.strip_prefix(&format!(
@@ -814,6 +835,23 @@ impl Action {
                         output: output.clone(),
                         substitutions: subs,
                         is_executable: *is_executable,
+                    });
+                }
+            }
+            ActionKind::BuildInfoTranslate {
+                template,
+                status_file,
+                is_volatile,
+                translator,
+            } => {
+                if let Some(output) = self.outputs.first() {
+                    out.push(ActionAnalysisMetadata::BuildInfoTranslateAction {
+                        owner: self.owner.clone(),
+                        template: template.clone(),
+                        status_file: status_file.clone(),
+                        output: output.clone(),
+                        is_volatile: *is_volatile,
+                        translator: translator.clone(),
                     });
                 }
             }
