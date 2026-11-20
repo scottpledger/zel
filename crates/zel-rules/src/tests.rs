@@ -4685,6 +4685,36 @@ set_flag = rule(
     build_setting = config.string_set(flag = True),
 )
 
+def _disallowed_proto_impl(ctx):
+    _ = ctx.fragments.proto.strict_proto_deps()
+    return []
+
+disallowed_proto_rule = rule(
+    implementation = _disallowed_proto_impl,
+    fragments = ["proto"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "set_flag", "disallowed_proto_rule")
+load("@protobuf//:defs.bzl", "check_rule")
+set_flag(name = "my_set", build_setting_default = set(["x"]))
+check_rule(name = "chk")
+disallowed_proto_rule(name = "bad_proto")
+"#,
+        ),
+    ]);
+    let pb_root = PathFragment::create("/pb");
+    ws.fs.create_directory_and_parents(&pb_root).unwrap();
+    ws.fs
+        .write_file(&pb_root.get_relative_str("BUILD"), b"")
+        .unwrap();
+    ws.fs
+        .write_file(
+            &pb_root.get_relative_str("defs.bzl"),
+            br#"
 def _check_impl(ctx):
     df = ctx.configuration.disabled_features()
     ios_min = ctx.fragments.apple.ios_minimum_os_flag
@@ -4717,25 +4747,32 @@ check_rule = rule(
     fragments = ["apple", "java", "cpp", "proto"],
 )
 "#,
-        ),
-        (
-            "BUILD",
-            r#"
-load(":defs.bzl", "set_flag", "check_rule")
-set_flag(name = "my_set", build_setting_default = set(["x"]))
-check_rule(name = "chk")
-"#,
-        ),
-    ]);
+        )
+        .unwrap();
+    let make_resolver = |fs: Arc<InMemoryFileSystem>| {
+        let mut rr = SimpleRepoResolver::new(ws.root.clone());
+        rr.external.insert("protobuf".into(), pb_root.clone());
+        rr.apparent.insert(
+            "protobuf".into(),
+            RepositoryName::create("protobuf").unwrap(),
+        );
+        let lc = LoaderConfig::new(fs, Arc::new(rr));
+        TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new())
+    };
     let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
     cfg.options.insert("features".into(), "a,-b".into());
     cfg.options.insert("ios_minimum_os".into(), "15.2".into());
-    cfg.options
-        .insert("javacopt".into(), "-Xlint:all,-source 11".into());
+    cfg.options.insert(
+        "javacopt".into(),
+        zel_analysis::build_options::encode_unsplit_list(&[
+            "-Xlint:all".to_string(),
+            "-source 11".to_string(),
+        ]),
+    );
     cfg.options
         .insert("collect_code_coverage".into(), "true".into());
     cfg.flag_values.insert("//:my_set".into(), "p,q,p".into());
-    let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+    let r = make_resolver(ws.fs.clone());
     let flag_ct = r
         .analyze(&Label::parse_canonical("//:my_set").unwrap(), &cfg)
         .unwrap();
@@ -4743,6 +4780,14 @@ check_rule(name = "chk")
         panic!("expected FileWrite");
     };
     assert_eq!(String::from_utf8(content.render()).unwrap(), "p,q");
+
+    let bad_err = r
+        .analyze(&Label::parse_canonical("//:bad_proto").unwrap(), &cfg)
+        .unwrap_err();
+    assert!(
+        bad_err.contains("cannot use private API"),
+        "expected private API error for main-repo rule: {bad_err}"
+    );
 
     let chk_ct = r
         .analyze(&Label::parse_canonical("//:chk").unwrap(), &cfg)
@@ -4762,9 +4807,9 @@ check_rule(name = "chk")
     no_cov_cfg
         .options
         .insert("ios_minimum_os".into(), "15.2".into());
-    let (r_nocov, cfg_nocov) = ws.resolver_with(no_cov_cfg, AnalysisConfig::new());
+    let r_nocov = make_resolver(ws.fs.clone());
     let chk_nocov = r_nocov
-        .analyze(&Label::parse_canonical("//:chk").unwrap(), &cfg_nocov)
+        .analyze(&Label::parse_canonical("//:chk").unwrap(), &no_cov_cfg)
         .unwrap();
     let ActionKind::FileWrite { content, .. } = &chk_nocov.typed_actions[0].kind else {
         panic!("expected FileWrite");
@@ -5645,12 +5690,12 @@ def _tc_impl(ctx):
 my_tc = rule(implementation = _tc_impl)
 
 def _patch_impl(settings, attr):
-    return {"//command_line_option:copt": ["-DPATCH"]}
+    return {"//command_line_option:host_copt": ["-DPATCH"]}
 
 patch = transition(
     implementation = _patch_impl,
     inputs = [],
-    outputs = ["//command_line_option:copt"],
+    outputs = ["//command_line_option:host_copt"],
 )
 
 def _read_plat_patch_impl(settings, attr):
@@ -5666,14 +5711,14 @@ read_plat_patch = transition(
 
 def _split_impl(settings, attr):
     return {
-        "a": {"//command_line_option:copt": ["-DA"]},
-        "b": {"//command_line_option:copt": ["-DB"]},
+        "a": {"//command_line_option:host_copt": ["-DA"]},
+        "b": {"//command_line_option:host_copt": ["-DB"]},
     }
 
 split_t = transition(
     implementation = _split_impl,
     inputs = [],
-    outputs = ["//command_line_option:copt"],
+    outputs = ["//command_line_option:host_copt"],
 )
 
 patch_then_default_exec = patch.and_then(config.exec())
@@ -5809,7 +5854,20 @@ consumer(
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 5, "{text}");
 
-    let exec_mnemonic = |plat: &str, copt: &str| -> String {
+    let pre_exec_mnemonic = |plat: &str, hcopt: &str| -> String {
+        let mut expected = cfg.clone();
+        let list = Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+            zel_starlark::StarlarkList::new(vec![Value::String(hcopt.to_string())]),
+        )));
+        zel_analysis::transition::set_setting(
+            &mut expected,
+            "//command_line_option:host_copt",
+            &list,
+        )
+        .unwrap();
+        expected.to_exec_for(plat).mnemonic()
+    };
+    let post_exec_mnemonic = |plat: &str, copt: &str| -> String {
         let mut expected = cfg.to_exec_for(plat);
         let list = Value::List(std::sync::Arc::new(std::sync::Mutex::new(
             zel_starlark::StarlarkList::new(vec![Value::String(copt.to_string())]),
@@ -5818,30 +5876,38 @@ consumer(
             .unwrap();
         expected.mnemonic()
     };
+    let exec_copts = |hcopt: &str| -> String {
+        if cfg!(windows) {
+            hcopt.to_string()
+        } else {
+            format!("{hcopt},-g0")
+        }
+    };
 
-    let m_pde = exec_mnemonic("//:default_exec_plat", "-DPATCH");
+    let m_pde = pre_exec_mnemonic("//:default_exec_plat", "-DPATCH");
+    let c_pde = exec_copts("-DPATCH");
     assert!(
         m_pde.starts_with("default_exec_plat-opt-exec-ST-"),
         "{m_pde}"
     );
     assert_eq!(
         lines[0],
-        format!("pde=@@//:default_exec_plat|default_exec|-DPATCH|bazel-out/{m_pde}/bin/leaf.txt"),
+        format!("pde=@@//:default_exec_plat|default_exec|{c_pde}|bazel-out/{m_pde}/bin/leaf.txt"),
         "{text}"
     );
 
-    let m_pce = exec_mnemonic("//:custom_exec_plat", "-DPATCH");
+    let m_pce = pre_exec_mnemonic("//:custom_exec_plat", "-DPATCH");
     assert!(
         m_pce.starts_with("custom_exec_plat-opt-exec-ST-"),
         "{m_pce}"
     );
     assert_eq!(
         lines[1],
-        format!("pce=@@//:custom_exec_plat|custom_exec|-DPATCH|bazel-out/{m_pce}/bin/leaf.txt"),
+        format!("pce=@@//:custom_exec_plat|custom_exec|{c_pde}|bazel-out/{m_pce}/bin/leaf.txt"),
         "{text}"
     );
 
-    let m_cep = exec_mnemonic("//:custom_exec_plat", "-DFROM=//:custom_exec_plat");
+    let m_cep = post_exec_mnemonic("//:custom_exec_plat", "-DFROM=//:custom_exec_plat");
     assert_eq!(
         lines[2],
         format!(
@@ -5850,22 +5916,24 @@ consumer(
         "{text}"
     );
 
-    let m_sde_a = exec_mnemonic("//:default_exec_plat", "-DA");
-    let m_sde_b = exec_mnemonic("//:default_exec_plat", "-DB");
+    let m_sde_a = pre_exec_mnemonic("//:default_exec_plat", "-DA");
+    let m_sde_b = pre_exec_mnemonic("//:default_exec_plat", "-DB");
+    let c_a = exec_copts("-DA");
+    let c_b = exec_copts("-DB");
     assert_eq!(
         lines[3],
         format!(
-            "sde=a=>@@//:default_exec_plat|default_exec|-DA|bazel-out/{m_sde_a}/bin/leaf.txt;b=>@@//:default_exec_plat|default_exec|-DB|bazel-out/{m_sde_b}/bin/leaf.txt"
+            "sde=a=>@@//:default_exec_plat|default_exec|{c_a}|bazel-out/{m_sde_a}/bin/leaf.txt;b=>@@//:default_exec_plat|default_exec|{c_b}|bazel-out/{m_sde_b}/bin/leaf.txt"
         ),
         "{text}"
     );
 
-    let m_sce_a = exec_mnemonic("//:custom_exec_plat", "-DA");
-    let m_sce_b = exec_mnemonic("//:custom_exec_plat", "-DB");
+    let m_sce_a = pre_exec_mnemonic("//:custom_exec_plat", "-DA");
+    let m_sce_b = pre_exec_mnemonic("//:custom_exec_plat", "-DB");
     assert_eq!(
         lines[4],
         format!(
-            "sce=a=>@@//:custom_exec_plat|custom_exec|-DA|bazel-out/{m_sce_a}/bin/leaf.txt;b=>@@//:custom_exec_plat|custom_exec|-DB|bazel-out/{m_sce_b}/bin/leaf.txt"
+            "sce=a=>@@//:custom_exec_plat|custom_exec|{c_a}|bazel-out/{m_sce_a}/bin/leaf.txt;b=>@@//:custom_exec_plat|custom_exec|{c_b}|bazel-out/{m_sce_b}/bin/leaf.txt"
         ),
         "{text}"
     );
@@ -6036,7 +6104,7 @@ my_test = rule(
         ),
         "_composed_tool": attr.label(
             default = "//:tool",
-            cfg = patch_t.and_then(config.exec(exec_group = "test")),
+            cfg = config.exec(exec_group = "test").and_then(patch_t),
         ),
     },
 )
@@ -6312,7 +6380,7 @@ probe_aspect = aspect(
         ),
         "_tool_composed": attr.label(
             default = "//:leaf",
-            cfg = asp_patch.and_then(config.exec(exec_group = "asp_eg")),
+            cfg = config.exec(exec_group = "asp_eg").and_then(asp_patch),
         ),
     },
 )

@@ -304,9 +304,7 @@ pub fn apple_platform_for_target_cpu(target_cpu: &str) -> Result<Value, String> 
         }
         "catalyst_x86_64" => apple_platform_struct("catalyst", "MacOSX", "catalyst", true),
         "darwin_x86_64" | "darwin_arm64" | "darwin_arm64e" | "macos_x86_64" | "macos_arm64"
-        | "macos_arm64e" => {
-            apple_platform_struct("macos", "MacOSX", "macos", true)
-        }
+        | "macos_arm64e" => apple_platform_struct("macos", "MacOSX", "macos", true),
         _ => {
             return Err(format!(
                 "No supported apple platform registered for target cpu {target_cpu}"

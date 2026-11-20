@@ -336,6 +336,7 @@ impl BuildConfigurationKey {
             return self.clone();
         }
         let mut out = self.clone();
+        out.post_exec.clear();
         let native = |n: &str| self.native.get(n).map(|s| s.value.display());
         out.compilation_mode = native("host_compilation_mode")
             .or_else(|| self.options.get("host_compilation_mode").cloned())
@@ -717,8 +718,45 @@ impl BuildConfigurationKey {
                 .cloned()
                 .unwrap_or_else(|| "@@platforms//host:host".to_string());
             let mut e = o.exec(&platform);
-            for (name, v) in &self.post_exec {
-                e.set(name, ConfigValue::Scalar(v.clone()));
+            for (name, raw) in &self.post_exec {
+                if let Some((_, opt)) = find_option(name) {
+                    let is_list = build_options::is_list_option(opt);
+                    if opt.default == "null" && (raw == "null" || raw == NULL_VALUE) {
+                        e.set(
+                            name,
+                            if is_list {
+                                ConfigValue::List(vec![])
+                            } else {
+                                ConfigValue::Null
+                            },
+                        );
+                        continue;
+                    }
+                    let raws: Vec<String> = if is_list {
+                        if build_options::splits_commas_in_options_map(name, opt) {
+                            raw.split(',')
+                                .filter(|p| !p.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        } else {
+                            build_options::decode_unsplit_list(raw)
+                        }
+                    } else {
+                        vec![raw.clone()]
+                    };
+                    if let Ok(v) = build_options::convert_raws(
+                        opt,
+                        &raws,
+                        &build_options::canonical_label_default,
+                        host_cpu,
+                    ) {
+                        e.set(name, v);
+                    } else {
+                        e.set(name, ConfigValue::Scalar(raw.clone()));
+                    }
+                } else {
+                    e.set(name, ConfigValue::Scalar(raw.clone()));
+                }
             }
             e.normalize();
             return e;

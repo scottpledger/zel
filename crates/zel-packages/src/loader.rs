@@ -2178,8 +2178,7 @@ impl PackageLoader {
                                         let mut f = st.fields.clone();
                                         for fnm in ["toolchain_type", "name"] {
                                             if let Some(Value::String(n)) = f.get(fnm).cloned() {
-                                                if let Ok(l) =
-                                                    crate::attr::convert_label(&n, &cctx)
+                                                if let Ok(l) = crate::attr::convert_label(&n, &cctx)
                                                 {
                                                     f.insert(fnm.into(), Value::Label(l));
                                                 }

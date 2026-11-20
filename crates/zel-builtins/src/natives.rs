@@ -62,6 +62,12 @@ fn dotted_version(pos: &[Value], kw: &Kwargs) -> Result<Value, StarlarkError> {
     }
 }
 
+fn frozen_str_list(items: Vec<String>) -> Value {
+    let mut l = zel_starlark::StarlarkList::new(items.into_iter().map(Value::String).collect());
+    l.freeze();
+    Value::List(Arc::new(std::sync::Mutex::new(l)))
+}
+
 /// `host:builtins.<ns>.<fn>`.
 pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkError> {
     if let Some(v) = flag_native(rest) {

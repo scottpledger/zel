@@ -340,7 +340,10 @@ pub fn set_setting(
                     }
                     _ => s.clone(),
                 };
-                cfg.options.insert(other.to_string(), stored);
+                cfg.options.insert(other.to_string(), stored.clone());
+                if cfg.is_exec {
+                    cfg.post_exec.insert(other.to_string(), stored);
+                }
                 sync_env_config(cfg, other, value);
             }
         }

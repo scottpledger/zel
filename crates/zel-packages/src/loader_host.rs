@@ -658,7 +658,8 @@ impl PackageLoader {
                 f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
                 f.insert("_config_feature_flag_transition".into(), Value::Bool(true));
                 f.insert("_transition".into(), Value::Bool(true));
-                return Ok(Value::Struct(Arc::new(StructValue::new(f))));
+                f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
+                return Ok(register_transition_struct(f));
             }
             "testing.analysis_test" => {
                 let Some(st) = state else {
@@ -748,7 +749,11 @@ impl PackageLoader {
                     return Err(herr(ctx, "internal error creating analysis_test rule"));
                 };
                 let idx: usize = id.parse().unwrap_or(usize::MAX);
-                let rc_name = format!("{target_name}_test");
+                let rc_name = if target_name.ends_with("_test") {
+                    target_name.clone()
+                } else {
+                    format!("{target_name}_test")
+                };
                 let rc_arc = {
                     let mut reg = self.registry.lock().unwrap();
                     let r = reg
@@ -845,32 +850,6 @@ impl PackageLoader {
                 }
                 f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
                 f.insert("_analysis_test_transition".into(), Value::Bool(true));
-                return Ok(register_transition_struct(f));
-            }
-            "config_common.config_feature_flag_transition" => {
-                let attr_name = arg(&pos, &kw, 0, "attribute")
-                    .cloned()
-                    .ok_or_else(|| {
-                        herr(
-                            ctx,
-                            "config_feature_flag_transition() missing 1 required argument: attribute",
-                        )
-                    })?;
-                let Value::String(attr_str) = attr_name else {
-                    return Err(herr(
-                        ctx,
-                        type_mismatch(
-                            "attribute",
-                            &attr_name,
-                            "string",
-                            "config_feature_flag_transition",
-                        ),
-                    ));
-                };
-                let mut f = BTreeMap::new();
-                f.insert("_feature_flag_transition_attr".into(), Value::String(attr_str));
-                f.insert("_transition".into(), Value::Bool(true));
-                f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
                 return Ok(register_transition_struct(f));
             }
             "configuration_field" => {
@@ -987,105 +966,6 @@ impl PackageLoader {
             }
             n if n.starts_with("config.") => {
                 return self.config_fn(ctx, &n[7..], pos, kw);
-            }
-            "testing.analysis_test" => {
-                let Some(st) = state else {
-                    return Err(herr(
-                        ctx,
-                        "analysis_test() can only be used while evaluating a BUILD file (and macros called from it)",
-                    ));
-                };
-                if !pos.is_empty() {
-                    return Err(herr(
-                        ctx,
-                        "analysis_test() accepts keyword-only arguments",
-                    ));
-                }
-                check_kwargs(
-                    "analysis_test",
-                    &kw,
-                    &[
-                        "name",
-                        "implementation",
-                        "attrs",
-                        "fragments",
-                        "toolchains",
-                        "attr_values",
-                    ],
-                )
-                .map_err(|e| herr(ctx, e))?;
-                let Some(Value::String(tname)) = kw.get("name").cloned() else {
-                    return Err(herr(
-                        ctx,
-                        "analysis_test() missing or non-string required argument 'name'",
-                    ));
-                };
-                let valid_ident = !tname.is_empty()
-                    && tname
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    && tname.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
-                if !valid_ident {
-                    return Err(herr(
-                        ctx,
-                        format!("'name' ('{tname}') must be a valid Starlark identifier"),
-                    ));
-                }
-                let mut call_kw = BTreeMap::new();
-                if let Some(av) = kw.get("attr_values") {
-                    let Value::Dict(d) = av else {
-                        return Err(herr(
-                            ctx,
-                            type_mismatch("attr_values", av, "dict", "analysis_test"),
-                        ));
-                    };
-                    for (k, v) in d.lock().unwrap().items() {
-                        let Value::String(ks) = k else {
-                            return Err(herr(ctx, "attr_values keys must be strings"));
-                        };
-                        if ks == "name" {
-                            return Err(herr(
-                                ctx,
-                                "'name' cannot be set or overridden in 'attr_values'",
-                            ));
-                        }
-                        call_kw.insert(ks, v);
-                    }
-                }
-                call_kw.insert("name".into(), Value::String(tname.clone()));
-                let mut rule_kw = BTreeMap::new();
-                if let Some(imp) = kw.get("implementation") {
-                    rule_kw.insert("implementation".into(), imp.clone());
-                } else {
-                    return Err(herr(
-                        ctx,
-                        "analysis_test() missing 1 required named argument: implementation",
-                    ));
-                }
-                if let Some(a) = kw.get("attrs") {
-                    rule_kw.insert("attrs".into(), a.clone());
-                }
-                if let Some(fr) = kw.get("fragments") {
-                    rule_kw.insert("fragments".into(), fr.clone());
-                }
-                if let Some(tc) = kw.get("toolchains") {
-                    rule_kw.insert("toolchains".into(), tc.clone());
-                }
-                rule_kw.insert("analysis_test".into(), Value::Bool(true));
-                rule_kw.insert("test".into(), Value::Bool(true));
-                let rule_val = self.define_rule(ctx, owner, Vec::new(), rule_kw)?;
-                let rc_name = if tname.ends_with("_test") {
-                    tname.clone()
-                } else {
-                    format!("{tname}_test")
-                };
-                let bzl_lbl = Label::create(owner.clone(), "BUILD").unwrap_or_else(|_| {
-                    Label::parse_canonical("//:BUILD").unwrap()
-                });
-                self.export_bzl_symbol(&rc_name, &rule_val, &bzl_lbl, None)
-                    .map_err(|e| herr(ctx, e))?;
-                return self.call_starlark_rule(ctx, Some(st), vec![rule_val], call_kw);
             }
             "call:provider" => return crate::provider::call_provider(ctx, false, pos, kw),
             "call:provider_raw" => return crate::provider::call_provider(ctx, true, pos, kw),
