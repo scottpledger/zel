@@ -2059,22 +2059,18 @@ fn ctx_build_file_path_default_and_incompatible_flag() {
     w.write(
         "defs.bzl",
         r#"
+BfpInfo = provider(fields = ["path"])
+
 def _bfp_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".txt")
     ctx.actions.write(out, ctx.build_file_path)
-    return [DefaultInfo(files = depset([out]))]
+    return [DefaultInfo(files = depset([out])), BfpInfo(path = ctx.build_file_path)]
 
 bfp = rule(implementation = _bfp_impl)
 
 def _exec_consumer_impl(ctx):
-    src = ctx.attr.tool[DefaultInfo].files.to_list()[0]
     out = ctx.actions.declare_file(ctx.label.name + ".txt")
-    ctx.actions.run_shell(
-        inputs = [src],
-        outputs = [out],
-        command = 'cp "$1" "$2"',
-        arguments = [src.path, out.path],
-    )
+    ctx.actions.write(out, ctx.attr.tool[BfpInfo].path)
     return [DefaultInfo(files = depset([out]))]
 
 exec_consumer = rule(
@@ -2116,7 +2112,7 @@ bfp(name = "b", visibility = ["//visibility:public"])
         "//:exec_check",
     ]);
     assert_eq!(code, 0, "default build failed: {err}");
-    let bin = w.ws.join("bazel-bin");
+    let bin = w.bin_dir();
     assert_eq!(
         std::fs::read_to_string(bin.join("root.txt")).unwrap(),
         "BUILD"
