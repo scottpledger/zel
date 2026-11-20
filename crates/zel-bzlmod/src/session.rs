@@ -2033,15 +2033,17 @@ mod repo_env_tests {
             Some(Path::new("/users/win_alice/cache"))
         );
 
-        // When neither home variable is non-empty, literal ~/... falls back to workspace-relative.
+        // When neither home variable is non-empty, literal ~/... falls back to workspace-relative
+        // (with `--repo_contents_cache=` disabling the nested contents cache inside `/ws`).
         let no_home_cfg = cfg_of(
             &[("HOME", ""), ("USERPROFILE", "")],
-            &["--repository_cache=~/cache"],
+            &["--repository_cache=~/cache", "--repo_contents_cache="],
         );
         assert_eq!(
             no_home_cfg.repository_cache.as_deref(),
             Some(Path::new("/ws/~/cache"))
         );
+        assert!(no_home_cfg.repo_contents_cache.is_none());
 
         // Windows backslash forms (`~\...`, `%workspace%\...`, drive-letter `USERPROFILE`) normalize
         // to Bazel PathFragment `/` separators and uppercase drive letters.
@@ -2136,7 +2138,8 @@ mod repo_env_tests {
         let (early_inside, full_inside) = run_both(&inside_cache_args);
         let expected_inside = ws.join("cache_inside");
         let inside_err = early_inside.expect_err("cache inside main repo must fail");
-        let full_inside_err = full_inside.expect_err("from_parsed must also reject cache inside main repo");
+        let full_inside_err =
+            full_inside.expect_err("from_parsed must also reject cache inside main repo");
         assert_eq!(inside_err, full_inside_err);
         assert!(
             inside_err
