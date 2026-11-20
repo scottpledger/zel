@@ -317,7 +317,6 @@ impl RepoResolver for LazyBzlmodResolver {
 }
 
 struct CachedBzlmodSession {
-    cfg: crate::session::BzlmodConfig,
     session: Arc<crate::session::Session>,
     watched_files: Vec<(PathBuf, FileStamp)>,
 }
@@ -360,6 +359,9 @@ fn collect_watched_files(
         watch_override_dir(&mut paths, Path::new(p));
     }
     for (_, p) in &cfg.inject_modules {
+        watch_override_dir(&mut paths, Path::new(p));
+    }
+    for (_, p) in &cfg.inject_repositories {
         watch_override_dir(&mut paths, Path::new(p));
     }
     for p in cfg.override_repository.values() {
@@ -463,7 +465,10 @@ impl CommandResolver {
             if !has_module_file {
                 let had_cached = self.cached.lock().unwrap().take().is_some();
                 let mut prev = self.last_no_module_cfg.lock().unwrap();
-                let unchanged = !had_cached && prev.as_ref() == Some(&cfg);
+                let unchanged = !had_cached
+                    && prev
+                        .as_ref()
+                        .is_some_and(|prev_cfg| prev_cfg.matches_for_reuse(&cfg));
                 *prev = Some(cfg.clone());
                 self.invalidated_this_command
                     .store(!unchanged, Ordering::SeqCst);
@@ -474,7 +479,9 @@ impl CommandResolver {
             let mut cached_guard = self.cached.lock().unwrap();
             if cacheable {
                 if let Some(entry) = cached_guard.as_ref() {
-                    if entry.cfg == cfg && entry.watched_files.iter().all(|(p, s)| s.matches(p)) {
+                    if entry.session.matches_config(&cfg)
+                        && entry.watched_files.iter().all(|(p, s)| s.matches(p))
+                    {
                         match entry.session.rt.revalidate_for_command() {
                             RevalidateOutcome::Unchanged => {
                                 self.invalidated_this_command.store(false, Ordering::SeqCst);
@@ -560,7 +567,6 @@ impl CommandResolver {
                     if let Some(session) = r.opened_session() {
                         let watched_files = collect_watched_files(&r.cfg, &session.resolution);
                         *self.cached.lock().unwrap() = Some(CachedBzlmodSession {
-                            cfg: r.cfg.clone(),
                             session,
                             watched_files,
                         });

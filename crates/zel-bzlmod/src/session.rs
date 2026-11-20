@@ -521,6 +521,118 @@ impl BzlmodConfig {
         })
     }
 
+    /// Whether another command's `BzlmodConfig` has identical Bzlmod-affecting settings,
+    /// allowing a cached [`Session`] to be reused across commands when watched inputs are
+    /// unchanged.
+    ///
+    /// Uses exhaustive struct destructuring so adding any field to `BzlmodConfig` forces a
+    /// compile-time decision on how it participates in cache compatibility.
+    pub fn matches_for_reuse(&self, other: &Self) -> bool {
+        let Self {
+            workspace,
+            output_base,
+            client_env,
+            registries,
+            check_direct_dependencies,
+            bazel_compatibility_mode,
+            lockfile_mode,
+            override_repository,
+            distdirs,
+            repository_cache,
+            repo_contents_cache,
+            disable_download,
+            vendor_dir,
+            ignore_dev_dependency,
+            isolated_extension_usages,
+            allow_yanked,
+            override_modules,
+            inject_modules,
+            inject_repositories,
+            module_mirrors,
+            downloader_rewriter,
+            semantics_fingerprint,
+            main_mapping_errors,
+            download_retries,
+            force,
+            nofetch,
+            bazel_version,
+            experimental_repository_ctx_execute_wasm,
+            experimental_sibling_repository_layout,
+            incompatible_no_implicit_watch_label,
+            incompatible_use_cc_configure_from_rules_cc,
+            credential_helpers,
+        } = self;
+        let Self {
+            workspace: o_workspace,
+            output_base: o_output_base,
+            client_env: o_client_env,
+            registries: o_registries,
+            check_direct_dependencies: o_check_direct_dependencies,
+            bazel_compatibility_mode: o_bazel_compatibility_mode,
+            lockfile_mode: o_lockfile_mode,
+            override_repository: o_override_repository,
+            distdirs: o_distdirs,
+            repository_cache: o_repository_cache,
+            repo_contents_cache: o_repo_contents_cache,
+            disable_download: o_disable_download,
+            vendor_dir: o_vendor_dir,
+            ignore_dev_dependency: o_ignore_dev_dependency,
+            isolated_extension_usages: o_isolated_extension_usages,
+            allow_yanked: o_allow_yanked,
+            override_modules: o_override_modules,
+            inject_modules: o_inject_modules,
+            inject_repositories: o_inject_repositories,
+            module_mirrors: o_module_mirrors,
+            downloader_rewriter: o_downloader_rewriter,
+            semantics_fingerprint: o_semantics_fingerprint,
+            main_mapping_errors: o_main_mapping_errors,
+            download_retries: o_download_retries,
+            force: o_force,
+            nofetch: o_nofetch,
+            bazel_version: o_bazel_version,
+            experimental_repository_ctx_execute_wasm: o_experimental_repository_ctx_execute_wasm,
+            experimental_sibling_repository_layout: o_experimental_sibling_repository_layout,
+            incompatible_no_implicit_watch_label: o_incompatible_no_implicit_watch_label,
+            incompatible_use_cc_configure_from_rules_cc:
+                o_incompatible_use_cc_configure_from_rules_cc,
+            credential_helpers: o_credential_helpers,
+        } = other;
+        workspace == o_workspace
+            && output_base == o_output_base
+            && client_env == o_client_env
+            && registries == o_registries
+            && check_direct_dependencies == o_check_direct_dependencies
+            && bazel_compatibility_mode == o_bazel_compatibility_mode
+            && lockfile_mode == o_lockfile_mode
+            && override_repository == o_override_repository
+            && distdirs == o_distdirs
+            && repository_cache == o_repository_cache
+            && repo_contents_cache == o_repo_contents_cache
+            && disable_download == o_disable_download
+            && vendor_dir == o_vendor_dir
+            && ignore_dev_dependency == o_ignore_dev_dependency
+            && isolated_extension_usages == o_isolated_extension_usages
+            && allow_yanked == o_allow_yanked
+            && override_modules == o_override_modules
+            && inject_modules == o_inject_modules
+            && inject_repositories == o_inject_repositories
+            && module_mirrors == o_module_mirrors
+            && downloader_rewriter == o_downloader_rewriter
+            && semantics_fingerprint == o_semantics_fingerprint
+            && main_mapping_errors == o_main_mapping_errors
+            && download_retries == o_download_retries
+            && force == o_force
+            && nofetch == o_nofetch
+            && bazel_version == o_bazel_version
+            && experimental_repository_ctx_execute_wasm
+                == o_experimental_repository_ctx_execute_wasm
+            && experimental_sibling_repository_layout == o_experimental_sibling_repository_layout
+            && incompatible_no_implicit_watch_label == o_incompatible_no_implicit_watch_label
+            && incompatible_use_cc_configure_from_rules_cc
+                == o_incompatible_use_cc_configure_from_rules_cc
+            && credential_helpers == o_credential_helpers
+    }
+
     pub fn external_options(&self) -> ExternalOptions {
         ExternalOptions {
             output_base: self.output_base.clone(),
@@ -997,6 +1109,11 @@ impl Session {
             rt,
             warnings,
         })
+    }
+
+    /// Whether this opened session's configuration matches `cfg` for warm-command reuse.
+    pub fn matches_config(&self, cfg: &BzlmodConfig) -> bool {
+        self.cfg.matches_for_reuse(cfg)
     }
 
     /// Writes the lockfiles (`MODULE.bazel.lock` and the hidden lockfile) if enabled.
@@ -2224,5 +2341,84 @@ mod repo_env_tests {
             #[cfg(windows)]
             assert_eq!(expanded.to_string_lossy(), r"C:\my\ws\tools\wild.bat");
         }
+    }
+
+    #[test]
+    fn bzlmod_config_matches_for_reuse_checks_all_fields() {
+        let ws = PathBuf::from("/tmp/ws");
+        let ob = PathBuf::from("/tmp/ob");
+        let parsed = ParsedCommandOptions::parse_for_command("build", &[]).unwrap();
+        let base = BzlmodConfig::from_parsed(&parsed, &ws, &ob, BTreeMap::new()).unwrap();
+        assert!(base.matches_for_reuse(&base.clone()));
+
+        let mut c = base.clone();
+        c.lockfile_mode = LockfileMode::Error;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.vendor_dir = Some(PathBuf::from("/tmp/vendor"));
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.credential_helpers
+            .push(("example.com".to_string(), PathBuf::from("/tmp/helper")));
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.downloader_rewriter =
+            Some(crate::download::UrlRewriter::parse("dl.cfg", "allow example.com\n").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.override_modules
+            .push(("foo".to_string(), "/tmp/foo".to_string()));
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.override_repository
+            .insert("foo".to_string(), PathBuf::from("/tmp/foo"));
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.inject_modules
+            .push(("bar".to_string(), "/tmp/bar".to_string()));
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.inject_repositories
+            .push(("bar".to_string(), "/tmp/bar".to_string()));
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.ignore_dev_dependency = true;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.check_direct_dependencies = CheckMode::Error;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.bazel_compatibility_mode = CheckMode::Warning;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.allow_yanked.push("foo@1.0".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.registries.push("file:///tmp/reg".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.client_env.insert("FOO".to_string(), "1".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.nofetch = true;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.force = true;
+        assert!(!base.matches_for_reuse(&c));
     }
 }

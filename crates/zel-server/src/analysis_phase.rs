@@ -773,6 +773,7 @@ impl BlazeRuntime {
             }
         };
         let can_reuse_resolver = self.skyframe.is_tracking_incremental_state()
+            && !parsed.get_bool("discard_analysis_cache").unwrap_or(false)
             && opt_list(parsed, "aspects").is_empty()
             && self.last_resolver_gen.load(Ordering::SeqCst)
                 == self.state_generation.load(Ordering::SeqCst);

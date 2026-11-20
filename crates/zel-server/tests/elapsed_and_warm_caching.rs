@@ -492,3 +492,365 @@ dup(name = "b", text = "from_b")
         "{err3}"
     );
 }
+
+#[test]
+fn analysis_config_flags_invalidate_reused_target_resolver() {
+    let w = Ws::new("acfg-invalidation");
+    w.write(
+        "tc.bzl",
+        r#"
+MyTcInfo = provider(fields = ["tag"])
+
+def _tc_impl(ctx):
+    return [platform_common.ToolchainInfo(info = MyTcInfo(tag = ctx.attr.tag))]
+
+my_tc = rule(
+    implementation = _tc_impl,
+    attrs = {"tag": attr.string(mandatory = True)},
+)
+
+def _consumer_impl(ctx):
+    tc = ctx.toolchains["//:tc_type"]
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(output = out, content = tc.info.tag + "\n")
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    toolchains = ["//:tc_type"],
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        r#"
+load("//:tc.bzl", "my_tc", "consumer")
+
+toolchain_type(name = "tc_type")
+
+my_tc(name = "impl_a", tag = "from_a")
+my_tc(name = "impl_b", tag = "from_b")
+
+toolchain(
+    name = "tc_a",
+    toolchain_type = ":tc_type",
+    toolchain = ":impl_a",
+)
+
+toolchain(
+    name = "tc_b",
+    toolchain_type = ":tc_type",
+    toolchain = ":impl_b",
+)
+
+platform(name = "exec_a")
+platform(name = "exec_b")
+
+consumer(name = "out")
+"#,
+    );
+
+    let out_file = || {
+        let bin =
+            w.rt.dirs
+                .bazel_bin(zel_analysis::build_options::auto_host_cpu(), "fastbuild");
+        std::fs::read_to_string(PathBuf::from(bin.path_string()).join("out.txt")).unwrap()
+    };
+
+    // 1. Cold build with --extra_toolchains=//:tc_a
+    let (code, _, err) = w.run(&["build", "--extra_toolchains=//:tc_a", "//:out"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out_file().trim(), "from_a");
+    let r1 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+
+    // 2. Identical warm build reuses TargetResolver.
+    let (code, _, err) = w.run(&["build", "--extra_toolchains=//:tc_a", "//:out"]);
+    assert_eq!(code, 0, "{err}");
+    let r2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        Arc::ptr_eq(&r1, &r2),
+        "identical --extra_toolchains must reuse resolver"
+    );
+
+    // 3. Changing --extra_toolchains MUST invalidate TargetResolver and pick up tc_b.
+    let (code, _, err) = w.run(&["build", "--extra_toolchains=//:tc_b", "//:out"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out_file().trim(), "from_b");
+    let r3 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        !Arc::ptr_eq(&r2, &r3),
+        "changing --extra_toolchains must invalidate resolver"
+    );
+
+    // 4. Changing --extra_execution_platforms MUST invalidate TargetResolver.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--extra_toolchains=//:tc_b",
+        "--extra_execution_platforms=//:exec_a",
+        "//:out",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let r4 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        !Arc::ptr_eq(&r3, &r4),
+        "changing --extra_execution_platforms must invalidate resolver"
+    );
+
+    // 5. Identical warm build with --extra_execution_platforms reuses TargetResolver again.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--extra_toolchains=//:tc_b",
+        "--extra_execution_platforms=//:exec_a",
+        "//:out",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let r5 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        Arc::ptr_eq(&r4, &r5),
+        "identical warm build with --extra_execution_platforms must reuse resolver"
+    );
+
+    // 6. Switching --extra_execution_platforms to a different platform MUST invalidate.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--extra_toolchains=//:tc_b",
+        "--extra_execution_platforms=//:exec_b",
+        "//:out",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let r6 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        !Arc::ptr_eq(&r5, &r6),
+        "switching --extra_execution_platforms must invalidate resolver"
+    );
+
+    // 7. Toggling --nocheck_visibility MUST invalidate TargetResolver.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--extra_toolchains=//:tc_b",
+        "--extra_execution_platforms=//:exec_b",
+        "--nocheck_visibility",
+        "//:out",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let r7 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        !Arc::ptr_eq(&r6, &r7),
+        "toggling --nocheck_visibility must invalidate resolver"
+    );
+}
+
+#[test]
+fn bzlmod_option_changes_invalidate_cached_session() {
+    let w = Ws::new("bzlmod-opts-invalidation");
+    let ext_log = w.root.join("ext.log");
+    let ext_log_s = ext_log.to_string_lossy().replace('\\', "/");
+
+    // Two alternative local modules for testing --override_module invalidation.
+    let mod_v1 = w.root.join("dep_v1");
+    let mod_v2 = w.root.join("dep_v2");
+    for (dir, val) in [(&mod_v1, "from_v1"), (&mod_v2, "from_v2")] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("MODULE.bazel"),
+            "module(name = \"dep_mod\", version = \"1.0.0\")\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("val.txt"), format!("{val}\n")).unwrap();
+        std::fs::write(dir.join("BUILD"), "exports_files([\"val.txt\"])\n").unwrap();
+    }
+
+    w.write(
+        "ext.bzl",
+        &format!(
+            r#"
+def _repo_impl(rctx):
+    rctx.file("BUILD", 'exports_files(["tag.txt"])\n')
+    rctx.file("tag.txt", rctx.attr.tag + "\n")
+
+_repo = repository_rule(
+    implementation = _repo_impl,
+    attrs = {{"tag": attr.string(mandatory = True)}},
+)
+
+def _ext_impl(mctx):
+    # Append one line per extension evaluation so tests can detect session reuse vs reopen.
+    for mod in mctx.modules:
+        pass
+    _repo(name = "dev_only_repo", tag = "dev_present")
+
+ext = module_extension(implementation = _ext_impl)
+
+def _counted_impl(rctx):
+    rctx.execute(["/bin/sh", "-c", "echo run >> '{ext_log_s}'"])
+    rctx.file("BUILD", 'exports_files(["marker.txt"])\n')
+    rctx.file("marker.txt", "ok\n")
+
+counted_repo = repository_rule(implementation = _counted_impl, local = True)
+
+def _counted_ext_impl(mctx):
+    counted_repo(name = "counted")
+
+counted_ext = module_extension(implementation = _counted_ext_impl)
+"#
+        ),
+    );
+    w.write(
+        "MODULE.bazel",
+        &format!(
+            r#"
+module(name = "opts_ws", version = "1.0.0")
+bazel_dep(name = "dep_mod", version = "1.0.0")
+local_path_override(
+    module_name = "dep_mod",
+    path = "{}",
+)
+ext = use_extension("//:ext.bzl", "ext", dev_dependency = True)
+use_repo(ext, "dev_only_repo")
+cext = use_extension("//:ext.bzl", "counted_ext")
+use_repo(cext, "counted")
+"#,
+            mod_v1.to_string_lossy().replace('\\', "/")
+        ),
+    );
+    w.write(
+        "BUILD",
+        r#"
+genrule(
+    name = "app",
+    srcs = ["@dep_mod//:val.txt", "@counted//:marker.txt"],
+    outs = ["app.txt"],
+    cmd = "cat $(location @dep_mod//:val.txt) > $@",
+)
+"#,
+    );
+
+    let line_count = |p: &std::path::Path| -> usize {
+        std::fs::read_to_string(p)
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    };
+    let app_out = || {
+        let bin =
+            w.rt.dirs
+                .bazel_bin(zel_analysis::build_options::auto_host_cpu(), "fastbuild");
+        std::fs::read_to_string(PathBuf::from(bin.path_string()).join("app.txt")).unwrap()
+    };
+
+    // 1. Cold build with --lockfile_mode=off (no MODULE.bazel.lock written).
+    let (code, _, err) = w.run(&["build", "--lockfile_mode=off", "//:app"]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(app_out().trim(), "from_v1");
+    assert_eq!(line_count(&ext_log), 1);
+    let r1 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+
+    // 2. Identical warm build reuses BOTH Bzlmod Session and TargetResolver.
+    let (code, _, err) = w.run(&["build", "--lockfile_mode=off", "//:app"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !w.rt.repo_resolver.was_invalidated_this_command(),
+        "identical warm build must reuse cached Bzlmod session"
+    );
+    assert_eq!(line_count(&ext_log), 1);
+    let r2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        Arc::ptr_eq(&r1, &r2),
+        "identical warm build must reuse TargetResolver"
+    );
+
+    // 3. Switching --lockfile_mode=off -> --lockfile_mode=error MUST invalidate cached Session
+    //    and report the missing/out-of-date lockfile error.
+    let (code, _, err) = w.run(&["build", "--lockfile_mode=error", "//:app"]);
+    assert!(
+        w.rt.repo_resolver.was_invalidated_this_command(),
+        "changing --lockfile_mode must invalidate cached Bzlmod session"
+    );
+    assert_ne!(
+        code, 0,
+        "expected --lockfile_mode=error failure when lockfile is missing: {err}"
+    );
+    assert!(
+        err.contains("--lockfile_mode=error") || err.contains("MODULE.bazel.lock"),
+        "expected lockfile error message, got: {err}"
+    );
+
+    // 4. Build with --lockfile_mode=update -> succeeds and caches session.
+    let (code, _, err) = w.run(&["build", "--lockfile_mode=update", "//:app"]);
+    assert_eq!(code, 0, "{err}");
+    let r_upd = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+
+    // Warm repeat with --lockfile_mode=update reuses both Session and TargetResolver.
+    let (code, _, err) = w.run(&["build", "--lockfile_mode=update", "//:app"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !w.rt.repo_resolver.was_invalidated_this_command(),
+        "warm --lockfile_mode=update must reuse cached Bzlmod session"
+    );
+    let r_upd2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(Arc::ptr_eq(&r_upd, &r_upd2));
+
+    // 5. Changing --ignore_dev_dependency MUST invalidate the cached Bzlmod session.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--lockfile_mode=off",
+        "--ignore_dev_dependency",
+        "//:app",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        w.rt.repo_resolver.was_invalidated_this_command(),
+        "enabling --ignore_dev_dependency must invalidate cached Bzlmod session"
+    );
+    let r_dev = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(!Arc::ptr_eq(&r_upd2, &r_dev));
+
+    // Warm repeat with --ignore_dev_dependency reuses again.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--lockfile_mode=off",
+        "--ignore_dev_dependency",
+        "//:app",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !w.rt.repo_resolver.was_invalidated_this_command(),
+        "warm build with unchanged --ignore_dev_dependency must reuse cached Bzlmod session"
+    );
+
+    // 6. Adding --override_module=dep_mod=<mod_v2> MUST invalidate the cached Bzlmod session
+    //    and pick up dep_v2's contents.
+    let ov_flag = format!("--override_module=dep_mod={}", mod_v2.to_string_lossy());
+    let (code, _, err) = w.run(&[
+        "build",
+        "--lockfile_mode=off",
+        "--ignore_dev_dependency",
+        &ov_flag,
+        "//:app",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        w.rt.repo_resolver.was_invalidated_this_command(),
+        "adding --override_module must invalidate cached Bzlmod session"
+    );
+    assert_eq!(app_out().trim(), "from_v2");
+
+    // Warm repeat with --override_module reuses BOTH Session and TargetResolver.
+    let r_ov1 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    let (code, _, err) = w.run(&[
+        "build",
+        "--lockfile_mode=off",
+        "--ignore_dev_dependency",
+        &ov_flag,
+        "//:app",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !w.rt.repo_resolver.was_invalidated_this_command(),
+        "identical warm build with --override_module must reuse cached Bzlmod session"
+    );
+    let r_ov2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        Arc::ptr_eq(&r_ov1, &r_ov2),
+        "identical warm build with --override_module must reuse TargetResolver"
+    );
+}

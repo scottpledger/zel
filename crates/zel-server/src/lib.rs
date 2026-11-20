@@ -621,9 +621,12 @@ impl BlazeRuntime {
                 (*client_env).clone(),
             );
             if self.repo_resolver.was_invalidated_this_command() {
-                self.skyframe
-                    .evaluator
-                    .delete_functions(&[zel_skyframe::SkyFunctionName::PACKAGE_LOAD]);
+                self.skyframe.evaluator.delete_functions(&[
+                    zel_skyframe::SkyFunctionName::PACKAGE_LOAD,
+                    zel_skyframe::SkyFunctionName::FILE_STATE,
+                    zel_skyframe::SkyFunctionName::FILE,
+                    zel_skyframe::SkyFunctionName::DIRECTORY_LISTING,
+                ]);
                 self.invalidate_analysis_cache();
             }
         } else {

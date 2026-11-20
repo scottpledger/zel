@@ -92,6 +92,12 @@ pub trait PatternExpander: Send + Sync + std::fmt::Debug {
                     .collect()
             })
     }
+
+    /// True only for the default [`LoaderExpander`] installed automatically by
+    /// [`TargetResolver::new`] when `AnalysisConfig::expander` is `None`.
+    fn is_default_loader_expander(&self) -> bool {
+        false
+    }
 }
 
 impl AnalysisConfig {
@@ -246,19 +252,62 @@ impl AnalysisConfig {
     /// Whether another command's `AnalysisConfig` has identical analysis-affecting settings,
     /// allowing an existing `TargetResolver` (and its toolchain/platform expansion caches) to be
     /// reused across commands when no inputs changed.
+    ///
+    /// Uses exhaustive struct destructuring so adding any field to `AnalysisConfig` forces a
+    /// compile-time decision on how it participates in cache compatibility.
     pub fn matches_for_reuse(&self, other: &Self) -> bool {
-        self.registered_toolchains == other.registered_toolchains
-            && self.extra_execution_platforms == other.extra_execution_platforms
-            && self.toolchain_patterns == other.toolchain_patterns
-            && self.extra_toolchain_pattern_count == other.extra_toolchain_pattern_count
-            && self.execution_platform_patterns == other.execution_platform_patterns
-            && self.allow_unresolved_symlinks == other.allow_unresolved_symlinks
-            && self.no_compact_repo_mapping == other.no_compact_repo_mapping
-            && self.check_visibility == other.check_visibility
-            && self.host_platform == other.host_platform
-            && self.platforms_repo == other.platforms_repo
-            && self.shell_executable == other.shell_executable
-            && self.sibling_repository_layout == other.sibling_repository_layout
+        let Self {
+            registered_toolchains,
+            extra_execution_platforms,
+            toolchain_patterns,
+            extra_toolchain_pattern_count,
+            execution_platform_patterns,
+            expander,
+            allow_unresolved_symlinks,
+            no_compact_repo_mapping,
+            check_visibility,
+            host_platform,
+            platforms_repo,
+            shell_executable,
+            sibling_repository_layout,
+            // Derived memoization cache invalidated via `state_generation` whenever inputs change.
+            expansion_cache: _,
+        } = self;
+        let Self {
+            registered_toolchains: o_registered_toolchains,
+            extra_execution_platforms: o_extra_execution_platforms,
+            toolchain_patterns: o_toolchain_patterns,
+            extra_toolchain_pattern_count: o_extra_toolchain_pattern_count,
+            execution_platform_patterns: o_execution_platform_patterns,
+            expander: o_expander,
+            allow_unresolved_symlinks: o_allow_unresolved_symlinks,
+            no_compact_repo_mapping: o_no_compact_repo_mapping,
+            check_visibility: o_check_visibility,
+            host_platform: o_host_platform,
+            platforms_repo: o_platforms_repo,
+            shell_executable: o_shell_executable,
+            sibling_repository_layout: o_sibling_repository_layout,
+            expansion_cache: _,
+        } = other;
+        let expander_matches = match (expander, o_expander) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(a), None) => a.is_default_loader_expander(),
+            (None, Some(_)) => false,
+        };
+        registered_toolchains == o_registered_toolchains
+            && extra_execution_platforms == o_extra_execution_platforms
+            && toolchain_patterns == o_toolchain_patterns
+            && extra_toolchain_pattern_count == o_extra_toolchain_pattern_count
+            && execution_platform_patterns == o_execution_platform_patterns
+            && expander_matches
+            && allow_unresolved_symlinks == o_allow_unresolved_symlinks
+            && no_compact_repo_mapping == o_no_compact_repo_mapping
+            && check_visibility == o_check_visibility
+            && host_platform == o_host_platform
+            && platforms_repo == o_platforms_repo
+            && shell_executable == o_shell_executable
+            && sibling_repository_layout == o_sibling_repository_layout
     }
 }
 
@@ -461,6 +510,10 @@ impl PatternExpander for LoaderExpander {
                 raw_toolchain_type,
             })
             .collect())
+    }
+
+    fn is_default_loader_expander(&self) -> bool {
+        true
     }
 }
 
@@ -1159,15 +1212,7 @@ impl TargetResolver {
             }));
         }
         self.config.clear_caches();
-        if config.check_visibility != self.config.check_visibility
-            || config.allow_unresolved_symlinks != self.config.allow_unresolved_symlinks
-            || config.no_compact_repo_mapping != self.config.no_compact_repo_mapping
-            || config.sibling_repository_layout != self.config.sibling_repository_layout
-            || config.host_platform != self.config.host_platform
-            || config.shell_executable != self.config.shell_executable
-            || config.toolchain_patterns != self.config.toolchain_patterns
-            || config.execution_platform_patterns != self.config.execution_platform_patterns
-        {
+        if !self.config.matches_for_reuse(&config) {
             self.retain_exec_only();
             if config.sibling_repository_layout != self.config.sibling_repository_layout {
                 self.clear_exec();
@@ -2079,4 +2124,83 @@ pub(crate) fn source_file_target_with_layout(
     groups.insert("default".to_string(), vec![art]);
     ct.output_groups = zel_analysis::OutputGroupInfo { groups };
     ct
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    #[derive(Debug)]
+    struct CustomExpander;
+
+    impl PatternExpander for CustomExpander {
+        fn expand(&self, _patterns: &[String], _rule_class: &str) -> Result<Vec<Label>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn analysis_config_matches_for_reuse_checks_all_fields() {
+        let base = AnalysisConfig::new();
+        assert!(base.matches_for_reuse(&AnalysisConfig::new()));
+
+        let mut c = base.clone();
+        c.registered_toolchains
+            .push(Label::parse_canonical("//:tc").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.extra_execution_platforms
+            .push(Label::parse_canonical("//:ep").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.toolchain_patterns.push("//:tc".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.extra_toolchain_pattern_count = 1;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.execution_platform_patterns.push("//:ep".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let custom: Arc<dyn PatternExpander> = Arc::new(CustomExpander);
+        let mut c = base.clone();
+        c.expander = Some(Arc::clone(&custom));
+        assert!(!base.matches_for_reuse(&c));
+        assert!(!c.matches_for_reuse(&base));
+        let mut c_same = base.clone();
+        c_same.expander = Some(Arc::clone(&custom));
+        assert!(c.matches_for_reuse(&c_same));
+
+        let mut c = base.clone();
+        c.allow_unresolved_symlinks = false;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.no_compact_repo_mapping = true;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.check_visibility = false;
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.host_platform = Some(Label::parse_canonical("//:host").unwrap());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.platforms_repo = "other_platforms".to_string();
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.shell_executable = Some("/bin/zsh".to_string());
+        assert!(!base.matches_for_reuse(&c));
+
+        let mut c = base.clone();
+        c.sibling_repository_layout = true;
+        assert!(!base.matches_for_reuse(&c));
+    }
 }

@@ -688,14 +688,25 @@ pub struct UrlRewriter {
 
 impl PartialEq for UrlRewriter {
     fn eq(&self, other: &Self) -> bool {
-        self.allow == other.allow
-            && self.block == other.block
-            && self.all_blocked_message == other.all_blocked_message
-            && self.rewrites.len() == other.rewrites.len()
-            && self
-                .rewrites
+        let Self {
+            allow,
+            block,
+            rewrites,
+            all_blocked_message,
+        } = self;
+        let Self {
+            allow: o_allow,
+            block: o_block,
+            rewrites: o_rewrites,
+            all_blocked_message: o_all_blocked_message,
+        } = other;
+        allow == o_allow
+            && block == o_block
+            && all_blocked_message == o_all_blocked_message
+            && rewrites.len() == o_rewrites.len()
+            && rewrites
                 .iter()
-                .zip(&other.rewrites)
+                .zip(o_rewrites)
                 .all(|((p1, _, r1), (p2, _, r2))| p1 == p2 && r1 == r2)
     }
 }
