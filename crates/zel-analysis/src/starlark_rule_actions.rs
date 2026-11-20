@@ -2099,6 +2099,9 @@ fn validate_map_dir_inputs_dict(
 #[derive(Clone)]
 struct StarlarkMapDirectoryExpander {
     base_state: Arc<CtxState>,
+    semantics: zel_starlark::StarlarkSemantics,
+    globals: BTreeMap<String, Value>,
+    main_repo_mapping: Option<Arc<BTreeMap<String, String>>>,
     input_directories: Vec<(String, Artifact)>,
     output_directories: Vec<(String, Artifact)>,
     additional_inputs: Vec<(Value, Value)>,
@@ -2233,6 +2236,12 @@ impl crate::MapDirectoryExpander for StarlarkMapDirectoryExpander {
         );
 
         let mut ectx = EvalContext::new(b.pkg_dir.clone(), None);
+        ectx.semantics = self.semantics.clone();
+        ectx.thread.semantics = self.semantics.clone();
+        for (k, v) in &self.globals {
+            ectx.globals.insert(k.clone(), v.clone());
+        }
+        ectx.main_repo_mapping = self.main_repo_mapping.clone();
         ectx.file_name = b
             .rule
             .extra
@@ -2574,9 +2583,13 @@ fn map_directory_action(
         }
     }
 
+    let mut semantics = ctx.semantics.clone();
+    semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
+
     let mut fp = zel_util::Fingerprint::new();
     let mut fp_state = StarlarkFingerprintState::default();
     fingerprint_starlark_value(&mut fp, &imp, &mut fp_state);
+    fp.add_bool(semantics.experimental_sibling_repository_layout);
     fp.add_str(&expanded_mnemonic);
     fp.add_u64(input_directories.len() as u64);
     for (k, a) in &input_directories {
@@ -2605,6 +2618,9 @@ fn map_directory_action(
 
     let expander = Arc::new(StarlarkMapDirectoryExpander {
         base_state: st.clone(),
+        semantics,
+        globals: ctx.globals.clone(),
+        main_repo_mapping: ctx.main_repo_mapping.clone(),
         input_directories: input_directories.clone(),
         output_directories: output_directories.clone(),
         additional_inputs,
@@ -2694,9 +2710,16 @@ fn eval_template_ctx_method(
                     "declare_file(): invalid relative filename '{filename}'"
                 ));
             }
-            let rel = dir.root_relative_path.get_relative_str(&norm);
-            let mut a = st.derived(rel);
-            a.root = dir.root;
+            let a = Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: dir.root,
+                is_unresolved_symlink: false,
+                is_constant_metadata: false,
+                exec_path: dir.exec_path.get_relative_str(&norm),
+                root_relative_path: dir.root_relative_path.get_relative_str(&norm),
+                owner_label: dir.owner_label.clone(),
+            };
             st.declared_files
                 .lock()
                 .unwrap()

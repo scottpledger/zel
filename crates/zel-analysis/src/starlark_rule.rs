@@ -1205,4 +1205,213 @@ def _cross_sib(ctx):
             "unexpected error: {cross_err}"
         );
     }
+
+    #[test]
+    fn map_directory_expansion_preserves_sibling_repository_layout_semantics() {
+        use zel_packages::rule_class::{RuleClass, StarlarkRuleSpec};
+        use zel_packages::RuleExtra;
+        use zel_starlark::EvalContext;
+
+        let mut ectx = EvalContext::new(PathFragment::empty(), None);
+        ectx.globals
+            .insert("Label".into(), Value::BuiltinFunction("host:Label".into()));
+        ectx.eval_str(
+            r##"
+def _map_impl(template_ctx, input_directories, output_directories, additional_inputs, tools, additional_params):
+    in_dir = input_directories["src"]
+    out_dir = output_directories["dst"]
+    ext_lbl = Label("@@ext//pkg:hdr.h")
+    for child in in_dir.children:
+        out = template_ctx.declare_file("mapped/" + child.tree_relative_path, directory = out_dir)
+        args = template_ctx.args()
+        args.add(ext_lbl.workspace_root)
+        args.add(getattr(ext_lbl, "workspace_root"))
+        args.add(child.owner.workspace_root)
+        args.add(child.path)
+        args.add(child.short_path)
+        args.add(out.path)
+        args.add(out.root.path)
+        args.add(out.short_path)
+        args.add(out.owner.workspace_root)
+        template_ctx.run(
+            outputs = [out],
+            inputs = [child],
+            executable = tools["tool"],
+            arguments = [args],
+        )
+
+def _rule_impl(ctx):
+    in_dir = ctx.actions.declare_directory("in_dir")
+    tool = ctx.actions.declare_file("tool.sh")
+    ctx.actions.write(output = in_dir, content = "")
+    ctx.actions.write(output = tool, content = "#!/bin/sh\n", is_executable = True)
+    out_dir = ctx.actions.declare_directory("out_dir")
+    ctx.actions.map_directory(
+        input_directories = {"src": in_dir},
+        output_directories = {"dst": out_dir},
+        tools = {"tool": tool},
+        implementation = _map_impl,
+    )
+    return []
+"##,
+        )
+        .unwrap();
+        let rule_impl = ectx.globals.get("_rule_impl").cloned().unwrap();
+
+        let make_rule = |label_str: &str| -> RuleInstance {
+            let rc = Arc::new(RuleClass {
+                name: "mapper".into(),
+                attrs: BTreeMap::new(),
+                attr_order: vec!["name".into()],
+                implicit: BTreeMap::new(),
+                is_test: false,
+                is_executable: false,
+                open: false,
+                implicit_outputs: Vec::new(),
+                outputs_fn: None,
+                is_starlark: true,
+                build_setting: false,
+                build_setting_is_flag: false,
+                starlark: Some(Arc::new(StarlarkRuleSpec {
+                    implementation: rule_impl.clone(),
+                    kwargs: BTreeMap::new(),
+                    defined_in: "//:defs.bzl".into(),
+                    definition_digest: String::new(),
+                    definition_stack: Vec::new(),
+                    initializers: Vec::new(),
+                    build_setting_flag: false,
+                })),
+            });
+            RuleInstance {
+                label: Label::parse_canonical(label_str).unwrap(),
+                rule_class: "mapper".into(),
+                attrs: BTreeMap::new(),
+                srcs: Vec::new(),
+                deps: Vec::new(),
+                outs: Vec::new(),
+                tools: Vec::new(),
+                data: Vec::new(),
+                visibility: Vec::new(),
+                cmd: None,
+                executable: false,
+                testonly: false,
+                extra: RuleExtra {
+                    rule_class: Some(rc),
+                    ..Default::default()
+                },
+            }
+        };
+
+        let resolver: Arc<dyn DepResolver> = Arc::new(MapPlatformResolver {
+            platforms: BTreeMap::new(),
+        });
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+        let expand_case = |label_str: &str, sibling: bool| -> (String, Vec<String>) {
+            let rule = make_rule(label_str);
+            let mut inputs = AnalysisInputs::new(resolver.clone());
+            inputs.sibling_repository_layout = sibling;
+            let ct = analyze_starlark_rule(&rule, &cfg, inputs).unwrap();
+            let map_act = ct
+                .typed_actions
+                .iter()
+                .find(|a| matches!(a.kind, crate::ActionKind::MapDirectory { .. }))
+                .expect("MapDirectory action registered");
+            let crate::ActionKind::MapDirectory {
+                input_directories,
+                expander,
+                ..
+            } = &map_act.kind
+            else {
+                unreachable!()
+            };
+            let (_, in_dir) = &input_directories[0];
+            let child = Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: in_dir.root,
+                is_unresolved_symlink: false,
+                is_constant_metadata: false,
+                exec_path: in_dir.exec_path.get_relative_str("sub/item.txt"),
+                root_relative_path: in_dir.root_relative_path.get_relative_str("sub/item.txt"),
+                owner_label: in_dir.owner_label.clone(),
+            };
+            let mut discovered = BTreeMap::new();
+            discovered.insert("src".to_string(), vec![("sub/item.txt".to_string(), child)]);
+            let sub_actions = expander.0.expand(&discovered).unwrap();
+            assert_eq!(sub_actions.len(), 1);
+            let crate::ActionAnalysisMetadata::SpawnAction { argv, .. } = &sub_actions[0] else {
+                panic!("expected expanded SpawnAction");
+            };
+            (expander.0.key_fingerprint(), argv[1..].to_vec())
+        };
+
+        let (fp_main_default, args_main_default) = expand_case("//pkg:main_t", false);
+        assert_eq!(
+            args_main_default,
+            vec![
+                "external/ext",
+                "external/ext",
+                "",
+                "bazel-out/k8-fastbuild/bin/pkg/in_dir/sub/item.txt",
+                "pkg/in_dir/sub/item.txt",
+                "bazel-out/k8-fastbuild/bin/pkg/out_dir/mapped/sub/item.txt",
+                "bazel-out/k8-fastbuild/bin",
+                "pkg/out_dir/mapped/sub/item.txt",
+                "",
+            ]
+        );
+
+        let (fp_main_sibling, args_main_sibling) = expand_case("//pkg:main_t", true);
+        assert_eq!(
+            args_main_sibling,
+            vec![
+                "../ext",
+                "../ext",
+                "",
+                "bazel-out/k8-fastbuild/bin/pkg/in_dir/sub/item.txt",
+                "pkg/in_dir/sub/item.txt",
+                "bazel-out/k8-fastbuild/bin/pkg/out_dir/mapped/sub/item.txt",
+                "bazel-out/k8-fastbuild/bin",
+                "pkg/out_dir/mapped/sub/item.txt",
+                "",
+            ]
+        );
+        assert_ne!(
+            fp_main_default, fp_main_sibling,
+            "toggling sibling_repository_layout must change map_directory key_fingerprint"
+        );
+
+        let (_, args_ext_default) = expand_case("@@ext//pkg:ext_t", false);
+        assert_eq!(
+            args_ext_default,
+            vec![
+                "external/ext",
+                "external/ext",
+                "external/ext",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/in_dir/sub/item.txt",
+                "../ext/pkg/in_dir/sub/item.txt",
+                "bazel-out/k8-fastbuild/bin/external/ext/pkg/out_dir/mapped/sub/item.txt",
+                "bazel-out/k8-fastbuild/bin",
+                "../ext/pkg/out_dir/mapped/sub/item.txt",
+                "external/ext",
+            ]
+        );
+
+        let (_, args_ext_sibling) = expand_case("@@ext//pkg:ext_t", true);
+        assert_eq!(
+            args_ext_sibling,
+            vec![
+                "../ext",
+                "../ext",
+                "../ext",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/in_dir/sub/item.txt",
+                "../ext/pkg/in_dir/sub/item.txt",
+                "bazel-out/ext/k8-fastbuild/bin/pkg/out_dir/mapped/sub/item.txt",
+                "bazel-out/ext/k8-fastbuild/bin",
+                "../ext/pkg/out_dir/mapped/sub/item.txt",
+                "../ext",
+            ]
+        );
+    }
 }

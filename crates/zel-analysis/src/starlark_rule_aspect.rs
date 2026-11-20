@@ -166,11 +166,14 @@ fn build_propagation_ctx(
 fn eval_dynamic_attr_aspects(
     def: &zel_packages::aspect::AspectDef,
     prop_ctx: &Value,
+    sibling_repository_layout: bool,
 ) -> Result<Option<Vec<String>>, String> {
     let Some(func) = &def.attr_aspects_fn else {
         return Ok(None);
     };
     let mut ectx = EvalContext::default();
+    ectx.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
+    ectx.thread.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
     let ret = ectx
         .call_value(func.clone(), vec![prop_ctx.clone()], BTreeMap::new())
         .map_err(|e| e.0)?;
@@ -292,6 +295,10 @@ fn apply_aspect_path(
         let prop_ctx = build_propagation_ctx(def, &rule, &rc, current_ct.actual_target_label(), params);
         if let Some(pred) = &def.propagation_predicate {
             let mut pctx = EvalContext::default();
+            pctx.semantics.experimental_sibling_repository_layout =
+                inputs.sibling_repository_layout;
+            pctx.thread.semantics.experimental_sibling_repository_layout =
+                inputs.sibling_repository_layout;
             let keep = pctx
                 .call_value(pred.clone(), vec![prop_ctx.clone()], BTreeMap::new())
                 .map_err(|e| e.0)?;
@@ -353,7 +360,10 @@ fn apply_aspect_path(
                 current_ct.actual_target_label(),
                 params,
             );
-            if let Some(dyn_list) = eval_dynamic_attr_aspects(d_item, &item_pctx).map_err(wrap)? {
+            if let Some(dyn_list) =
+                eval_dynamic_attr_aspects(d_item, &item_pctx, inputs.sibling_repository_layout)
+                    .map_err(wrap)?
+            {
                 dynamic_attrs_map.insert(d_item.id, dyn_list);
             }
         }
