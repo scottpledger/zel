@@ -82,6 +82,9 @@ pub mod ids {
     pub fn none_configuration() -> Msg {
         configuration_id("none")
     }
+    pub fn null_configuration() -> Msg {
+        bid("configuration", none_configuration())
+    }
     pub fn pattern(patterns: &[String]) -> Msg {
         let mut p = sub("PatternExpandedId");
         for s in patterns {
@@ -101,6 +104,14 @@ pub mod ids {
         p.set_str("label", label);
         bid("target_configured", p)
     }
+    pub fn aspect_configured(label: &str, aspect: &str) -> Msg {
+        let mut p = sub("TargetConfiguredId");
+        p.set_str("label", label);
+        if !aspect.is_empty() {
+            p.set_str("aspect", aspect);
+        }
+        bid("target_configured", p)
+    }
     pub fn named_set(id: &str) -> Msg {
         let mut p = sub("NamedSetOfFilesId");
         p.set_str("id", id);
@@ -115,6 +126,15 @@ pub mod ids {
         let mut p = sub("TargetCompletedId");
         p.set_str("label", label);
         p.set_msg("configuration", configuration_id(config_id));
+        bid("target_completed", p)
+    }
+    pub fn aspect_completed(label: &str, config_id: &str, aspect: &str) -> Msg {
+        let mut p = sub("TargetCompletedId");
+        p.set_str("label", label);
+        p.set_msg("configuration", configuration_id(config_id));
+        if !aspect.is_empty() {
+            p.set_str("aspect", aspect);
+        }
         bid("target_completed", p)
     }
     pub fn action_completed(primary_output: &str, label: &str, config_id: &str) -> Msg {
@@ -135,22 +155,39 @@ pub mod ids {
         p.set_msg("configuration", configuration_id(config_id));
         bid("configured_label", p)
     }
+    /// `BuildEventIdUtil.testResult`: `run` and `shard` are 0-indexed and stored 1-indexed in BEP.
     pub fn test_result(label: &str, config_id: &str, run: i32, shard: i32, attempt: i32) -> Msg {
         let mut p = sub("TestResultId");
         p.set_str("label", label);
         p.set_msg("configuration", configuration_id(config_id));
-        p.set_int("run", run as i64);
-        p.set_int("shard", shard as i64);
+        p.set_int("run", run.wrapping_add(1) as i64);
+        p.set_int("shard", shard.wrapping_add(1) as i64);
         p.set_int("attempt", attempt as i64);
         bid("test_result", p)
     }
+    pub fn test_result_first_attempt(label: &str, run: i32, shard: i32, config_id: &str) -> Msg {
+        test_result(label, config_id, run, shard, 1)
+    }
     pub fn test_progress(label: &str, config_id: &str, run: i32, shard: i32, attempt: i32) -> Msg {
+        test_progress_counted(label, config_id, run, shard, attempt, 0)
+    }
+    pub fn test_progress_counted(
+        label: &str,
+        config_id: &str,
+        run: i32,
+        shard: i32,
+        attempt: i32,
+        opaque_count: i32,
+    ) -> Msg {
         let mut p = sub("TestProgressId");
         p.set_str("label", label);
         p.set_msg("configuration", configuration_id(config_id));
-        p.set_int("run", run as i64);
-        p.set_int("shard", shard as i64);
+        p.set_int("run", run.wrapping_add(1) as i64);
+        p.set_int("shard", shard.wrapping_add(1) as i64);
         p.set_int("attempt", attempt as i64);
+        if opaque_count != 0 {
+            p.set_int("opaque_count", opaque_count as i64);
+        }
         bid("test_progress", p)
     }
     pub fn test_summary(label: &str, config_id: &str) -> Msg {
@@ -208,6 +245,8 @@ pub struct BuildEventNode {
     /// Marks events that complete the build (`BuildCompletingEvent`): after posting, the
     /// streamer posts the final progress event and aborts anything still announced.
     pub completes_build: bool,
+    /// Marks replaceable events (`ReplaceableBuildEvent`) buffered until replaced or build completion.
+    pub replaceable: bool,
 }
 
 impl BuildEventNode {
@@ -221,6 +260,7 @@ impl BuildEventNode {
             payload,
             posted_after: Vec::new(),
             completes_build: false,
+            replaceable: false,
         }
     }
 
@@ -231,6 +271,11 @@ impl BuildEventNode {
 
     pub fn completing(mut self) -> Self {
         self.completes_build = true;
+        self
+    }
+
+    pub fn as_replaceable(mut self) -> Self {
+        self.replaceable = true;
         self
     }
 
@@ -272,36 +317,312 @@ pub enum BepFormat {
 
 /// Serializes one event in the given file format.
 pub fn serialize_event(format: BepFormat, event: &Msg) -> Vec<u8> {
+    serialize_event_with_options(format, event, true, None)
+}
+
+/// Serializes one event, honoring `--build_event_*_file_path_conversion`.
+pub fn serialize_event_with_conversion(
+    format: BepFormat,
+    event: &Msg,
+    path_conversion: bool,
+) -> Vec<u8> {
+    serialize_event_with_options(format, event, path_conversion, None)
+}
+
+/// Serializes one event, applying Bazel's BEP `PathConverter` semantics:
+/// when `path_conversion` is `true` and `bytestream_prefix` is configured, files carrying a digest
+/// use `bytestream://<prefix>/blobs/<digest>/<length>` (`ByteStreamBuildEventArtifactUploader`);
+/// when `path_conversion` is `false` (or no remote uploader is active), `LocalFilesArtifactUploader`
+/// semantics apply (`file://` URIs for regular files and omitted `uri` on `directory_output`).
+pub fn serialize_event_with_options(
+    format: BepFormat,
+    event: &Msg,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) -> Vec<u8> {
+    let rewritten = apply_file_path_conversion(event, path_conversion, bytestream_prefix);
+    let ev = &rewritten;
     match format {
         BepFormat::Json => {
-            let mut s = event.to_json();
+            let mut s = ev.to_json();
             s.push('\n');
             s.into_bytes()
         }
         BepFormat::Binary => {
-            let body = event.encode_to_vec();
+            let body = ev.encode_to_vec();
             let mut out = Vec::with_capacity(body.len() + 5);
             zel_proto::wire::encode_varint(body.len() as u64, &mut out);
             out.extend_from_slice(&body);
             out
         }
-        BepFormat::Text => format!("event {{\n{}}}\n\n", event.to_text()).into_bytes(),
+        BepFormat::Text => format!("event {{\n{}}}\n\n", ev.to_text()).into_bytes(),
     }
+}
+
+fn has_windows_drive_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Decodes a `file://` URI back into a raw filesystem path.
+pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    let rest = if rest.len() >= 10 && rest[..10].eq_ignore_ascii_case("localhost/") {
+        &rest[9..]
+    } else {
+        rest
+    };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (
+                (bytes[i + 1] as char).to_digit(16),
+                (bytes[i + 2] as char).to_digit(16),
+            ) {
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let decoded = String::from_utf8(out).ok()?;
+    if decoded.starts_with('/') && has_windows_drive_prefix(&decoded[1..]) {
+        Some(decoded[1..].to_string())
+    } else {
+        Some(decoded)
+    }
+}
+
+fn convert_file_msg(f: &Msg, path_conversion: bool, bytestream_prefix: Option<&str>) -> Msg {
+    let mut c = f.clone();
+    let uri = c.get_str("uri").to_string();
+    if uri.is_empty() {
+        return c;
+    }
+    if path_conversion {
+        if let Some(prefix) = bytestream_prefix.filter(|p| !p.is_empty()) {
+            if uri.starts_with("bytestream://") {
+                return c;
+            }
+            let p = prefix.trim_end_matches('/');
+            let digest = c.get_str("digest").to_string();
+            if !digest.is_empty() {
+                let len = c.get_i64("length");
+                c.clear("uri");
+                c.set_str("uri", format!("bytestream://{p}/blobs/{digest}/{len}"));
+                return c;
+            }
+            // For `ActionExecuted`, `TestResult`, `TestSummary`, and `BuildToolLogs` (where the
+            // `File` proto does not pre-populate `digest`), `ByteStreamBuildEventArtifactUploader`
+            // hashes the referenced local file on disk (`readPathMetadata` -> `digestUtil.compute`).
+            // When the local file cannot be hashed (missing, directory, or unreadable),
+            // `PathConverterImpl.apply` returns `null` so `File.uri` is omitted rather than
+            // exposing a `file://` URI pointing at the builder's local disk.
+            let local_path = if let Some(decoded) = file_uri_to_local_path(&uri) {
+                Some(decoded)
+            } else if !uri.contains("://") {
+                Some(uri)
+            } else {
+                // Non-local URI scheme (e.g. pre-uploaded `https://` in `BuildToolLogs.futureUris`).
+                return c;
+            };
+            c.clear("uri");
+            if let Some(lp) = local_path {
+                if let Ok((len, hex_digest)) =
+                    zel_util::sha256::hash_file(std::path::Path::new(&lp))
+                {
+                    c.set_str("uri", format!("bytestream://{p}/blobs/{hex_digest}/{len}"));
+                }
+            }
+            return c;
+        }
+        if !uri.contains("://") {
+            c.clear("uri");
+            c.set_str("uri", file_uri(&uri));
+        }
+    } else if uri.starts_with("file://") {
+        // `LocalFilesArtifactUploader` (`FileLocalPathConverter`) always emits `file://` URIs.
+    } else if !uri.contains("://") {
+        c.clear("uri");
+        c.set_str("uri", file_uri(&uri));
+    } else {
+        // Remote URI (e.g. `bytestream://`) with `--nobuild_event_*_file_path_conversion`:
+        // `LocalFilesArtifactUploader` never emits remote URIs.
+        c.clear("uri");
+    }
+    c
+}
+
+fn convert_singular_file(
+    parent: &mut Msg,
+    field: &str,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) {
+    if let Some(f) = parent.get_msg(field).cloned() {
+        parent.clear(field);
+        parent.set_msg(
+            field,
+            convert_file_msg(&f, path_conversion, bytestream_prefix),
+        );
+    }
+}
+
+fn convert_repeated_files(
+    parent: &mut Msg,
+    field: &str,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) {
+    let files: Vec<Msg> = parent
+        .get_msgs(field)
+        .into_iter()
+        .map(|f| convert_file_msg(f, path_conversion, bytestream_prefix))
+        .collect();
+    if !files.is_empty() {
+        parent.clear(field);
+        for f in files {
+            parent.set_msg(field, f);
+        }
+    }
+}
+
+/// Applies Bazel BEP `PathConverter` rules across every `build_event_stream.File` in `event`.
+pub fn apply_file_path_conversion(
+    event: &Msg,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) -> Msg {
+    let mut ev = event.clone();
+    if let Some(ns) = ev.get_msg("named_set_of_files").cloned() {
+        let mut ns = ns;
+        convert_repeated_files(&mut ns, "files", path_conversion, bytestream_prefix);
+        ev.clear("named_set_of_files");
+        ev.set_msg("named_set_of_files", ns);
+    }
+    if let Some(ae) = ev.get_msg("action").cloned() {
+        let mut ae = ae;
+        convert_singular_file(&mut ae, "stdout", path_conversion, bytestream_prefix);
+        convert_singular_file(&mut ae, "stderr", path_conversion, bytestream_prefix);
+        convert_singular_file(
+            &mut ae,
+            "primary_output",
+            path_conversion,
+            bytestream_prefix,
+        );
+        ev.clear("action");
+        ev.set_msg("action", ae);
+    }
+    if let Some(tc) = ev.get_msg("completed").cloned() {
+        let mut tc = tc;
+        convert_repeated_files(
+            &mut tc,
+            "important_output",
+            path_conversion,
+            bytestream_prefix,
+        );
+        let groups: Vec<Msg> = tc
+            .get_msgs("output_group")
+            .into_iter()
+            .map(|g| {
+                let mut g = g.clone();
+                convert_repeated_files(&mut g, "inline_files", path_conversion, bytestream_prefix);
+                g
+            })
+            .collect();
+        if !groups.is_empty() {
+            tc.clear("output_group");
+            for g in groups {
+                tc.set_msg("output_group", g);
+            }
+        }
+        let dirs: Vec<Msg> = tc
+            .get_msgs("directory_output")
+            .into_iter()
+            .map(|d| {
+                let mut d = d.clone();
+                // Per `build_event_stream.proto` and both `LocalFilesArtifactUploader` and
+                // `ByteStreamBuildEventArtifactUploader`, `directory_output` entries never carry `uri`.
+                d.clear("uri");
+                d
+            })
+            .collect();
+        if !dirs.is_empty() {
+            tc.clear("directory_output");
+            for d in dirs {
+                tc.set_msg("directory_output", d);
+            }
+        }
+        ev.clear("completed");
+        ev.set_msg("completed", tc);
+    }
+    if let Some(btl) = ev.get_msg("build_tool_logs").cloned() {
+        let mut btl = btl;
+        convert_repeated_files(&mut btl, "log", path_conversion, bytestream_prefix);
+        ev.clear("build_tool_logs");
+        ev.set_msg("build_tool_logs", btl);
+    }
+    if let Some(tr) = ev.get_msg("test_result").cloned() {
+        let mut tr = tr;
+        convert_repeated_files(
+            &mut tr,
+            "test_action_output",
+            path_conversion,
+            bytestream_prefix,
+        );
+        ev.clear("test_result");
+        ev.set_msg("test_result", tr);
+    }
+    if let Some(ts) = ev.get_msg("test_summary").cloned() {
+        let mut ts = ts;
+        convert_repeated_files(&mut ts, "passed", path_conversion, bytestream_prefix);
+        convert_repeated_files(&mut ts, "failed", path_conversion, bytestream_prefix);
+        ev.clear("test_summary");
+        ev.set_msg("test_summary", ts);
+    }
+    ev
 }
 
 /// Streaming file transport; every event is written and flushed as it is sent.
 pub struct FileTransport {
     format: BepFormat,
     label: String,
+    path_conversion: bool,
+    bytestream_prefix: Option<String>,
     sink: Mutex<Box<dyn Write + Send>>,
     error: Mutex<Option<String>>,
 }
 
 impl FileTransport {
     pub fn new(format: BepFormat, label: impl Into<String>, sink: Box<dyn Write + Send>) -> Self {
+        Self::new_with_conversion(format, label, true, sink)
+    }
+
+    pub fn new_with_conversion(
+        format: BepFormat,
+        label: impl Into<String>,
+        path_conversion: bool,
+        sink: Box<dyn Write + Send>,
+    ) -> Self {
+        Self::new_with_options(format, label, path_conversion, None, sink)
+    }
+
+    pub fn new_with_options(
+        format: BepFormat,
+        label: impl Into<String>,
+        path_conversion: bool,
+        bytestream_prefix: Option<String>,
+        sink: Box<dyn Write + Send>,
+    ) -> Self {
         Self {
             format,
             label: label.into(),
+            path_conversion,
+            bytestream_prefix,
             sink: Mutex::new(sink),
             error: Mutex::new(None),
         }
@@ -309,13 +630,36 @@ impl FileTransport {
 
     /// Creates `path` (and parent directories) on the real filesystem.
     pub fn open(format: BepFormat, path: &str) -> std::io::Result<Self> {
+        Self::open_with_conversion(format, path, true)
+    }
+
+    pub fn open_with_conversion(
+        format: BepFormat,
+        path: &str,
+        path_conversion: bool,
+    ) -> std::io::Result<Self> {
+        Self::open_with_options(format, path, path_conversion, None)
+    }
+
+    pub fn open_with_options(
+        format: BepFormat,
+        path: &str,
+        path_conversion: bool,
+        bytestream_prefix: Option<String>,
+    ) -> std::io::Result<Self> {
         if let Some(parent) = std::path::Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)?;
             }
         }
         let f = std::fs::File::create(path)?;
-        Ok(Self::new(format, path, Box::new(f)))
+        Ok(Self::new_with_options(
+            format,
+            path,
+            path_conversion,
+            bytestream_prefix,
+            Box::new(f),
+        ))
     }
 }
 
@@ -330,7 +674,12 @@ impl BuildEventTransport for FileTransport {
     }
 
     fn send(&self, event: &Msg) {
-        let bytes = serialize_event(self.format, event);
+        let bytes = serialize_event_with_options(
+            self.format,
+            event,
+            self.path_conversion,
+            self.bytestream_prefix.as_deref(),
+        );
         let mut sink = self.sink.lock().unwrap();
         if let Err(e) = sink.write_all(&bytes).and_then(|_| sink.flush()) {
             *self.error.lock().unwrap() = Some(format!("{}: {e}", self.label));
@@ -375,6 +724,7 @@ struct State {
     /// stdout/stderr alternation tracking (`ProgressBufferState`).
     saw_stdout_after_stderr: bool,
     pending: Vec<(Vec<u8>, BuildEventNode)>,
+    replaceable: Vec<(Vec<u8>, BuildEventNode)>,
     final_events_to_come: Option<HashSet<Vec<u8>>>,
     closed: bool,
     abort_reason: Option<(String, String)>,
@@ -597,9 +947,16 @@ impl BuildEventStreamer {
             }
         }
 
-        // BuildInfo-like duplicates are ignored.
-        if !id.has("progress") && st.posted.contains(&key(id)) && id.has("workspace_status") {
+        // BuildInfo-like and Configuration duplicates are ignored.
+        if !id.has("progress")
+            && st.posted.contains(&key(id))
+            && (id.has("workspace_status") || id.has("configuration"))
+        {
             return;
+        }
+        if let Some(cfg) = id.get_msg("configuration") {
+            st.configurations_posted
+                .insert(cfg.get_str("id").to_string());
         }
 
         Self::record_posted(st, id);
@@ -650,7 +1007,57 @@ impl BuildEventStreamer {
         }
     }
 
+    fn extract_config_id(id: &Msg) -> Option<&str> {
+        for field in [
+            "target_completed",
+            "action_completed",
+            "configured_label",
+            "test_result",
+            "test_progress",
+            "test_summary",
+            "target_summary",
+        ] {
+            if let Some(sub) = id.get_msg(field) {
+                if let Some(cfg) = sub.get_msg("configuration") {
+                    let cid = cfg.get_str("id");
+                    if !cid.is_empty() {
+                        return Some(cid);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn ensure_null_configuration(&self, st: &mut State, node: &BuildEventNode) {
+        let needs_null = Self::extract_config_id(&node.id) == Some("none")
+            || node
+                .children
+                .iter()
+                .any(|c| Self::extract_config_id(c) == Some("none"));
+        if needs_null && !st.configurations_posted.contains("none") {
+            st.configurations_posted.insert("none".to_string());
+            let null_cfg = BepBuilder::null_configuration();
+            self.post_locked(st, &null_cfg);
+        }
+    }
+
     fn route_locked(&self, st: &mut State, node: BuildEventNode) {
+        if node.replaceable {
+            let k = key(&node.id);
+            if st.posted.contains(&k) {
+                return;
+            }
+            if let Some(existing) = st.replaceable.iter_mut().find(|(ek, _)| *ek == k) {
+                existing.1 = node;
+            } else {
+                st.replaceable.push((k, node));
+            }
+            return;
+        } else {
+            let k = key(&node.id);
+            st.replaceable.retain(|(ek, _)| *ek != k);
+        }
         // Buffer until prerequisites have been posted.
         for after in &node.posted_after {
             if !Self::is_posted(st, after, st.progress_count) {
@@ -658,6 +1065,7 @@ impl BuildEventStreamer {
                 return;
             }
         }
+        self.ensure_null_configuration(st, &node);
         // Ensure the artificial start event exists when the build ends early.
         if node.completes_build
             && !st.posted.contains(&key(&ids::started()))
@@ -704,6 +1112,15 @@ impl BuildEventStreamer {
     }
 
     fn build_complete_locked(&self, st: &mut State, completing_children: &[Msg]) {
+        // Flush any buffered ReplaceableBuildEvent entries that were not replaced by a final post.
+        let replaceable = std::mem::take(&mut st.replaceable);
+        for (rk, mut rnode) in replaceable {
+            if !st.posted.contains(&rk) {
+                rnode.replaceable = false;
+                self.ensure_null_configuration(st, &rnode);
+                self.post_locked(st, &rnode);
+            }
+        }
         // clearPendingEvents: abort anything blocked on never-posted prerequisites.
         let reason = Self::abort_info(st);
         while !st.pending.is_empty() {
@@ -899,6 +1316,7 @@ impl BepBuilder {
 
     pub fn build_metrics(metrics: Msg) -> BuildEventNode {
         BuildEventNode::new(ids::build_metrics(), vec![], "build_metrics", metrics)
+            .after(ids::build_finished())
     }
 
     pub fn unstructured_command_line(args: &[String]) -> BuildEventNode {
@@ -984,6 +1402,7 @@ impl BepBuilder {
             },
             posted_after: vec![],
             completes_build: false,
+            replaceable: false,
         }
     }
 
@@ -1050,6 +1469,11 @@ impl BepBuilder {
         BuildEventNode::new(ids::pattern(patterns), children, "expanded", b)
     }
 
+    pub fn null_configuration() -> BuildEventNode {
+        let c = Msg::new("build_event_stream.Configuration");
+        BuildEventNode::new(ids::null_configuration(), vec![], "configuration", c)
+    }
+
     pub fn configuration(
         id: &str,
         mnemonic: &str,
@@ -1108,10 +1532,64 @@ impl BepBuilder {
         BuildEventNode::new(ids::target_configured(label), children, "configured", c)
     }
 
+    pub fn aspect_configured(
+        label: &str,
+        aspect: &str,
+        config_id: &str,
+        completed_child: bool,
+    ) -> BuildEventNode {
+        let c = Msg::new("build_event_stream.TargetConfigured");
+        let mut children = Vec::new();
+        if completed_child {
+            children.push(ids::aspect_completed(label, config_id, aspect));
+        }
+        BuildEventNode::new(
+            ids::aspect_configured(label, aspect),
+            children,
+            "configured",
+            c,
+        )
+    }
+
     /// `ActionExecuted`; with `publish_all_actions` false only failed actions are published.
     #[allow(clippy::too_many_arguments)]
     pub fn action_executed(
         primary_output: &str,
+        label: &str,
+        config_id: &str,
+        mnemonic: &str,
+        success: bool,
+        exit_code: i32,
+        stdout: Option<&[u8]>,
+        stderr: Option<&[u8]>,
+        command_line: &[String],
+        start_millis: i64,
+        end_millis: i64,
+        failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
+    ) -> BuildEventNode {
+        Self::action_executed_with_primary_output_path(
+            primary_output,
+            None,
+            label,
+            config_id,
+            mnemonic,
+            success,
+            exit_code,
+            stdout,
+            stderr,
+            command_line,
+            start_millis,
+            end_millis,
+            failure_detail,
+        )
+    }
+
+    /// `ActionExecuted` with optional local `primary_output_path` populated on `primary_output`
+    /// when `success` is `true` (`ActionExecutedEvent.asStreamProto`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn action_executed_with_primary_output_path(
+        primary_output: &str,
+        primary_output_path: Option<&str>,
         label: &str,
         config_id: &str,
         mnemonic: &str,
@@ -1134,6 +1612,13 @@ impl BepBuilder {
                 file.set_str("name", f);
                 file.set_bytes("contents", b.to_vec());
                 a.set_msg(f, file);
+            }
+        }
+        if success {
+            if let Some(p) = primary_output_path.filter(|p| !p.is_empty()) {
+                let mut po = a.new_child("primary_output");
+                po.set_str("uri", file_uri(p));
+                a.set_msg("primary_output", po);
             }
         }
         for c in command_line {
@@ -1182,51 +1667,108 @@ impl BepBuilder {
         f
     }
 
+    /// Creates a `File` entry for a directory/tree artifact or unresolved symlink (no `uri`).
+    pub fn file_without_uri(name: &str, prefix: &[String]) -> Msg {
+        let mut f = Msg::new("build_event_stream.File");
+        for p in prefix {
+            f.set_str("path_prefix", p.clone());
+        }
+        f.set_str("name", name);
+        f
+    }
+
     /// Splits a flattened file list into `NamedSetOfFiles` events respecting
-    /// `--build_event_max_named_set_of_file_entries` (`max_entries`, `None` = unlimited). Returns
-    /// the root named-set id and the events (children first).
+    /// `--build_event_max_named_set_of_file_entries` (`max_entries`, only splits when `>= 2`).
+    /// Recursively folds chunks so no node's total degree (`files + file_sets`) exceeds `max_entries`.
     pub fn named_sets(
         group_key: &str,
         files: Vec<Msg>,
         max_entries: Option<usize>,
     ) -> (Msg, Vec<BuildEventNode>) {
-        let mut nodes = Vec::new();
-        let chunk = max_entries.filter(|m| *m > 0).unwrap_or(usize::MAX);
-        let chunks: Vec<Vec<Msg>> = if files.len() <= chunk {
-            vec![files]
-        } else {
-            files.chunks(chunk).map(<[Msg]>::to_vec).collect()
+        enum Entry {
+            File(Msg),
+            Set(String),
+        }
+
+        let Some(limit) = max_entries.filter(|m| *m >= 2) else {
+            let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+            for f in files {
+                ns.set_msg("files", f);
+            }
+            let node =
+                BuildEventNode::new(ids::named_set(group_key), vec![], "named_set_of_files", ns);
+            return (ids::named_set(group_key), vec![node]);
         };
-        let mut child_ids = Vec::new();
-        for (i, c) in chunks.iter().enumerate() {
-            let id = if chunks.len() == 1 {
-                group_key.to_string()
-            } else {
-                format!("{group_key}-{i}")
-            };
-            let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
-            for f in c {
-                ns.set_msg("files", f.clone());
+
+        let mut entries: Vec<Entry> = files.into_iter().map(Entry::File).collect();
+        let mut nodes = Vec::new();
+        let mut sub_idx = 0usize;
+
+        while entries.len() > limit {
+            let mut next_entries = Vec::with_capacity(entries.len().div_ceil(limit));
+            let mut iter = entries.into_iter();
+            loop {
+                let mut chunk = Vec::with_capacity(limit);
+                for _ in 0..limit {
+                    if let Some(e) = iter.next() {
+                        chunk.push(e);
+                    } else {
+                        break;
+                    }
+                }
+                if chunk.is_empty() {
+                    break;
+                }
+                if chunk.len() == 1 {
+                    next_entries.push(chunk.pop().unwrap());
+                } else {
+                    let sub_id = format!("{group_key}-{sub_idx}");
+                    sub_idx += 1;
+                    let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+                    let mut child_ids = Vec::new();
+                    for item in chunk {
+                        match item {
+                            Entry::File(f) => {
+                                ns.set_msg("files", f);
+                            }
+                            Entry::Set(cid) => {
+                                ns.set_msg("file_sets", ids::named_set_id(&cid));
+                                child_ids.push(ids::named_set(&cid));
+                            }
+                        }
+                    }
+                    nodes.push(BuildEventNode::new(
+                        ids::named_set(&sub_id),
+                        child_ids,
+                        "named_set_of_files",
+                        ns,
+                    ));
+                    next_entries.push(Entry::Set(sub_id));
+                }
             }
-            let node = BuildEventNode::new(ids::named_set(&id), vec![], "named_set_of_files", ns);
-            child_ids.push(id);
-            nodes.push(node);
+            entries = next_entries;
         }
-        if chunks.len() > 1 {
-            let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
-            for c in &child_ids {
-                ns.set_msg("file_sets", ids::named_set_id(c));
+
+        let mut root_ns = Msg::new("build_event_stream.NamedSetOfFiles");
+        let mut root_children = Vec::new();
+        for item in entries {
+            match item {
+                Entry::File(f) => {
+                    root_ns.set_msg("files", f);
+                }
+                Entry::Set(cid) => {
+                    root_ns.set_msg("file_sets", ids::named_set_id(&cid));
+                    root_children.push(ids::named_set(&cid));
+                }
             }
-            nodes.push(BuildEventNode::new(
-                ids::named_set(group_key),
-                child_ids.iter().map(|c| ids::named_set(c)).collect(),
-                "named_set_of_files",
-                ns,
-            ));
-            (ids::named_set(group_key), nodes)
-        } else {
-            (ids::named_set(group_key), nodes)
         }
+        nodes.push(BuildEventNode::new(
+            ids::named_set(group_key),
+            root_children,
+            "named_set_of_files",
+            root_ns,
+        ));
+        (ids::named_set(group_key), nodes)
     }
 
     pub fn target_completed(
@@ -1237,18 +1779,54 @@ impl BepBuilder {
         tags: &[String],
         failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
     ) -> BuildEventNode {
+        let groups: Vec<BepOutputGroup> = output_groups
+            .iter()
+            .map(|(name, sets, incomplete)| BepOutputGroup {
+                name: name.clone(),
+                file_sets: sets.clone(),
+                inline_files: Vec::new(),
+                incomplete: *incomplete,
+            })
+            .collect();
+        Self::target_completed_with_groups(
+            label,
+            config_id,
+            None,
+            success,
+            &groups,
+            &[],
+            tags,
+            failure_detail,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn target_completed_with_groups(
+        label: &str,
+        config_id: &str,
+        aspect: Option<&str>,
+        success: bool,
+        output_groups: &[BepOutputGroup],
+        directory_outputs: &[Msg],
+        tags: &[String],
+        failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
+    ) -> BuildEventNode {
         let mut c = Msg::new("build_event_stream.TargetComplete");
         c.set_bool("success", success);
-        let mut children = Vec::new();
-        for (name, sets, incomplete) in output_groups {
+        for grp in output_groups {
             let mut g = c.new_child("output_group");
-            g.set_str("name", name.clone());
-            for s in sets {
+            g.set_str("name", grp.name.clone());
+            for s in &grp.file_sets {
                 g.set_msg("file_sets", ids::named_set_id(s));
-                children.push(ids::named_set(s));
             }
-            g.set_bool("incomplete", *incomplete);
+            for f in &grp.inline_files {
+                g.set_msg("inline_files", f.clone());
+            }
+            g.set_bool("incomplete", grp.incomplete);
             c.set_msg("output_group", g);
+        }
+        for d in directory_outputs {
+            c.set_msg("directory_output", d.clone());
         }
         for t in tags {
             c.set_str("tag", t.clone());
@@ -1256,14 +1834,11 @@ impl BepBuilder {
         if let Some(fd) = failure_detail {
             c.set_msg("failure_detail", fd.to_msg());
         }
-        // Named sets are announced by TargetComplete's output groups, not as ordinary children:
-        // Bazel posts them *before* the completion and lists them as its children.
-        BuildEventNode::new(
-            ids::target_completed(label, config_id),
-            vec![],
-            "completed",
-            c,
-        )
+        let event_id = match aspect.filter(|a| !a.is_empty()) {
+            Some(asp) => ids::aspect_completed(label, config_id, asp),
+            None => ids::target_completed(label, config_id),
+        };
+        BuildEventNode::new(event_id, vec![], "completed", c)
     }
 
     pub fn build_finished(
@@ -1272,12 +1847,31 @@ impl BepBuilder {
         finish_millis: i64,
         failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
     ) -> BuildEventNode {
+        Self::build_finished_with_children(
+            exit_name,
+            exit_code,
+            finish_millis,
+            failure_detail,
+            vec![ids::build_tool_logs(), ids::build_metrics()],
+        )
+    }
+
+    pub fn build_finished_with_children(
+        exit_name: &str,
+        exit_code: i32,
+        finish_millis: i64,
+        failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
+        children: Vec<Msg>,
+    ) -> BuildEventNode {
         let mut b = Msg::new("build_event_stream.BuildFinished");
         b.set_bool("overall_success", exit_code == 0);
         let mut ec = b.new_child("exit_code");
         ec.set_str("name", exit_name);
         ec.set_int("code", exit_code as i64);
         b.set_msg("exit_code", ec);
+        if finish_millis != 0 {
+            b.set_int("finish_time_millis", finish_millis);
+        }
         let mut ts = b.new_child("finish_time");
         ts.set_int("seconds", finish_millis.div_euclid(1000));
         ts.set_int("nanos", finish_millis.rem_euclid(1000) * 1_000_000);
@@ -1285,13 +1879,7 @@ impl BepBuilder {
         if let Some(fd) = failure_detail {
             b.set_msg("failure_detail", fd.to_msg());
         }
-        BuildEventNode::new(
-            ids::build_finished(),
-            vec![ids::build_tool_logs(), ids::build_metrics()],
-            "finished",
-            b,
-        )
-        .completing()
+        BuildEventNode::new(ids::build_finished(), children, "finished", b).completing()
     }
 
     pub fn build_tool_logs(logs: &[(String, String)]) -> BuildEventNode {
@@ -1300,6 +1888,33 @@ impl BepBuilder {
             b.set_msg("log", BepBuilder::file(name, path, &[], None, None));
         }
         BuildEventNode::new(ids::build_tool_logs(), vec![], "build_tool_logs", b)
+            .after(ids::build_finished())
+    }
+
+    pub fn build_tool_logs_entries(entries: &[BepLogFile]) -> BuildEventNode {
+        let mut b = Msg::new("build_event_stream.BuildToolLogs");
+        for entry in entries {
+            let mut f = Msg::new("build_event_stream.File");
+            match entry {
+                BepLogFile::LocalPath { name, path } => {
+                    f.set_str("name", name.clone());
+                    f.set_str("uri", file_uri(path));
+                }
+                BepLogFile::Uri { name, uri } => {
+                    f.set_str("name", name.clone());
+                    if !uri.is_empty() {
+                        f.set_str("uri", uri.clone());
+                    }
+                }
+                BepLogFile::Contents { name, contents } => {
+                    f.set_str("name", name.clone());
+                    f.set_bytes("contents", contents.clone());
+                }
+            }
+            b.set_msg("log", f);
+        }
+        BuildEventNode::new(ids::build_tool_logs(), vec![], "build_tool_logs", b)
+            .after(ids::build_finished())
     }
 
     pub fn convenience_symlinks(links: &[(String, String, bool)]) -> BuildEventNode {
@@ -1452,6 +2067,19 @@ pub fn file_uri(path: &str) -> String {
     if path.contains("://") {
         return path.to_string();
     }
+    let normalized;
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        normalized = format!("//{}", unc.replace('\\', "/"));
+        normalized.as_str()
+    } else if let Some(verbatim) = path.strip_prefix(r"\\?\") {
+        normalized = verbatim.replace('\\', "/");
+        normalized.as_str()
+    } else if cfg!(windows) || has_windows_drive_prefix(path) {
+        normalized = path.replace('\\', "/");
+        normalized.as_str()
+    } else {
+        path
+    };
     let p = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -1487,6 +2115,99 @@ pub fn file_uri(path: &str) -> String {
     out
 }
 
+/// Representation mode for `OutputGroup` in BEP (`OutputGroupMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputGroupMode {
+    #[default]
+    NamedSetOfFilesOnly,
+    InlineOnly,
+    Both,
+}
+
+impl OutputGroupMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "named_set_of_files_only" => Some(Self::NamedSetOfFilesOnly),
+            "inline_only" => Some(Self::InlineOnly),
+            "both" => Some(Self::Both),
+            _ => None,
+        }
+    }
+}
+
+/// Upload synchronization mode for BEP file/BES transports (`BuildEventStreamOptions.BesUploadMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BepUploadMode {
+    #[default]
+    WaitForUploadComplete,
+    NowaitForUploadComplete,
+    FullyAsync,
+}
+
+impl BepUploadMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "wait_for_upload_complete" => Some(Self::WaitForUploadComplete),
+            "nowait_for_upload_complete" => Some(Self::NowaitForUploadComplete),
+            "fully_async" => Some(Self::FullyAsync),
+            _ => None,
+        }
+    }
+}
+
+/// Structured output group entry for `TargetComplete` / `AspectComplete`.
+#[derive(Debug, Clone, Default)]
+pub struct BepOutputGroup {
+    pub name: String,
+    pub file_sets: Vec<String>,
+    pub inline_files: Vec<Msg>,
+    pub incomplete: bool,
+}
+
+/// Log entry for `BuildToolLogs`.
+#[derive(Debug, Clone)]
+pub enum BepLogFile {
+    LocalPath { name: String, path: String },
+    Uri { name: String, uri: String },
+    Contents { name: String, contents: Vec<u8> },
+}
+
+/// Deduplicates `NamedSetOfFiles` across output groups and targets (`ArtifactGroupNamer`).
+#[derive(Debug, Default)]
+pub struct ArtifactGroupNamer {
+    next_id: u64,
+    by_fingerprint: std::collections::HashMap<Vec<u8>, String>,
+}
+
+impl ArtifactGroupNamer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns `(named_set_id, newly_created_nodes)`. Repeated identical file sets reuse their id
+    /// and emit no duplicate `NamedSetOfFiles` events.
+    pub fn maybe_deposit(
+        &mut self,
+        files: Vec<Msg>,
+        max_entries: Option<usize>,
+    ) -> (String, Vec<BuildEventNode>) {
+        let mut fp = Vec::new();
+        for f in &files {
+            let enc = f.encode_to_vec();
+            zel_proto::wire::encode_varint(enc.len() as u64, &mut fp);
+            fp.extend_from_slice(&enc);
+        }
+        if let Some(existing) = self.by_fingerprint.get(&fp) {
+            return (existing.clone(), Vec::new());
+        }
+        let id = self.next_id.to_string();
+        self.next_id += 1;
+        let (_, nodes) = BepBuilder::named_sets(&id, files, max_entries);
+        self.by_fingerprint.insert(fp, id.clone());
+        (id, nodes)
+    }
+}
+
 /// Parsed `--build_event_*` / `--bes_*` options.
 #[derive(Debug, Clone, Default)]
 pub struct BepOptions {
@@ -1496,6 +2217,11 @@ pub struct BepOptions {
     pub json_path_conversion: bool,
     pub binary_path_conversion: bool,
     pub text_path_conversion: bool,
+    pub json_upload_mode: BepUploadMode,
+    pub binary_upload_mode: BepUploadMode,
+    pub text_upload_mode: BepUploadMode,
+    pub bes_upload_mode: BepUploadMode,
+    pub output_group_modes: Vec<(String, OutputGroupMode)>,
     pub publish_all_actions: bool,
     /// `--build_event_max_named_set_of_file_entries`; `None` when negative (unlimited).
     pub max_named_set_entries: Option<usize>,
@@ -1507,6 +2233,64 @@ pub struct BepOptions {
     pub bes_keywords: Vec<String>,
     pub bes_lifecycle_events: bool,
     pub project_id: Option<String>,
+    /// Remote ByteStream URI prefix (`<authority>[/<instance>]`) used when
+    /// `--build_event_*_file_path_conversion` is enabled (`ByteStreamBuildEventArtifactUploader`).
+    pub remote_bytestream_uri_prefix: Option<String>,
+}
+
+fn parse_bazel_bool(raw: Option<&str>, default: bool) -> bool {
+    let Some(s) = raw else {
+        return default;
+    };
+    match s.trim().to_ascii_lowercase().as_str() {
+        "0" | "false" | "f" | "no" | "n" => false,
+        "1" | "true" | "t" | "yes" | "y" => true,
+        _ => default,
+    }
+}
+
+fn extract_remote_authority(endpoint: &str) -> Option<&str> {
+    let s = endpoint.trim();
+    if s.is_empty() || s.starts_with("unix:") {
+        return None;
+    }
+    let after_scheme = match s.split_once("://") {
+        Some((_, rest)) => rest,
+        None => s,
+    };
+    let authority = after_scheme.split('/').next().unwrap_or("").trim();
+    (!authority.is_empty()).then_some(authority)
+}
+
+fn compute_remote_bytestream_prefix(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let respect_no_cache = parse_bazel_bool(
+        get("incompatible_remote_build_event_upload_respect_no_cache").as_deref(),
+        false,
+    );
+    let upload_local = parse_bazel_bool(get("remote_upload_local_results").as_deref(), true);
+    if respect_no_cache && !upload_local {
+        return None;
+    }
+    if let Some(explicit) = get("remote_bytestream_uri_prefix")
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(explicit);
+    }
+    let endpoint = get("remote_cache")
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| get("remote_executor").filter(|s| !s.trim().is_empty()))?;
+    let authority = extract_remote_authority(&endpoint)?;
+    let instance = get("remote_instance_name")
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('/')
+        .to_string();
+    if instance.is_empty() {
+        Some(authority.to_string())
+    } else {
+        Some(format!("{authority}/{instance}"))
+    }
 }
 
 impl BepOptions {
@@ -1515,15 +2299,31 @@ impl BepOptions {
         get: &dyn Fn(&str) -> Option<String>,
         get_all: &dyn Fn(&str) -> Vec<String>,
     ) -> Self {
-        let b = |n: &str, d: bool| match get(n).as_deref() {
-            Some("0") | Some("false") | Some("no") => false,
-            Some(_) => true,
-            None => d,
-        };
+        let b = |n: &str, d: bool| parse_bazel_bool(get(n).as_deref(), d);
         let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
         let max = get("build_event_max_named_set_of_file_entries")
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(5000);
+        let mut output_group_modes = vec![("baseline.lcov".to_string(), OutputGroupMode::Both)];
+        for entry in get_all("experimental_build_event_output_group_mode") {
+            if let Some((grp, mode_str)) = entry.split_once('=') {
+                if let Some(mode) = OutputGroupMode::parse(mode_str) {
+                    if let Some(existing) = output_group_modes
+                        .iter_mut()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(grp))
+                    {
+                        existing.1 = mode;
+                    } else {
+                        output_group_modes.push((grp.to_string(), mode));
+                    }
+                }
+            }
+        }
+        let upload_mode = |n: &str| {
+            get(n)
+                .and_then(|s| BepUploadMode::parse(&s))
+                .unwrap_or_default()
+        };
         Self {
             json_file: nonempty(get("build_event_json_file")),
             binary_file: nonempty(get("build_event_binary_file")),
@@ -1531,6 +2331,11 @@ impl BepOptions {
             json_path_conversion: b("build_event_json_file_path_conversion", true),
             binary_path_conversion: b("build_event_binary_file_path_conversion", true),
             text_path_conversion: b("build_event_text_file_path_conversion", true),
+            json_upload_mode: upload_mode("build_event_json_file_upload_mode"),
+            binary_upload_mode: upload_mode("build_event_binary_file_upload_mode"),
+            text_upload_mode: upload_mode("build_event_text_file_upload_mode"),
+            bes_upload_mode: upload_mode("bes_upload_mode"),
+            output_group_modes,
             publish_all_actions: b("build_event_publish_all_actions", false),
             max_named_set_entries: if max < 0 { None } else { Some(max as usize) },
             bes_backend: nonempty(get("bes_backend")),
@@ -1547,7 +2352,16 @@ impl BepOptions {
             bes_keywords: get_all("bes_keywords"),
             bes_lifecycle_events: b("bes_lifecycle_events", true),
             project_id: nonempty(get("project_id")),
+            remote_bytestream_uri_prefix: compute_remote_bytestream_prefix(get),
         }
+    }
+
+    pub fn output_group_mode(&self, group: &str) -> OutputGroupMode {
+        self.output_group_modes
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(group))
+            .map(|(_, m)| *m)
+            .unwrap_or(OutputGroupMode::NamedSetOfFilesOnly)
     }
 
     pub fn any_enabled(&self) -> bool {
@@ -1560,16 +2374,25 @@ impl BepOptions {
     /// Opens the file transports (real filesystem, streaming).
     pub fn open_file_transports(&self) -> Vec<Result<Arc<dyn BuildEventTransport>, String>> {
         let mut v: Vec<Result<Arc<dyn BuildEventTransport>, String>> = Vec::new();
-        for (fmt, path) in [
-            (BepFormat::Json, &self.json_file),
-            (BepFormat::Binary, &self.binary_file),
-            (BepFormat::Text, &self.text_file),
+        for (fmt, path, conv) in [
+            (BepFormat::Json, &self.json_file, self.json_path_conversion),
+            (
+                BepFormat::Binary,
+                &self.binary_file,
+                self.binary_path_conversion,
+            ),
+            (BepFormat::Text, &self.text_file, self.text_path_conversion),
         ] {
             if let Some(p) = path {
                 v.push(
-                    FileTransport::open(fmt, p)
-                        .map(|t| Arc::new(t) as Arc<dyn BuildEventTransport>)
-                        .map_err(|e| format!("Cannot open {p}: {e}")),
+                    FileTransport::open_with_options(
+                        fmt,
+                        p,
+                        conv,
+                        self.remote_bytestream_uri_prefix.clone(),
+                    )
+                    .map(|t| Arc::new(t) as Arc<dyn BuildEventTransport>)
+                    .map_err(|e| format!("Cannot open {p}: {e}")),
                 );
             }
         }
@@ -1750,15 +2573,15 @@ mod tests {
             vec![
                 ids::progress(0),
                 ids::target_completed("//a:t", "c1"),
-                ids::test_result("//a:t", "c1", 1, 1, 1),
+                ids::test_result("//a:t", "c1", 0, 0, 1),
                 ids::build_finished(),
             ],
         ));
         s.post(BepBuilder::test_result(
             "//a:t",
             "c1",
-            1,
-            1,
+            0,
+            0,
             1,
             "PASSED",
             false,
@@ -1803,10 +2626,30 @@ mod tests {
         let files: Vec<Msg> = (0..5)
             .map(|i| BepBuilder::file(&format!("f{i}"), &format!("/o/f {i}"), &[], None, None))
             .collect();
-        let (root, nodes) = BepBuilder::named_sets("g", files, Some(2));
+        let (root, nodes) = BepBuilder::named_sets("g", files.clone(), Some(2));
         assert_eq!(nodes.len(), 4);
+        for n in &nodes {
+            let ns = n.payload.get_msg("named_set_of_files").unwrap();
+            let deg = ns.get_msgs("files").len() + ns.get_msgs("file_sets").len();
+            assert!(deg <= 2, "degree {deg} exceeded limit 2");
+        }
+        // max_entries < 2 does not split
+        let (_, unsplit) = BepBuilder::named_sets("g1", files.clone(), Some(1));
+        assert_eq!(unsplit.len(), 1);
+        // ArtifactGroupNamer deduplicates identical file sets
+        let mut namer = ArtifactGroupNamer::new();
+        let (id1, n1) = namer.maybe_deposit(files.clone(), Some(2));
+        let (id2, n2) = namer.maybe_deposit(files, Some(2));
+        assert_eq!(id1, "0");
+        assert_eq!(id2, "0");
+        assert_eq!(n1.len(), 4);
+        assert!(n2.is_empty());
         assert_eq!(root.get_msg("named_set").unwrap().get_str("id"), "g");
         assert_eq!(file_uri("/a b/c"), "file:///a%20b/c");
+        assert_eq!(
+            file_uri_to_local_path("file:///a%20b/c").as_deref(),
+            Some("/a b/c")
+        );
         assert_eq!(parse_duration_secs("2m"), Some(120));
     }
 
@@ -1835,5 +2678,579 @@ mod tests {
             "{j}"
         );
         assert!(j.contains("\"serverPid\":\"3\""), "{j}");
+    }
+
+    #[test]
+    fn bep_parity_replaceable_null_config_and_output_group_modes() {
+        // 0-indexed test_result -> 1-indexed proto fields
+        let tid = ids::test_result("//p:t", "cfg1", 0, 0, 1);
+        let tr = tid.get_msg("test_result").unwrap();
+        assert_eq!(tr.get_i64("run"), 1);
+        assert_eq!(tr.get_i64("shard"), 1);
+        assert_eq!(tr.get_i64("attempt"), 1);
+
+        // NullConfiguration automatically precedes events referencing "none",
+        // and ReplaceableBuildEvent keeps only the latest version before flush.
+        let (s, mem) = streamer();
+        s.post(BepBuilder::build_started(
+            "id-1",
+            1000,
+            "9.3.2",
+            "",
+            "build",
+            "/w",
+            "/w",
+            1,
+            "h",
+            "u",
+            vec![
+                ids::progress(0),
+                ids::target_configured("//p:a"),
+                ids::build_finished(),
+            ],
+        ));
+        s.post(
+            BepBuilder::configuration(
+                "cfg1",
+                "k8-fastbuild",
+                "k8",
+                "k8",
+                &[("K".into(), "V1".into())],
+                false,
+            )
+            .as_replaceable(),
+        );
+        s.post(
+            BepBuilder::configuration(
+                "cfg1",
+                "k8-fastbuild",
+                "k8",
+                "k8",
+                &[("K".into(), "V2".into())],
+                false,
+            )
+            .as_replaceable(),
+        );
+        s.post(BepBuilder::target_configured(
+            "//p:a",
+            "none",
+            "source file",
+            &[],
+            None,
+            true,
+        ));
+        s.post(BepBuilder::target_completed(
+            "//p:a",
+            "none",
+            true,
+            &[],
+            &[],
+            None,
+        ));
+        s.post(BepBuilder::build_finished_with_children(
+            "SUCCESS",
+            0,
+            2000,
+            None,
+            vec![],
+        ));
+        let evs = mem.events.lock().unwrap();
+        let null_idx = evs
+            .iter()
+            .position(|e| {
+                e.get_msg("id")
+                    .and_then(|i| i.get_msg("configuration"))
+                    .map(|c| c.get_str("id") == "none")
+                    .unwrap_or(false)
+            })
+            .expect("NullConfiguration emitted");
+        let tc_idx = evs
+            .iter()
+            .position(|e| {
+                e.get_msg("id")
+                    .and_then(|i| i.get_msg("target_configured"))
+                    .is_some()
+            })
+            .unwrap();
+        assert!(null_idx < tc_idx);
+        let cfg1_evs: Vec<_> = evs
+            .iter()
+            .filter(|e| {
+                e.get_msg("id")
+                    .and_then(|i| i.get_msg("configuration"))
+                    .map(|c| c.get_str("id") == "cfg1")
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(cfg1_evs.len(), 1);
+        assert!(cfg1_evs[0].to_json().contains("V2"));
+        drop(evs);
+
+        // Output group mode parsing & path conversion toggle
+        let flags: std::collections::HashMap<&str, &str> =
+            [("build_event_json_file_path_conversion", "false")]
+                .into_iter()
+                .collect();
+        let opts = BepOptions::from_flags(&|k| flags.get(k).map(|v| v.to_string()), &|k| {
+            if k == "experimental_build_event_output_group_mode" {
+                vec!["default=inline_only".into(), "default=both".into()]
+            } else {
+                vec![]
+            }
+        });
+        assert!(!opts.json_path_conversion);
+        assert_eq!(opts.output_group_mode("default"), OutputGroupMode::Both);
+        assert_eq!(
+            opts.output_group_mode("baseline.lcov"),
+            OutputGroupMode::Both
+        );
+        assert_eq!(
+            opts.output_group_mode("other"),
+            OutputGroupMode::NamedSetOfFilesOnly
+        );
+        let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+        ns.set_msg(
+            "files",
+            BepBuilder::file("a.txt", "/tmp/a b.txt", &[], None, None),
+        );
+        let f_node = BuildEventNode::new(ids::progress(9), vec![], "named_set_of_files", ns);
+        let raw_proto = f_node.to_proto(false);
+        let with_conv = String::from_utf8(serialize_event_with_conversion(
+            BepFormat::Json,
+            &raw_proto,
+            true,
+        ))
+        .unwrap();
+        let no_conv = String::from_utf8(serialize_event_with_conversion(
+            BepFormat::Json,
+            &raw_proto,
+            false,
+        ))
+        .unwrap();
+        assert!(with_conv.contains("file:///tmp/a%20b.txt"));
+        // `--nobuild_event_*_file_path_conversion` selects `LocalFilesArtifactUploader`, which
+        // always uses the `file://` URI scheme rather than remote `bytestream://` URIs.
+        assert!(no_conv.contains("file:///tmp/a%20b.txt"));
+    }
+
+    #[test]
+    fn bep_file_path_conversion_across_all_file_bearing_events() {
+        let remote_flags: std::collections::HashMap<&str, &str> = [
+            ("remote_cache", "grpc://cas.example.com:9092"),
+            ("remote_instance_name", "main"),
+        ]
+        .into_iter()
+        .collect();
+        let opts =
+            BepOptions::from_flags(&|k| remote_flags.get(k).map(|v| v.to_string()), &|_| vec![]);
+        assert_eq!(
+            opts.remote_bytestream_uri_prefix.as_deref(),
+            Some("cas.example.com:9092/main")
+        );
+        let prefix = opts.remote_bytestream_uri_prefix.as_deref();
+
+        // 1. ActionExecuted: singular stdout, stderr, primary_output (plus inline contents without uri)
+        let mut ae = Msg::new("build_event_stream.ActionExecuted");
+        ae.set_bool("success", true);
+        ae.set_str("type", "Genrule");
+        ae.set_msg(
+            "stdout",
+            BepBuilder::file("stdout", "/tmp/act out.log", &[], Some(11), Some("aaa111")),
+        );
+        let mut inline_stderr = Msg::new("build_event_stream.File");
+        inline_stderr.set_str("name", "stderr");
+        inline_stderr.set_bytes("contents", b"warn".to_vec());
+        ae.set_msg("stderr", inline_stderr);
+        ae.set_msg(
+            "primary_output",
+            BepBuilder::file(
+                "out.bin",
+                "/tmp/out bin",
+                &["bazel-out".into()],
+                Some(42),
+                Some("bbb222"),
+            ),
+        );
+        let ae_proto = BuildEventNode::new(
+            ids::action_completed("bazel-out/out.bin", "//pkg:t", "cfg"),
+            vec![],
+            "action",
+            ae,
+        )
+        .to_proto(false);
+
+        let ae_remote = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ae_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            ae_remote.contains("bytestream://cas.example.com:9092/main/blobs/aaa111/11"),
+            "{ae_remote}"
+        );
+        assert!(
+            ae_remote.contains("bytestream://cas.example.com:9092/main/blobs/bbb222/42"),
+            "{ae_remote}"
+        );
+
+        let ae_local = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ae_proto,
+            false,
+            prefix,
+        ))
+        .unwrap();
+        assert!(ae_local.contains("file:///tmp/act%20out.log"), "{ae_local}");
+        assert!(ae_local.contains("file:///tmp/out%20bin"), "{ae_local}");
+        assert!(!ae_local.contains("bytestream://"), "{ae_local}");
+
+        // 2. TargetComplete: inline_files, important_output, and directory_output (which must never carry uri)
+        let inline_file = BepBuilder::file("f.txt", "/tmp/f.txt", &[], Some(5), Some("ccc333"));
+        let mut dir_with_accidental_uri =
+            BepBuilder::file_without_uri("tree_dir", &["bazel-out".into()]);
+        dir_with_accidental_uri.set_str("uri", "file:///tmp/tree_dir");
+        let mut tc_node = BepBuilder::target_completed_with_groups(
+            "//pkg:t",
+            "cfg",
+            None,
+            true,
+            &[BepOutputGroup {
+                name: "default".into(),
+                file_sets: vec![],
+                inline_files: vec![inline_file.clone()],
+                incomplete: false,
+            }],
+            &[dir_with_accidental_uri],
+            &[],
+            None,
+        );
+        if let Some(mut tc_body) = tc_node.payload.get_msg("completed").cloned() {
+            tc_body.set_msg("important_output", inline_file);
+            tc_node.payload.clear("completed");
+            tc_node.payload.set_msg("completed", tc_body);
+        }
+        let tc_proto = tc_node.to_proto(false);
+
+        let tc_remote = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &tc_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            tc_remote.contains("bytestream://cas.example.com:9092/main/blobs/ccc333/5"),
+            "{tc_remote}"
+        );
+        assert!(!tc_remote.contains("tree_dir\",\"uri\""), "{tc_remote}");
+        assert!(!tc_remote.contains("file:///tmp/tree_dir"), "{tc_remote}");
+
+        let tc_local = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &tc_proto,
+            false,
+            prefix,
+        ))
+        .unwrap();
+        assert!(tc_local.contains("file:///tmp/f.txt"), "{tc_local}");
+        assert!(!tc_local.contains("bytestream://"), "{tc_local}");
+        assert!(!tc_local.contains("file:///tmp/tree_dir"), "{tc_local}");
+
+        // 3. NamedSetOfFiles, BuildToolLogs, TestResult, and TestSummary
+        let log_file = BepBuilder::file("test.log", "/tmp/test.log", &[], Some(9), Some("ddd444"));
+        let mut tr = Msg::new("build_event_stream.TestResult");
+        tr.set_enum("status", "PASSED");
+        tr.set_msg("test_action_output", log_file.clone());
+        let tr_proto = BuildEventNode::new(
+            ids::test_result("//pkg:test", "cfg", 0, 0, 1),
+            vec![],
+            "test_result",
+            tr,
+        )
+        .to_proto(false);
+        let mut ts = Msg::new("build_event_stream.TestSummary");
+        ts.set_enum("overall_status", "PASSED");
+        ts.set_msg("passed", log_file.clone());
+        let ts_proto = BuildEventNode::new(
+            ids::test_summary("//pkg:test", "cfg"),
+            vec![],
+            "test_summary",
+            ts,
+        )
+        .to_proto(false);
+        let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+        ns.set_msg("files", log_file.clone());
+        let ns_proto = BuildEventNode::new(ids::named_set("0"), vec![], "named_set_of_files", ns)
+            .to_proto(false);
+        let mut btl = Msg::new("build_event_stream.BuildToolLogs");
+        btl.set_msg("log", log_file);
+        let btl_proto = BuildEventNode::new(ids::build_tool_logs(), vec![], "build_tool_logs", btl)
+            .to_proto(true);
+
+        for proto in [&ns_proto, &tr_proto, &ts_proto, &btl_proto] {
+            let as_remote = String::from_utf8(serialize_event_with_options(
+                BepFormat::Json,
+                proto,
+                true,
+                prefix,
+            ))
+            .unwrap();
+            assert!(
+                as_remote.contains("bytestream://cas.example.com:9092/main/blobs/ddd444/9"),
+                "{as_remote}"
+            );
+            let as_local = String::from_utf8(serialize_event_with_options(
+                BepFormat::Json,
+                proto,
+                false,
+                prefix,
+            ))
+            .unwrap();
+            assert!(as_local.contains("file:///tmp/test.log"), "{as_local}");
+            assert!(!as_local.contains("bytestream://"), "{as_local}");
+        }
+    }
+
+    #[test]
+    fn bep_bytestream_hashes_local_files_and_omits_uri_without_digest() {
+        let dir = std::env::temp_dir().join(format!("zel-bep-bs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let primary_path = dir.join("out bin.txt");
+        let test_log_path = dir.join("test.log");
+        let fail_log_path = dir.join("fail.log");
+        let tool_log_path = dir.join("command.profile.gz");
+        std::fs::write(&primary_path, b"primary-bytes").unwrap();
+        std::fs::write(&test_log_path, b"passed-log").unwrap();
+        std::fs::write(&fail_log_path, b"failed-log").unwrap();
+        std::fs::write(&tool_log_path, b"profile-bytes").unwrap();
+
+        let expected_uri = |content: &[u8]| -> String {
+            format!(
+                "bytestream://cas.example.com:9092/inst/blobs/{}/{}",
+                zel_util::sha256::hex_digest(content),
+                content.len()
+            )
+        };
+        let prefix = Some("cas.example.com:9092/inst");
+
+        // 1. ActionExecuted built via `action_executed_with_primary_output_path` (no pre-set digest)
+        let ae_proto = BepBuilder::action_executed_with_primary_output_path(
+            "bazel-out/out bin.txt",
+            Some(primary_path.to_str().unwrap()),
+            "//pkg:gen",
+            "cfg",
+            "Genrule",
+            true,
+            0,
+            Some(b"inline-stdout"),
+            None,
+            &["/bin/sh".into()],
+            1000,
+            1010,
+            None,
+        )
+        .to_proto(false);
+        let ae_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ae_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            ae_json.contains(&expected_uri(b"primary-bytes")),
+            "{ae_json}"
+        );
+        assert!(!ae_json.contains("file://"), "{ae_json}");
+
+        // 2. TestResult built via `BepBuilder::test_result` (calls `BepBuilder::file` with None digest)
+        let tr_proto = BepBuilder::test_result(
+            "//pkg:t",
+            "cfg",
+            0,
+            0,
+            1,
+            "PASSED",
+            false,
+            1000,
+            25,
+            &[(
+                "test.log".to_string(),
+                file_uri(test_log_path.to_str().unwrap()),
+            )],
+            "local",
+            0,
+        )
+        .to_proto(false);
+        let tr_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &tr_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(tr_json.contains(&expected_uri(b"passed-log")), "{tr_json}");
+        assert!(!tr_json.contains("file://"), "{tr_json}");
+
+        // 3. TestSummary built via `BepBuilder::test_summary` (`passed` and `failed` logs)
+        let ts_proto = BepBuilder::test_summary(
+            "//pkg:t",
+            "cfg",
+            "FLAKY",
+            1,
+            0,
+            2,
+            &[(
+                "test.log".to_string(),
+                test_log_path.to_string_lossy().into_owned(),
+            )],
+            &[(
+                "fail.log".to_string(),
+                fail_log_path.to_string_lossy().into_owned(),
+            )],
+            0,
+            1000,
+            1050,
+            50,
+            vec![],
+        )
+        .to_proto(false);
+        let ts_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ts_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(ts_json.contains(&expected_uri(b"passed-log")), "{ts_json}");
+        assert!(ts_json.contains(&expected_uri(b"failed-log")), "{ts_json}");
+        assert!(!ts_json.contains("file://"), "{ts_json}");
+
+        // 4. BuildToolLogs built via `BepBuilder::build_tool_logs` and `build_tool_logs_entries`
+        let btl_proto = BepBuilder::build_tool_logs(&[(
+            "command.profile.gz".to_string(),
+            tool_log_path.to_string_lossy().into_owned(),
+        )])
+        .to_proto(true);
+        let btl_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &btl_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            btl_json.contains(&expected_uri(b"profile-bytes")),
+            "{btl_json}"
+        );
+        assert!(!btl_json.contains("file://"), "{btl_json}");
+
+        let btl_entries_proto = BepBuilder::build_tool_logs_entries(&[
+            BepLogFile::LocalPath {
+                name: "command.profile.gz".to_string(),
+                path: tool_log_path.to_string_lossy().into_owned(),
+            },
+            BepLogFile::Contents {
+                name: "inline.txt".to_string(),
+                contents: b"abc".to_vec(),
+            },
+        ])
+        .to_proto(true);
+        let btl_entries_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &btl_entries_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            btl_entries_json.contains(&expected_uri(b"profile-bytes")),
+            "{btl_entries_json}"
+        );
+        assert!(!btl_entries_json.contains("file://"), "{btl_entries_json}");
+
+        // 5. Missing / unhashed local file with no digest: `ByteStreamBuildEventArtifactUploader`
+        //    `PathConverter.apply` returns `null`, so `uri` is omitted instead of keeping `file://`.
+        let missing_path = dir.join("does_not_exist.txt");
+        let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+        ns.set_msg(
+            "files",
+            BepBuilder::file(
+                "does_not_exist.txt",
+                missing_path.to_str().unwrap(),
+                &[],
+                None,
+                None,
+            ),
+        );
+        let missing_proto =
+            BuildEventNode::new(ids::named_set("m"), vec![], "named_set_of_files", ns)
+                .to_proto(false);
+        let missing_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &missing_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            missing_json.contains("\"name\":\"does_not_exist.txt\""),
+            "{missing_json}"
+        );
+        assert!(!missing_json.contains("file://"), "{missing_json}");
+        assert!(!missing_json.contains("bytestream://"), "{missing_json}");
+        assert!(!missing_json.contains("\"uri\""), "{missing_json}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_uri_windows_and_unix_roundtrip() {
+        // `PathConverter.FileUriPathConverter`: Windows drive paths use `/` separators in `file:///C:/...`.
+        assert_eq!(
+            file_uri(r"C:\Users\runner\out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+        assert_eq!(
+            file_uri("C:/Users/runner/out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+        assert_eq!(
+            file_uri(r"\\?\C:\Users\runner\out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+
+        // `file_uri_to_local_path` strips the leading `/` before a Windows drive prefix for both
+        // forward-slash and `%5C`-encoded URIs, as well as `file://localhost/...` authority URIs.
+        assert_eq!(
+            file_uri_to_local_path("file:///C:/Users/runner/out%20bin.txt").as_deref(),
+            Some("C:/Users/runner/out bin.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file:///C:%5CUsers%5Crunner%5Cout%20bin.txt").as_deref(),
+            Some(r"C:\Users\runner\out bin.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file://localhost/C:/Users/runner/out%20bin.txt").as_deref(),
+            Some("C:/Users/runner/out bin.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file://localhost/a%20b/c").as_deref(),
+            Some("/a b/c")
+        );
+
+        // On Unix, a backslash inside a `/...` path is a literal filename character (`%5C`).
+        #[cfg(not(windows))]
+        {
+            assert_eq!(file_uri(r"/tmp/a\b"), "file:///tmp/a%5Cb");
+            assert_eq!(
+                file_uri_to_local_path("file:///tmp/a%5Cb").as_deref(),
+                Some(r"/tmp/a\b")
+            );
+        }
     }
 }

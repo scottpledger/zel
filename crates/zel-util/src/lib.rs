@@ -452,84 +452,173 @@ pub mod sha256 {
         0xc67178f2,
     ];
 
+    const INIT: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    fn compress_block(h: &mut [u32; 8], chunk: &[u8; 64]) {
+        let mut w = [0u32; 64];
+        for (i, word) in chunk.chunks_exact(4).enumerate() {
+            w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+
+    /// Streaming SHA-256 hasher for large artifacts and logs without buffering whole files.
+    #[derive(Clone)]
+    pub struct Hasher {
+        state: [u32; 8],
+        buf: [u8; 64],
+        buf_len: usize,
+        total_len: u64,
+    }
+
+    impl Default for Hasher {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Hasher {
+        pub fn new() -> Self {
+            Self {
+                state: INIT,
+                buf: [0u8; 64],
+                buf_len: 0,
+                total_len: 0,
+            }
+        }
+
+        pub fn update(&mut self, mut data: &[u8]) {
+            self.total_len = self.total_len.wrapping_add(data.len() as u64);
+            if self.buf_len > 0 {
+                let take = (64 - self.buf_len).min(data.len());
+                self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+                self.buf_len += take;
+                data = &data[take..];
+                if self.buf_len == 64 {
+                    compress_block(&mut self.state, &self.buf);
+                    self.buf_len = 0;
+                }
+            }
+            while data.len() >= 64 {
+                let block: &[u8; 64] = data[..64].try_into().unwrap();
+                compress_block(&mut self.state, block);
+                data = &data[64..];
+            }
+            if !data.is_empty() {
+                self.buf[..data.len()].copy_from_slice(data);
+                self.buf_len = data.len();
+            }
+        }
+
+        pub fn finish(mut self) -> [u8; 32] {
+            let bit_len = self.total_len.wrapping_mul(8);
+            self.buf[self.buf_len] = 0x80;
+            self.buf_len += 1;
+            if self.buf_len > 56 {
+                self.buf[self.buf_len..64].fill(0);
+                compress_block(&mut self.state, &self.buf);
+                self.buf_len = 0;
+            }
+            self.buf[self.buf_len..56].fill(0);
+            self.buf[56..64].copy_from_slice(&bit_len.to_be_bytes());
+            compress_block(&mut self.state, &self.buf);
+
+            let mut out = [0u8; 32];
+            for (i, word) in self.state.iter().enumerate() {
+                out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
+            }
+            out
+        }
+
+        pub fn finish_hex(self) -> String {
+            super::to_hex(&self.finish())
+        }
+    }
+
     pub fn digest(data: &[u8]) -> [u8; 32] {
-        let mut h: [u32; 8] = [
-            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-            0x5be0cd19,
-        ];
-
-        let bit_len = (data.len() as u64).wrapping_mul(8);
-        let mut msg = data.to_vec();
-        msg.push(0x80);
-        while (msg.len() % 64) != 56 {
-            msg.push(0);
-        }
-        msg.extend_from_slice(&bit_len.to_be_bytes());
-
-        for chunk in msg.chunks_exact(64) {
-            let mut w = [0u32; 64];
-            for (i, word) in chunk.chunks_exact(4).enumerate() {
-                w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
-            }
-            for i in 16..64 {
-                let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-                let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-                w[i] = w[i - 16]
-                    .wrapping_add(s0)
-                    .wrapping_add(w[i - 7])
-                    .wrapping_add(s1);
-            }
-
-            let mut a = h[0];
-            let mut b = h[1];
-            let mut c = h[2];
-            let mut d = h[3];
-            let mut e = h[4];
-            let mut f = h[5];
-            let mut g = h[6];
-            let mut hh = h[7];
-
-            for i in 0..64 {
-                let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-                let ch = (e & f) ^ ((!e) & g);
-                let temp1 = hh
-                    .wrapping_add(s1)
-                    .wrapping_add(ch)
-                    .wrapping_add(K[i])
-                    .wrapping_add(w[i]);
-                let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-                let maj = (a & b) ^ (a & c) ^ (b & c);
-                let temp2 = s0.wrapping_add(maj);
-
-                hh = g;
-                g = f;
-                f = e;
-                e = d.wrapping_add(temp1);
-                d = c;
-                c = b;
-                b = a;
-                a = temp1.wrapping_add(temp2);
-            }
-
-            h[0] = h[0].wrapping_add(a);
-            h[1] = h[1].wrapping_add(b);
-            h[2] = h[2].wrapping_add(c);
-            h[3] = h[3].wrapping_add(d);
-            h[4] = h[4].wrapping_add(e);
-            h[5] = h[5].wrapping_add(f);
-            h[6] = h[6].wrapping_add(g);
-            h[7] = h[7].wrapping_add(hh);
-        }
-
-        let mut out = [0u8; 32];
-        for (i, word) in h.iter().enumerate() {
-            out[i * 4..(i + 1) * 4].copy_from_slice(&word.to_be_bytes());
-        }
-        out
+        let mut hasher = Hasher::new();
+        hasher.update(data);
+        hasher.finish()
     }
 
     pub fn hex_digest(data: &[u8]) -> String {
         super::to_hex(&digest(data))
+    }
+
+    /// Streams a regular file on disk in 64 KiB chunks, returning `(byte_length, sha256_hex)`.
+    /// Rejects directories and non-regular files.
+    pub fn hash_file(path: &std::path::Path) -> std::io::Result<(u64, String)> {
+        use std::io::Read;
+        let meta = std::fs::metadata(path)?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        let mut f = std::fs::File::open(path)?;
+        let mut hasher = Hasher::new();
+        let mut buf = [0u8; 65536];
+        let mut total = 0u64;
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            total += n as u64;
+        }
+        Ok((total, hasher.finish_hex()))
     }
 }
 
@@ -644,6 +733,32 @@ mod tests {
             sha1::hex_digest(b"The quick brown fox jumps over the lazy dog"),
             "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
         );
+    }
+
+    #[test]
+    fn test_sha256_streaming_and_hash_file() {
+        for len in [0usize, 1, 55, 56, 57, 63, 64, 65, 130_000] {
+            let data: Vec<u8> = (0..len)
+                .map(|i| (i.wrapping_mul(31) & 0xff) as u8)
+                .collect();
+            let mut h = sha256::Hasher::new();
+            for chunk in data.chunks(17) {
+                h.update(chunk);
+            }
+            assert_eq!(h.finish_hex(), sha256::hex_digest(&data), "len={len}");
+        }
+        let dir = std::env::temp_dir().join(format!("zel-sha256-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("payload.bin");
+        let payload = b"streaming sha256 verification payload";
+        std::fs::write(&file, payload).unwrap();
+        let (sz, hex) = sha256::hash_file(&file).unwrap();
+        assert_eq!(sz, payload.len() as u64);
+        assert_eq!(hex, sha256::hex_digest(payload));
+        assert!(sha256::hash_file(&dir).is_err());
+        assert!(sha256::hash_file(&dir.join("missing.bin")).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

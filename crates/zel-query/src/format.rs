@@ -48,16 +48,30 @@ impl OrderOutput {
 }
 
 /// `LabelPrinter.displayForm(mainRepoMapping)` (or canonical form with `--consistent_labels`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct LabelPrinter {
     /// Canonical repository name → apparent name visible from the main repository.
     pub apparent: std::collections::HashMap<String, String>,
     pub consistent: bool,
+    pub unambiguous: bool,
+}
+
+impl Default for LabelPrinter {
+    fn default() -> Self {
+        Self {
+            apparent: std::collections::HashMap::new(),
+            consistent: false,
+            unambiguous: true,
+        }
+    }
 }
 
 impl LabelPrinter {
     pub fn repo(&self, name: &str) -> String {
         if self.consistent {
+            if name.is_empty() && !self.unambiguous {
+                return String::new();
+            }
             return format!("@@{name}");
         }
         if name.is_empty() {
@@ -73,7 +87,7 @@ impl LabelPrinter {
     pub fn label(&self, l: &Label) -> String {
         if l.package_name() == "visibility" && (l.name() == "public" || l.name() == "private") {
             // The built-in visibility labels always belong to the main repository.
-            return if self.consistent {
+            return if self.consistent && self.unambiguous {
                 format!("@@//visibility:{}", l.name())
             } else {
                 format!("//visibility:{}", l.name())
@@ -167,7 +181,7 @@ impl Default for FormatOpts {
             proto_include_attribute_source_aspects: false,
             proto_rule_classes: false,
             proto_include_synthetic_attribute_hash: false,
-            proto_include_starlark_rule_env: false,
+            proto_include_starlark_rule_env: true,
             nodep_deps: true,
             include_aspects: true,
             xml_line_numbers: true,
@@ -233,40 +247,78 @@ pub fn order_nodes(
     }
 }
 
-/// Builds the result subgraph (edges among result nodes, honouring the dependency filter).
+/// Builds the result subgraph (`Digraph.extractSubgraph`: direct edges among result nodes plus
+/// transitive shortcut edges across evaluated intermediate nodes outside the result set).
 pub fn build_graph(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts) -> Digraph {
     let fake_loads = env.fake_load_targets.borrow();
     let no_edges = *env.digraph_no_edges.borrow();
     let pat_nodes = env.pattern_nodes.borrow();
-    let mut deps = |n: &Node| -> Vec<Node> {
-        if fake_loads.contains_key(&n.label)
-            || n.label.name() == "BUILD"
-            || n.label.name() == "BUILD.bazel"
-            || n.label.name().ends_with(".bzl")
+    let kept_set: BTreeSet<Label> = nodes.iter().map(|n| n.label.clone()).collect();
+
+    let raw_deps_of = |label: &Label| -> Vec<Label> {
+        if fake_loads.contains_key(label)
+            || label.name() == "BUILD"
+            || label.name() == "BUILD.bazel"
+            || label.name().ends_with(".bzl")
         {
             return Vec::new();
         }
-        if no_edges && !pat_nodes.contains(n) {
+        let n = Node::new(label.clone());
+        if no_edges && !pat_nodes.contains(&n) {
             return Vec::new();
         }
-        match env.info(&n.label) {
+        match env.info(label) {
             Ok(info) => direct_dep_labels(env, &info, opts)
                 .into_iter()
-                .map(Node::new)
-                .filter(|d| !no_edges || pat_nodes.contains(d))
+                .filter(|d| !no_edges || pat_nodes.contains(&Node::new(d.clone())))
                 .collect(),
             Err(_) => Vec::new(),
         }
+    };
+
+    let mut deps = |n: &Node| -> Vec<Node> {
+        let mut out: Vec<Node> = Vec::new();
+        let mut out_seen: BTreeSet<Label> = BTreeSet::new();
+        let mut visited_non_kept: BTreeSet<Label> = BTreeSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        for d in raw_deps_of(&n.label) {
+            if kept_set.contains(&d) {
+                if out_seen.insert(d.clone()) {
+                    out.push(Node::new(d));
+                }
+            } else if env.is_cached(&d) && visited_non_kept.insert(d.clone()) {
+                queue.push_back(d);
+            }
+        }
+        while let Some(mid) = queue.pop_front() {
+            for d in raw_deps_of(&mid) {
+                if kept_set.contains(&d) {
+                    if out_seen.insert(d.clone()) {
+                        out.push(Node::new(d));
+                    }
+                } else if env.is_cached(&d) && visited_non_kept.insert(d.clone()) {
+                    queue.push_back(d);
+                }
+            }
+        }
+        out
     };
     Digraph::build(nodes, &mut deps)
 }
 
 fn direct_dep_labels(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts) -> Vec<Label> {
     match &info.target {
-        Target::Rule(r) => rule_deps_ext(r, opts.implicit_deps, opts.tool_deps, opts.nodep_deps)
-            .into_iter()
-            .map(|(l, _)| l)
-            .collect(),
+        Target::Rule(r) => crate::target_env::rule_deps_with_aspect_env(
+            Some(env),
+            r,
+            opts.implicit_deps,
+            opts.tool_deps,
+            opts.nodep_deps,
+            &opts.aspect_deps,
+        )
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect(),
         Target::OutputFile {
             generating_rule, ..
         } => vec![generating_rule.clone()],
@@ -343,7 +395,7 @@ pub fn format_targets(
                 out.push_str(&format!(
                     "{}: {} {}{}",
                     loc,
-                    kind_of(&info, opts),
+                    info.target.target_kind(),
                     lp(&n.label),
                     lt
                 ));
@@ -371,40 +423,63 @@ pub fn format_targets(
             for n in order_nodes(env, nodes, opts, top_somepath) {
                 let info = env.info(&n.label).map_err(|e| e.to_string())?;
                 if let Target::PackageGroup { label, packages } = &info.target {
-                    if opts.package_group_build_output {
-                        out.push_str(&format!("# {}{lt}", target_location(&info, false)));
-                        out.push_str(&format!(
-                            "package_group({lt}  name = \"{}\",{lt}",
-                            label.name()
-                        ));
-                        let pk = contained_packages(
+                    if !printed.insert(label.clone()) {
+                        continue;
+                    }
+                    out.push_str(&format!("# {}{lt}", target_location(&info, false)));
+                    out.push_str(&format!(
+                        "package_group({lt}  name = {},{lt}",
+                        starlark_quote(label.name())
+                    ));
+                    let pk: Vec<String> = if opts.package_group_build_output {
+                        contained_packages(
                             &info,
                             packages,
                             opts.package_group_includes_double_slash,
-                        );
-                        if !pk.is_empty() {
+                        )
+                    } else {
+                        packages.clone()
+                    };
+                    if !pk.is_empty() {
+                        if opts.package_group_build_output {
                             out.push_str(&format!("  packages = [{lt}"));
                             for p in pk {
-                                out.push_str(&format!("    \"{p}\",{lt}"));
+                                out.push_str(&format!("    {},{lt}", starlark_quote(&p)));
                             }
                             out.push_str(&format!("  ],{lt}"));
+                        } else {
+                            out.push_str(&format!(
+                                "  packages = {},{lt}",
+                                repr_list(&pk, |p| starlark_quote(p))
+                            ));
                         }
-                        let inc = info
-                            .pkg
-                            .group_includes
-                            .get(label.name())
-                            .cloned()
-                            .unwrap_or_default();
-                        if !inc.is_empty() {
+                    }
+                    let inc = info
+                        .pkg
+                        .group_includes
+                        .get(label.name())
+                        .cloned()
+                        .unwrap_or_default();
+                    if !inc.is_empty() {
+                        if opts.package_group_build_output {
                             out.push_str(&format!("  includes = [{lt}"));
                             for i in inc {
-                                out.push_str(&format!("    \"{}\",{lt}", lp(&i)));
+                                out.push_str(&format!("    {},{lt}", starlark_quote(&lp(&i))));
                             }
                             out.push_str(&format!("  ],{lt}"));
+                        } else {
+                            out.push_str(&format!(
+                                "  includes = {},{lt}",
+                                repr_list(&inc, |i| starlark_quote(&lp(i)))
+                            ));
                         }
-                        out.push_str(&format!("){lt}{lt}"));
-                        continue;
                     }
+                    if opts.package_group_build_output {
+                        out.push_str(&format!("){lt}{lt}"));
+                    } else {
+                        out.push_str(&format!("){lt}"));
+                    }
+                    continue;
                 }
                 // `getAssociatedRule`.
                 let rule_info = match &info.target {
@@ -432,25 +507,31 @@ pub fn format_targets(
         "xml" => Ok(xml_output(env, nodes, opts, top_somepath)?.into_bytes()),
         "proto" => {
             let mut qr = Msg::new();
+            let mut seen_rule_classes = std::collections::HashSet::new();
             for n in order_nodes(env, nodes, opts, top_somepath) {
                 let info = env.info(&n.label).map_err(|e| e.to_string())?;
-                qr.rmsg(1, "target", target_proto(env, &info, opts));
+                let tp = try_target_proto_ex(env, &info, opts, false, &mut seen_rule_classes)?;
+                qr.rmsg(1, "target", tp);
             }
             Ok(qr.encode())
         }
         "streamed_proto" => {
             let mut out = Vec::new();
+            let mut seen_rule_classes = std::collections::HashSet::new();
             for n in order_nodes(env, nodes, opts, top_somepath) {
                 let info = env.info(&n.label).map_err(|e| e.to_string())?;
-                out.extend(target_proto(env, &info, opts).encode_delimited());
+                let tp = try_target_proto_ex(env, &info, opts, false, &mut seen_rule_classes)?;
+                out.extend(tp.encode_delimited());
             }
             Ok(out)
         }
         "streamed_jsonproto" => {
             let mut out = String::new();
+            let mut seen_rule_classes = std::collections::HashSet::new();
             for n in order_nodes(env, nodes, opts, top_somepath) {
                 let info = env.info(&n.label).map_err(|e| e.to_string())?;
-                out.push_str(&target_proto(env, &info, opts).to_json_compact());
+                let tp = try_target_proto_ex(env, &info, opts, false, &mut seen_rule_classes)?;
+                out.push_str(&tp.to_json_compact());
                 out.push('\n');
             }
             Ok(out.into_bytes())
@@ -548,7 +629,22 @@ pub fn repr_value(v: &AttrValue) -> String {
     }
 }
 
+fn public_attr_name(name: &str) -> String {
+    if let Some(rest) = name.strip_prefix('$').or_else(|| name.strip_prefix(':')) {
+        format!("_{rest}")
+    } else {
+        name.to_string()
+    }
+}
+
 fn reconstruct_select(parts: &[SelectPart]) -> String {
+    if parts.len() == 1 {
+        if let SelectPart::Select { entries, .. } = &parts[0] {
+            if entries.len() == 1 && entries[0].0.to_string() == "//conditions:default" {
+                return repr_value(&entries[0].1);
+            }
+        }
+    }
     parts
         .iter()
         .map(|p| match p {
@@ -585,10 +681,11 @@ fn build_rule(info: &TInfo, rule: &zel_packages::RuleInstance, lt: &str) -> Stri
         if a.name == "name" {
             continue;
         }
+        let shown = public_attr_name(&a.name);
         if a.value.is_select() {
             out.push_str(&format!(
                 "  {} = {},{lt}",
-                a.name,
+                shown,
                 reconstruct_select(select_parts(&a.value))
             ));
             continue;
@@ -600,11 +697,6 @@ fn build_rule(info: &TInfo, rule: &zel_packages::RuleInstance, lt: &str) -> Stri
         if vals.len() != 1 {
             continue;
         }
-        // `BuildOutputFormatter`: hidden `$` attributes are printed with a `_` prefix.
-        let shown = match a.name.strip_prefix('$') {
-            Some(rest) => format!("_{rest}"),
-            None => a.name.clone(),
-        };
         out.push_str(&format!("  {} = {},{lt}", shown, repr_value(&vals[0])));
     }
     out.push_str(&format!("){lt}"));
@@ -1153,6 +1245,9 @@ impl XmlEl {
 }
 
 fn xml_escape_attr(s: &str) -> String {
+    if s.contains('\0') {
+        return "[[[ERROR: could not be encoded as XML]]]".to_string();
+    }
     let mut out = String::new();
     for c in s.chars() {
         match c {
@@ -1163,7 +1258,9 @@ fn xml_escape_attr(s: &str) -> String {
             '\n' => out.push_str("&#10;"),
             '\r' => out.push_str("&#13;"),
             '\t' => out.push_str("&#9;"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("&#{};", c as u32)),
+            c if (c as u32) < 0x20 || matches!(c as u32, 0x7f..=0x84 | 0x86..=0x9f) => {
+                out.push_str(&format!("&#{};", c as u32));
+            }
             c => out.push(c),
         }
     }
@@ -1321,18 +1418,14 @@ fn xml_output(
     env: &TargetEnv<'_>,
     nodes: &[Node],
     opts: &FormatOpts,
-    top_somepath: bool,
+    _top_somepath: bool,
 ) -> Result<String, String> {
     let mut root = XmlEl::new("query").attr("version", "2");
-    for n in order_nodes(env, nodes, opts, top_somepath) {
+    for n in order_nodes(env, nodes, opts, false) {
         let info = env.info(&n.label).map_err(|e| e.to_string())?;
         let mut el = match &info.target {
             Target::Rule(r) => {
-                let class = if opts.display_full_kind {
-                    full_rule_class_key(r)
-                } else {
-                    r.rule_class.clone()
-                };
+                let class = r.rule_class.clone();
                 let mut el = XmlEl::new("rule").attr("class", class);
                 for a in rule_attributes(r) {
                     if a.explicit || opts.xml_default_values {
@@ -1361,35 +1454,42 @@ fn xml_output(
                         }
                         let mut ve = xml_value_element(&a, &vals);
                         if a.null_default && ve.name == "string" {
-                            // A null default prints no `value`.
-                            if a.null_default {
-                                ve.attrs.remove("value");
-                            }
+                            ve.attrs.remove("value");
                         }
                         ve.set("name", a.name.clone());
                         el.children.push(ve);
                     }
                 }
-                let mut inputs: Vec<Label> = crate::target_env::rule_deps_with_aspect_opt(
+                let mut inputs: Vec<Label> =
+                    rule_deps_ext(r, opts.implicit_deps, opts.tool_deps, opts.nodep_deps)
+                        .into_iter()
+                        .filter_map(|(l, attr)| {
+                            if attr == "_hidden_toolchain_types" {
+                                None
+                            } else {
+                                Some(l)
+                            }
+                        })
+                        .collect();
+                inputs.sort_by(label_cmp);
+                inputs.dedup();
+                for l in inputs {
+                    el.children
+                        .push(XmlEl::new("rule-input").attr("name", lp(&l)));
+                }
+                let mut aspect_seen: BTreeSet<Label> = BTreeSet::new();
+                for (l, _) in crate::target_env::aspect_deps_with_env(
+                    Some(env),
                     r,
                     opts.implicit_deps,
                     opts.tool_deps,
                     opts.nodep_deps,
                     &opts.aspect_deps,
-                )
-                .into_iter()
-                .filter_map(|(l, attr)| {
-                    if attr == "_hidden_toolchain_types" {
-                        None
-                    } else {
-                        Some(l)
+                ) {
+                    if aspect_seen.insert(l.clone()) {
+                        el.children
+                            .push(XmlEl::new("rule-input").attr("name", lp(&l)));
                     }
-                })
-                .collect();
-                inputs.sort_by(label_cmp);
-                for l in inputs {
-                    el.children
-                        .push(XmlEl::new("rule-input").attr("name", lp(&l)));
                 }
                 for o in rule_outputs(&info.pkg, &r.label) {
                     el.children
@@ -1483,8 +1583,9 @@ fn xml_output(
             target_location(&info, opts.relative_locations)
         };
         if !opts.xml_line_numbers {
-            if let Some(i) = loc.find(':') {
-                loc.truncate(i);
+            let (file, rest) = crate::target_env::split_location_line_col(&loc);
+            if !rest.is_empty() {
+                loc = file.to_string();
             }
         }
         el.set("location", loc);
@@ -1781,18 +1882,176 @@ fn flattened(ty: AttrType, values: Vec<AttrValue>) -> Option<AttrValue> {
     }
 }
 
+fn check_int32_bounds(v: &AttrValue) -> Result<(), String> {
+    match v {
+        AttrValue::Int(i) => {
+            if i32::try_from(*i).is_err() {
+                return Err(format!(
+                    "got {i} for 'int', want value in signed 32-bit range"
+                ));
+            }
+        }
+        AttrValue::IntList(l) => {
+            for i in l {
+                if i32::try_from(*i).is_err() {
+                    return Err(format!(
+                        "got {i} for 'int_list' element, want value in signed 32-bit range"
+                    ));
+                }
+            }
+        }
+        AttrValue::Select(parts) => {
+            for p in parts {
+                match p {
+                    SelectPart::Plain(inner) => check_int32_bounds(inner)?,
+                    SelectPart::Select { entries, .. } => {
+                        for (_, inner) in entries {
+                            check_int32_bounds(inner)?;
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn push_varint_bytes(buf: &mut Vec<u8>, mut n: usize) {
+    loop {
+        let mut b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n != 0 {
+            b |= 0x80;
+        }
+        buf.push(b);
+        if n == 0 {
+            break;
+        }
+    }
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn stardoc_attr_type(name: &str, ty: AttrType) -> (&'static str, i32) {
+    if name == "name" {
+        return ("NAME", 1);
+    }
+    match ty {
+        AttrType::Int => ("INT", 2),
+        AttrType::Label => ("LABEL", 3),
+        AttrType::String | AttrType::Tristate => ("STRING", 4),
+        AttrType::StringList => ("STRING_LIST", 5),
+        AttrType::IntList => ("INT_LIST", 6),
+        AttrType::LabelList => ("LABEL_LIST", 7),
+        AttrType::Bool => ("BOOLEAN", 8),
+        AttrType::LabelKeyedStringDict => ("LABEL_STRING_DICT", 9),
+        AttrType::StringDict => ("STRING_DICT", 10),
+        AttrType::StringListDict => ("STRING_LIST_DICT", 11),
+        AttrType::Output => ("OUTPUT", 12),
+        AttrType::OutputList => ("OUTPUT_LIST", 13),
+        AttrType::StringKeyedLabelDict => ("LABEL_DICT_UNARY", 14),
+        AttrType::LabelListDict => ("LABEL_LIST_DICT", 15),
+    }
+}
+
+fn build_rule_class_info_proto(rule: &zel_packages::RuleInstance) -> Msg {
+    let mut ri = Msg::new();
+    let Some(rc) = &rule.extra.rule_class else {
+        ri.str(1, "rule_name", rule.rule_class.clone());
+        return ri;
+    };
+    ri.str(1, "rule_name", rc.name.clone());
+    let is_native = rc.starlark.is_none();
+    if let Some(spec) = &rc.starlark {
+        if let Some(zel_starlark::Value::String(doc)) = spec.kwargs.get("doc") {
+            if !doc.is_empty() {
+                ri.str(2, "doc_string", doc.clone());
+            }
+        }
+        let mut ok = Msg::new();
+        ok.str(1, "name", rc.name.clone());
+        ok.str(2, "file", spec.defined_in.clone());
+        ri.msg(4, "origin_key", ok);
+    }
+    for (aname, attr) in &rc.attrs {
+        if aname.starts_with('_') || aname.starts_with('$') || aname.starts_with(':') {
+            continue;
+        }
+        let mut ai = Msg::new();
+        ai.str(1, "name", aname.clone());
+        let (tname, tnum) = stardoc_attr_type(aname, attr.ty);
+        ai.en(3, "type", tname, tnum);
+        if attr.mandatory {
+            ai.bool(4, "mandatory", true);
+        }
+        if aname != "name" {
+            if let Some(def) = &attr.default {
+                ai.str(6, "default_value", repr_value(def));
+            }
+        }
+        if !attr.configurable || aname == "name" {
+            ai.bool(7, "nonconfigurable", true);
+        }
+        if is_native {
+            ai.bool(8, "natively_defined", true);
+        }
+        ri.rmsg(3, "attribute", ai);
+    }
+    if rc.is_test {
+        ri.bool(6, "test", true);
+    }
+    if rc.is_executable || rc.is_test {
+        ri.bool(7, "executable", true);
+    }
+    ri
+}
+
 /// `AttributeFormatter.getAttributeProto`.
 pub fn attribute_proto(
     e: &AttrEntry,
     value: Option<&AttrValue>,
     selector_list: Option<&[SelectPart]>,
 ) -> Msg {
+    attribute_proto_with_aspect(e, value, selector_list, None)
+}
+
+pub fn attribute_proto_with_aspect(
+    e: &AttrEntry,
+    value: Option<&AttrValue>,
+    selector_list: Option<&[SelectPart]>,
+    source_aspect_name: Option<&str>,
+) -> Msg {
     let mut m = Msg::new();
     m.str(1, "name", e.name.clone());
     m.bool(13, "explicitly_specified", e.explicit);
-    // nodep
     if e.nodep_set {
         m.bool(20, "nodep", e.nodep);
+    }
+    if let Some(src) = source_aspect_name {
+        m.str(23, "source_aspect_name", src.to_string());
     }
     if let Some(parts) = selector_list {
         m.en(
@@ -1807,10 +2066,13 @@ pub fn attribute_proto(
             let mut sel = Msg::new();
             match p {
                 SelectPart::Plain(v) => {
+                    let is_unset = matches!(v, AttrValue::Label(None) | AttrValue::Output(None));
                     let mut entry = Msg::new();
                     entry.str(1, "label", "//conditions:default");
-                    entry.bool(16, "is_default_value", true);
-                    write_value(&mut entry, &ENTRY_NUMS, v);
+                    entry.bool(16, "is_default_value", is_unset);
+                    if !is_unset {
+                        write_value(&mut entry, &ENTRY_NUMS, v);
+                    }
                     sel.rmsg(1, "entries", entry);
                     sel.bool(2, "has_default_value", true);
                     sel.str(3, "no_match_error", "");
@@ -1822,11 +2084,15 @@ pub fn attribute_proto(
                     let mut has_default = false;
                     for (k, v) in entries {
                         let mut entry = Msg::new();
-                        let is_default = k.to_string() == "//conditions:default";
-                        has_default |= is_default;
+                        let is_cond_default = k.to_string() == "//conditions:default";
+                        has_default |= is_cond_default;
+                        let is_unset =
+                            matches!(v, AttrValue::Label(None) | AttrValue::Output(None));
                         entry.str(1, "label", lp(k));
-                        entry.bool(16, "is_default_value", is_default);
-                        write_value(&mut entry, &ENTRY_NUMS, v);
+                        entry.bool(16, "is_default_value", is_unset);
+                        if !is_unset {
+                            write_value(&mut entry, &ENTRY_NUMS, v);
+                        }
                         sel.rmsg(1, "entries", entry);
                     }
                     sel.bool(2, "has_default_value", has_default);
@@ -1872,6 +2138,18 @@ pub fn target_proto_ex(
     opts: &FormatOpts,
     configured: bool,
 ) -> Msg {
+    let mut seen_rule_classes = std::collections::HashSet::new();
+    try_target_proto_ex(env, info, opts, configured, &mut seen_rule_classes)
+        .unwrap_or_else(|_| Msg::new())
+}
+
+pub fn try_target_proto_ex(
+    env: &TargetEnv<'_>,
+    info: &TInfo,
+    opts: &FormatOpts,
+    configured: bool,
+    seen_rule_classes: &mut std::collections::HashSet<String>,
+) -> Result<Msg, String> {
     let mut t = Msg::new();
     match &info.target {
         Target::Rule(rule) => {
@@ -1892,9 +2170,18 @@ pub fn target_proto_ex(
                     .any(|a| a == "all" && opts.proto_output_rule_attrs.len() == 1)
                     || opts.proto_output_rule_attrs.iter().any(|a| a == n)
             };
+            let rule_src_aspect = if opts.proto_include_attribute_source_aspects {
+                Some("")
+            } else {
+                None
+            };
+            let all_rule_attrs = rule_attributes(rule);
+            for a in &all_rule_attrs {
+                check_int32_bounds(&a.value)?;
+            }
             let mut attrs: Vec<Msg> = Vec::new();
             let mut names: Vec<String> = Vec::new();
-            for a in rule_attributes(rule) {
+            for a in &all_rule_attrs {
                 if !((opts.proto_default_values || a.explicit) && pred(&a.name)) {
                     continue;
                 }
@@ -1907,9 +2194,14 @@ pub fn target_proto_ex(
                     } else {
                         flattened(a.ty, values)
                     };
-                    attribute_proto(&a, v.as_ref(), None)
+                    attribute_proto_with_aspect(a, v.as_ref(), None, rule_src_aspect)
                 } else {
-                    attribute_proto(&a, None, Some(select_parts(&a.value)))
+                    attribute_proto_with_aspect(
+                        a,
+                        None,
+                        Some(select_parts(&a.value)),
+                        rule_src_aspect,
+                    )
                 };
                 names.push(a.name.clone());
                 attrs.push(msg);
@@ -1920,7 +2212,7 @@ pub fn target_proto_ex(
                 r.rmsg(4, "attribute", attrs[i].clone());
             }
             // `ProtoOutputFormatter.toTargetProtoBuffer`: every rule of a Starlark rule class has the
-            // digest of its definition environment as the last (unsorted) attribute.
+            // digest of its definition environment as an attribute before aspect attributes.
             if let Some(spec) = rule
                 .extra
                 .rule_class
@@ -1932,10 +2224,116 @@ pub fn target_proto_ex(
                     h.str(1, "name", "$rule_implementation_hash");
                     h.en(2, "type", disc::name(disc::STRING), disc::STRING);
                     h.str(5, "string_value", spec.definition_digest.clone());
+                    if opts.proto_include_attribute_source_aspects {
+                        h.str(23, "source_aspect_name", "");
+                    }
                     r.rmsg(4, "attribute", h);
                 }
             }
+            let aspect_attr_list = if opts.include_aspects && !configured {
+                crate::target_env::aspect_attrs_for_rule(
+                    Some(env),
+                    rule,
+                    opts.implicit_deps,
+                    opts.tool_deps,
+                    opts.nodep_deps,
+                    &opts.aspect_deps,
+                )
+            } else {
+                Vec::new()
+            };
+            if !aspect_attr_list.is_empty() {
+                let mut asp_msgs: Vec<(String, Msg)> = Vec::new();
+                let mut seen_asp_attr_bytes: BTreeSet<Vec<u8>> = BTreeSet::new();
+                for (src_asp, mut asp_entry) in aspect_attr_list.iter().cloned() {
+                    if !((opts.proto_default_values || asp_entry.explicit) && pred(&asp_entry.name))
+                    {
+                        continue;
+                    }
+                    check_int32_bounds(&asp_entry.value)?;
+                    if asp_entry.ty == AttrType::LabelKeyedStringDict {
+                        asp_entry.value = AttrValue::LabelKeyedStrDict(Vec::new());
+                    }
+                    let src_opt = if opts.proto_include_attribute_source_aspects {
+                        Some(src_asp.as_str())
+                    } else {
+                        None
+                    };
+                    let values = possible_values(&asp_entry.value);
+                    let v = if asp_entry.null_default {
+                        None
+                    } else {
+                        flattened(asp_entry.ty, values)
+                    };
+                    let msg = attribute_proto_with_aspect(&asp_entry, v.as_ref(), None, src_opt);
+                    if seen_asp_attr_bytes.insert(msg.encode()) {
+                        asp_msgs.push((asp_entry.name.clone(), msg));
+                    }
+                }
+                asp_msgs.sort_by(|a, b| a.0.cmp(&b.0));
+                for (_, msg) in asp_msgs {
+                    r.rmsg(4, "attribute", msg);
+                }
+            }
+            if opts.proto_include_synthetic_attribute_hash {
+                let mut hash_buf: Vec<u8> = Vec::new();
+                if opts.proto_include_starlark_rule_env {
+                    if let Some(spec) = rule
+                        .extra
+                        .rule_class
+                        .as_ref()
+                        .and_then(|rc| rc.starlark.as_ref())
+                    {
+                        let env_bytes = spec.definition_digest.as_bytes();
+                        push_varint_bytes(&mut hash_buf, env_bytes.len());
+                        hash_buf.extend_from_slice(env_bytes);
+                    }
+                }
+                for a in &all_rule_attrs {
+                    if a.name == "generator_location" {
+                        continue;
+                    }
+                    let msg_for_hash = if a.value.is_select() {
+                        attribute_proto_with_aspect(
+                            a,
+                            None,
+                            Some(select_parts(&a.value)),
+                            rule_src_aspect,
+                        )
+                    } else {
+                        let values = possible_values(&a.value);
+                        let v = if a.null_default
+                            || (configured && a.name == "visibility" && !a.explicit)
+                        {
+                            None
+                        } else {
+                            flattened(a.ty, values)
+                        };
+                        attribute_proto_with_aspect(a, v.as_ref(), None, rule_src_aspect)
+                    };
+                    hash_buf.extend(msg_for_hash.encode_delimited());
+                }
+                hash_buf.push(u8::from(info.pkg.contains_errors));
+                hash_buf.push(0);
+                let digest = base64_encode(&zel_util::sha256::digest(&hash_buf));
+                let mut sh = Msg::new();
+                sh.str(1, "name", "$internal_attr_hash");
+                sh.en(2, "type", disc::name(disc::STRING), disc::STRING);
+                sh.str(5, "string_value", digest);
+                r.rmsg(4, "attribute", sh);
+            }
             if opts.proto_rule_inputs_and_outputs {
+                let mut aspect_seen: BTreeSet<Label> = BTreeSet::new();
+                for (_, asp_entry) in &aspect_attr_list {
+                    if asp_entry.nodep && asp_entry.name != "visibility" {
+                        continue;
+                    }
+                    for l in asp_entry.value.labels() {
+                        if aspect_seen.insert(l.clone()) {
+                            r.rstr(5, "rule_input", lp(&l));
+                        }
+                    }
+                }
                 let mut inputs: Vec<Label> =
                     rule_deps_ext(rule, opts.implicit_deps, opts.tool_deps, opts.nodep_deps)
                         .into_iter()
@@ -1948,6 +2346,7 @@ pub fn target_proto_ex(
                         })
                         .collect();
                 inputs.sort_by(label_cmp);
+                inputs.dedup();
                 for l in inputs {
                     r.rstr(5, "rule_input", lp(&l));
                 }
@@ -1957,18 +2356,6 @@ pub fn target_proto_ex(
             }
             for f in &info.pkg.args.features {
                 r.rstr(7, "default_setting", f.clone());
-            }
-            if opts.proto_include_synthetic_attribute_hash {
-                let mut fp = zel_util::Fingerprint::new();
-                for a in rule_attributes(rule) {
-                    if a.explicit {
-                        fp.add_str(&a.name);
-                        if let Some(s) = java_string(&a.value) {
-                            fp.add_str(&s);
-                        }
-                    }
-                }
-                r.str(12, "synthetic_attribute_hash", fp.hex_digest_and_reset());
             }
             if opts.proto_instantiation_stack {
                 let (_, inst_frames) = instantiation_stack(rule);
@@ -1995,10 +2382,10 @@ pub fn target_proto_ex(
                             .map(|s| format!("{}%{}", s.defined_in, rc.name))
                     })
                     .unwrap_or_else(|| rule.rule_class.clone());
-                r.str(19, "rule_class_key", rule_key);
-            }
-            if opts.proto_include_starlark_rule_env {
-                // If Starlark rule, add env entries if any
+                r.str(16, "rule_class_key", rule_key.clone());
+                if seen_rule_classes.insert(rule_key) {
+                    r.msg(17, "rule_class_info", build_rule_class_info_proto(rule));
+                }
             }
             t.en(1, "type", "RULE", 1);
             t.msg(2, "rule", r);
@@ -2090,7 +2477,7 @@ pub fn target_proto_ex(
             t.msg(5, "package_group", g);
         }
     }
-    t
+    Ok(t)
 }
 
 fn relativize_location(loc: &str, info: &TInfo) -> String {

@@ -21,7 +21,7 @@ use crate::format::{self, lp, FormatOpts, LabelPrinter};
 use crate::parse::{self, Arg, Expr, FuncSpec};
 use crate::pb::{Msg, PbVal};
 use crate::regex::Regex;
-use crate::target_env::{rule_attributes, rule_deps, QueryOpts, TInfo, TargetEnv};
+use crate::target_env::{rule_attributes, QueryOpts, TInfo, TargetEnv};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -1384,8 +1384,39 @@ impl QueryEnv for PostEnv<'_> {
         n.label.package_name().to_string()
     }
 
-    /// `attr()` on configured targets sees the resolved (`select()`-free) value.
+    fn filter_label(&mut self, n: &Node) -> String {
+        if !self.aquery {
+            return n.label.to_string();
+        }
+        let mut cur = n.label.clone();
+        let mut cur_node = n.clone();
+        for _ in 0..32 {
+            let Some(info) = self.tenv.info(&cur).ok() else {
+                break;
+            };
+            let Target::Rule(r) = &info.target else { break };
+            if r.rule_class != "alias" {
+                break;
+            }
+            let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == "actual") else {
+                break;
+            };
+            let resolved = self.resolve_value(r, &cur_node, "actual", &a.value);
+            let Some(next_lbl) = resolved.labels().into_iter().next() else {
+                break;
+            };
+            cur = next_lbl.clone();
+            cur_node.label = next_lbl;
+        }
+        cur.to_string()
+    }
+
+    /// `attr()`: in `aquery` (`ActionGraphQueryEnvironment`), delegates to unconfigured `TargetEnv`;
+    /// in `cquery`, sees the resolved (`select()`-free) value.
     fn attr_strings(&mut self, n: &Node, attr: &str) -> Vec<String> {
+        if self.aquery {
+            return self.tenv.attr_strings(&Node::new(n.label.clone()), attr);
+        }
         let Some(info) = self.tenv.info(&n.label).ok() else {
             return Vec::new();
         };
@@ -1398,7 +1429,9 @@ impl QueryEnv for PostEnv<'_> {
         if a.null_default {
             return Vec::new();
         }
-        let value = self.resolve_value(r, n, &a.name, &a.value);
+        let Ok(value) = self.try_resolve_value(r, n, &a.name, &a.value) else {
+            return Vec::new();
+        };
         crate::target_env::java_string(&value).into_iter().collect()
     }
 
@@ -1511,16 +1544,16 @@ impl QueryEnv for PostEnv<'_> {
                 ),
             ));
         };
+        if a.nodep
+            || matches!(
+                a.ty,
+                zel_packages::attr::AttrType::Output | zel_packages::attr::AttrType::OutputList
+            )
+        {
+            return Ok(Vec::new());
+        }
         let resolved = self.resolve_value(r, &actual, &a.name, &a.value);
-        let labels = if a.name == "visibility" {
-            crate::target_env::visibility_group_labels(&resolved.labels())
-        } else {
-            match &resolved {
-                AttrValue::OutputList(l) => l.clone(),
-                AttrValue::Output(Some(l)) => vec![l.clone()],
-                v => v.labels(),
-            }
-        };
+        let labels = resolved.labels();
         let fwd_deps = self.analysis_deps(&actual)?;
         let mut by_label: HashMap<Label, Vec<Node>> = HashMap::new();
         for d in fwd_deps {
@@ -1606,12 +1639,6 @@ impl QueryEnv for PostEnv<'_> {
                 "labels() is not supported for aquery",
             )));
         }
-        if self.aquery
-            && (name == "inputs" || name == "outputs" || name == "mnemonic")
-            && args.len() < 2
-        {
-            return Some(Err(QueryError::for_expr(expr, "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 arguments,except when --skyframe_state is used.")));
-        }
         if self.aquery && !matches!(name, "inputs" | "outputs" | "mnemonic") {
             fn contains_action_filter(e: &Expr) -> bool {
                 match e {
@@ -1659,6 +1686,12 @@ impl QueryEnv for PostEnv<'_> {
                     )));
                 }
                 if args.len() < 2 {
+                    if self.aquery {
+                        return Some(Err(QueryError::for_expr(
+                            expr,
+                            "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 arguments,except when --skyframe_state is used.",
+                        )));
+                    }
                     return None;
                 }
                 Some(Ok(Some(1)))
@@ -1818,15 +1851,15 @@ impl PostEnv<'_> {
         None
     }
 
-    fn resolve_value(
+    fn try_resolve_value(
         &mut self,
         rule: &RuleInstance,
         n: &Node,
         attr: &str,
         v: &AttrValue,
-    ) -> AttrValue {
+    ) -> Result<AttrValue, String> {
         if !v.is_select() {
-            return v.clone();
+            return Ok(v.clone());
         }
         let key = self
             .node_config_key(n)
@@ -1839,7 +1872,17 @@ impl PostEnv<'_> {
             &key,
             &*self.tr as &dyn zel_analysis::starlark_rule::DepResolver,
         )
-        .unwrap_or_else(|_| v.clone())
+    }
+
+    fn resolve_value(
+        &mut self,
+        rule: &RuleInstance,
+        n: &Node,
+        attr: &str,
+        v: &AttrValue,
+    ) -> AttrValue {
+        self.try_resolve_value(rule, n, attr, v)
+            .unwrap_or_else(|_| v.clone())
     }
 }
 
@@ -1903,7 +1946,30 @@ pub fn run_post_analysis(
         outcome.exit_code = crate::exit::COMMAND_LINE_ERROR;
         return outcome;
     }
-    if popts.skyframe_state && expr_str.trim().is_empty() {
+    if popts.skyframe_state {
+        if !expr_str.trim().is_empty() {
+            let functions = env.functions();
+            let expr = match parse::parse(expr_str, &functions) {
+                Ok(e) => e,
+                Err(e) => {
+                    outcome.stderr.push(format!(
+                        "ERROR: Error while parsing '{}': {}",
+                        parse::truncate(expr_str),
+                        e.0
+                    ));
+                    outcome.exit_code = crate::exit::COMMAND_LINE_ERROR;
+                    return outcome;
+                }
+            };
+            match build_action_filters(&expr) {
+                Ok(filters) => env.filters = filters,
+                Err(msg) => {
+                    outcome.stderr.push(format!("ERROR: {msg}\n{expr}"));
+                    outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
+                    return outcome;
+                }
+            }
+        }
         let targets = env.tr.analyzed_targets();
         let mut nodes = Vec::new();
         for ct in &targets {
@@ -2352,7 +2418,38 @@ pub fn run_post_analysis(
     outcome
 }
 
+fn validate_all_action_filter_regexes(expr: &Expr) -> Result<(), String> {
+    match expr {
+        Expr::Func { spec, args } => {
+            if matches!(spec.0.name, "inputs" | "outputs" | "mnemonic") {
+                if let Some(Arg::Word(pat)) = args.first() {
+                    if let Err(e) = Regex::new(pat) {
+                        return Err(format!("Wrong query syntax: {e}"));
+                    }
+                }
+            }
+            for a in args {
+                if let Arg::Expr(sub) = a {
+                    validate_all_action_filter_regexes(sub)?;
+                }
+            }
+        }
+        Expr::Binary { operands, .. } => {
+            for op in operands {
+                validate_all_action_filter_regexes(op)?;
+            }
+        }
+        Expr::Let { var, body, .. } => {
+            validate_all_action_filter_regexes(var)?;
+            validate_all_action_filter_regexes(body)?;
+        }
+        Expr::Set(_) | Expr::Target(_) => {}
+    }
+    Ok(())
+}
+
 fn build_action_filters(expr: &Expr) -> Result<ActionFilters, String> {
+    validate_all_action_filter_regexes(expr)?;
     let mut filters = ActionFilters::default();
     let Expr::Func { .. } = expr else {
         return Ok(filters);
@@ -2433,18 +2530,25 @@ fn configuration_msg(env: &PostEnv<'_>, id: &str, idx: u32) -> Msg {
             String,
             std::collections::BTreeMap<String, String>,
         > = Default::default();
+        let mut user: std::collections::BTreeMap<String, String> = Default::default();
         for (cls, opts) in &o.fragments {
             let e = classes.entry((*cls).to_string()).or_default();
             for (name, v) in opts {
-                if *name == "define"
-                    && matches!(v, zel_analysis::build_options::ConfigValue::List(l) if l.is_empty())
-                {
+                if *name == "define" {
+                    if let zel_analysis::build_options::ConfigValue::List(items) = v {
+                        for kv in items {
+                            if let Some((dk, dv)) = kv.split_once('=') {
+                                user.insert(format!("--define:{dk}"), dv.to_string());
+                            } else if !kv.is_empty() {
+                                user.insert(format!("--define:{kv}"), String::new());
+                            }
+                        }
+                    }
                     continue;
                 }
                 e.insert((*name).to_string(), v.display());
             }
         }
-        let mut user: std::collections::BTreeMap<String, String> = Default::default();
         for (n, v) in &o.starlark {
             user.insert(n.clone(), v.clone());
         }
@@ -2464,7 +2568,7 @@ fn configuration_msg(env: &PostEnv<'_>, id: &str, idx: u32) -> Msg {
     m
 }
 
-/// The set of configuration ids used by `nodes`, numbered from 1 in first-use order.
+#[allow(dead_code)]
 fn config_numbering(nodes: &[Node]) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     for n in nodes {
@@ -2477,8 +2581,10 @@ fn config_numbering(nodes: &[Node]) -> Vec<String> {
     v
 }
 
-fn resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Option<TInfo> {
-    let info = env.info_of(&n.label)?;
+fn try_resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Result<Option<TInfo>, String> {
+    let Some(info) = env.info_of(&n.label) else {
+        return Ok(None);
+    };
     let mut info = (*info).clone();
     let (rule_label, is_rule) = match &info.target {
         Target::Rule(r) => (r.label.clone(), true),
@@ -2501,7 +2607,7 @@ fn resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Option<TInfo> {
                         cfg_full: n.cfg_full.clone(),
                         aspect: None,
                     };
-                    let v = env.resolve_value(&rule_clone, &rn, &a.name, &a.value);
+                    let v = env.try_resolve_value(&rule_clone, &rn, &a.name, &a.value)?;
                     rule.extra.attr_values.insert(a.name.clone(), v);
                 }
             }
@@ -2513,7 +2619,11 @@ fn resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Option<TInfo> {
             }
         }
     }
-    Some(info)
+    Ok(Some(info))
+}
+
+fn resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Option<TInfo> {
+    try_resolved_info(env, n).ok().flatten()
 }
 
 fn options_diff(from_cfg: &BuildConfigurationKey, to_cfg: &BuildConfigurationKey) -> Vec<String> {
@@ -2774,26 +2884,55 @@ fn format_cquery(
                     }
                     Target::PackageGroup { .. } | Target::EnvironmentGroup { .. } => {}
                     Target::Rule(r) if r.rule_class.contains('$') => {}
+                    Target::OutputFile { label, .. } => {
+                        if let Some(ct) = env.analyzed(n).map_err(|e| e.message)? {
+                            let expected_rel = label
+                                .package_identifier()
+                                .package_fragment()
+                                .get_relative_str(label.name());
+                            let mut found: Option<&Artifact> = None;
+                            for a in ct
+                                .default_info
+                                .files
+                                .iter()
+                                .chain(ct.output_groups.groups.values().flatten())
+                                .chain(ct.typed_actions.iter().flat_map(|act| act.outputs.iter()))
+                            {
+                                if a.owner_label == *label || a.root_relative_path == expected_rel {
+                                    found = Some(a);
+                                    break;
+                                }
+                            }
+                            if let Some(a) = found {
+                                results.push(a.exec_path.path_string().to_string());
+                            }
+                        }
+                    }
                     _ => {
                         if let Some(ct) = env.analyzed(n).map_err(|e| e.message)? {
+                            let should_display = |a: &Artifact| -> bool {
+                                if a.is_source {
+                                    return true;
+                                }
+                                let ep = a.exec_path.path_string();
+                                let rp = a.root_relative_path.path_string();
+                                !ep.ends_with(".runfiles") && !rp.ends_with(".runfiles")
+                            };
                             let mut files: Vec<&Artifact> = Vec::new();
                             for g in &groups {
                                 if g.starts_with('_') {
                                     continue;
                                 }
                                 if g == "default" {
-                                    files.extend(ct.default_info.files.iter());
+                                    files.extend(
+                                        ct.default_info.files.iter().filter(|a| should_display(a)),
+                                    );
+                                    if let Some(grp) = ct.output_groups.groups.get("default") {
+                                        files.extend(grp.iter().filter(|a| should_display(a)));
+                                    }
                                 } else if let Some(grp) = ct.output_groups.groups.get(g) {
-                                    files.extend(grp.iter());
+                                    files.extend(grp.iter().filter(|a| should_display(a)));
                                 }
-                            }
-                            if let Target::OutputFile { label, .. } = &info.target {
-                                files.retain(|a| {
-                                    a.owner_label == *label
-                                        || a.root_relative_path
-                                            .path_string()
-                                            .ends_with(label.name())
-                                });
                             }
                             for a in files {
                                 results.push(a.exec_path.path_string().to_string());
@@ -2808,7 +2947,7 @@ fn format_cquery(
                                             continue;
                                         }
                                         if let Some(grp) = asp.output_groups.groups.get(g) {
-                                            for a in grp {
+                                            for a in grp.iter().filter(|a| should_display(a)) {
                                                 results.push(a.exec_path.path_string().to_string());
                                             }
                                         }
@@ -2860,8 +2999,21 @@ fn format_cquery(
                 let info_target = env.info_of(&n.label).map(|i| i.target.clone());
                 let is_alias =
                     matches!(info_target, Some(Target::Rule(ref r)) if r.rule_class == "alias");
-                let prefix = match &info_target {
-                    Some(Target::Rule(r)) => {
+                let is_rule_target = matches!(info_target, Some(Target::Rule(_)));
+                let assoc_rule: Option<zel_packages::RuleInstance> = match &info_target {
+                    Some(Target::Rule(r)) => Some(r.clone()),
+                    Some(Target::OutputFile {
+                        generating_rule, ..
+                    }) => env
+                        .info_of(generating_rule)
+                        .and_then(|gi| match &gi.target {
+                            Target::Rule(r) => Some(r.clone()),
+                            _ => None,
+                        }),
+                    _ => None,
+                };
+                let prefix = match &assoc_rule {
+                    Some(r) => {
                         let own = r.extra.rule_class.as_ref().and_then(|rc| {
                             match rc.starlark.as_ref().and_then(|st| st.kwargs.get("cfg")) {
                                 Some(v) => starlark_transition_name(v),
@@ -2877,18 +3029,23 @@ fn format_cquery(
                         });
                         format!("{} -> ", own.unwrap_or_else(|| "NoTransition".to_string()))
                     }
-                    _ => String::new(),
+                    None => String::new(),
                 };
                 results.push(format!("{prefix}{}", node_desc(n)));
-                if is_alias {
+                if is_alias || !is_rule_target {
                     continue;
                 }
                 let deps = env.unfiltered_deps(n);
                 let mut by_attr: Vec<(String, Node)> = Vec::new();
                 if let (Some(info), Some(id)) = (env.info_of(&n.label), n.cfg.clone()) {
                     if let Target::Rule(r) = &info.target {
-                        let mut attr_of: Vec<(Label, String)> = rule_deps(r, true, true);
+                        let mut attr_of: Vec<(Label, String)> =
+                            crate::target_env::rule_deps_ext(r, true, fopts.tool_deps, true);
                         for d in &deps {
+                            if !fopts.tool_deps && env.node_config_key(d).is_some_and(|k| k.is_exec)
+                            {
+                                continue;
+                            }
                             if !attr_of.iter().any(|(l, _)| *l == d.label) {
                                 if let Some(Target::Rule(dr)) =
                                     env.info_of(&d.label).map(|i| i.target.clone())
@@ -2912,7 +3069,13 @@ fn format_cquery(
                         }
                         // Edges are reported in attribute order (`DependencyKind` order of
                         // `DependencyResolver`), not in the order the dependencies were analysed.
-                        let mut ordered: Vec<&Node> = deps.iter().collect();
+                        let mut ordered: Vec<&Node> = deps
+                            .iter()
+                            .filter(|d| {
+                                fopts.tool_deps
+                                    || !env.node_config_key(d).is_some_and(|k| k.is_exec)
+                            })
+                            .collect();
                         ordered.sort_by_key(|d| {
                             attr_of
                                 .iter()
@@ -2938,30 +3101,38 @@ fn format_cquery(
                     }
                     let _ = id;
                 }
+                struct GroupedEdge {
+                    display_attr: String,
+                    label: Label,
+                    tname: String,
+                    short_ids: Vec<String>,
+                    to_cfgs: Vec<BuildConfigurationKey>,
+                }
+                let mut grouped_edges: Vec<GroupedEdge> = Vec::new();
+                let parent_full = env.node_config_key(n).map(|k| k.checksum());
                 for (attr, d) in by_attr {
                     if attr.is_empty() || attr == "$target_platform" {
                         continue;
                     }
-                    let display_attr = if attr == "_allowlist_function_transition" {
-                        "$allowlist_function_transition".to_string()
+                    let display_attr = if let Some(rest) = attr.strip_prefix('_') {
+                        format!("${rest}")
                     } else {
                         attr.clone()
                     };
+                    let dep_cfg = env.node_config_key(&d).cloned();
+                    let dep_full = dep_cfg.as_ref().map(|k| k.checksum());
                     let (tname, to_hash) = if d.cfg.is_none() {
-                        ("(null transition)".to_string(), "".to_string())
-                    } else if d.cfg == n.cfg {
-                        ("NoTransition".to_string(), "".to_string())
+                        ("(null transition)".to_string(), String::new())
+                    } else if dep_full == parent_full {
+                        ("NoTransition".to_string(), String::new())
                     } else {
                         let attr_tr = env.info_of(&n.label).and_then(|i| match &i.target {
                             Target::Rule(r) => attribute_transition_name(r, &attr),
                             _ => None,
                         });
                         let attr_tr = attr_tr.or_else(|| {
-                            // The exec transition of an implicit/late-bound edge is recognised by the
-                            // configuration it produced.
-                            d.cfg
+                            dep_cfg
                                 .as_ref()
-                                .and_then(|c| env.config_key(c))
                                 .filter(|k| k.is_exec)
                                 .map(|_| "exec".to_string())
                         });
@@ -2975,22 +3146,87 @@ fn format_cquery(
                         };
                         (name, d.cfg.as_deref().unwrap_or("").to_string())
                     };
-                    let arrow_suffix = if to_hash.is_empty() {
+                    if let Some(existing) = grouped_edges.iter_mut().find(|g| {
+                        g.display_attr == display_attr && g.label == d.label && g.tname == tname
+                    }) {
+                        if !to_hash.is_empty() && !existing.short_ids.contains(&to_hash) {
+                            existing.short_ids.push(to_hash);
+                        }
+                        if let Some(ck) = dep_cfg {
+                            if !existing
+                                .to_cfgs
+                                .iter()
+                                .any(|c| c.checksum() == ck.checksum())
+                            {
+                                existing.to_cfgs.push(ck);
+                            }
+                        }
+                    } else {
+                        grouped_edges.push(GroupedEdge {
+                            display_attr,
+                            label: d.label.clone(),
+                            tname,
+                            short_ids: if to_hash.is_empty() {
+                                Vec::new()
+                            } else {
+                                vec![to_hash]
+                            },
+                            to_cfgs: dep_cfg.into_iter().collect(),
+                        });
+                    }
+                }
+                let from_cfg_opt = env.node_config_key(n).cloned();
+                for g in grouped_edges {
+                    let arrow_suffix = if g.short_ids.is_empty() {
                         " -> ".to_string()
                     } else {
-                        format!(" -> {to_hash}")
+                        format!(" -> {}", g.short_ids.join(", "))
                     };
                     results.push(format!(
-                        "  {display_attr}#{}#{tname}{arrow_suffix}",
-                        lp(&d.label),
+                        "  {}#{}#{}{arrow_suffix}",
+                        g.display_attr,
+                        lp(&g.label),
+                        g.tname,
                     ));
-                    if popts.transitions == "full" && d.cfg.is_some() && d.cfg != n.cfg {
-                        if let (Some(from_id), Some(to_id)) = (&n.cfg, &d.cfg) {
-                            if let (Some(from_cfg), Some(to_cfg)) =
-                                (env.config_key(from_id), env.config_key(to_id))
-                            {
-                                for diff_line in options_diff(from_cfg, to_cfg) {
+                    if popts.transitions == "full"
+                        && !g.to_cfgs.is_empty()
+                        && from_cfg_opt.is_some()
+                    {
+                        let from_cfg = from_cfg_opt.as_ref().unwrap();
+                        if g.to_cfgs.len() == 1 {
+                            if g.to_cfgs[0].checksum() != from_cfg.checksum() {
+                                for diff_line in options_diff(from_cfg, &g.to_cfgs[0]) {
                                     results.push(format!("    {diff_line}"));
+                                }
+                            }
+                        } else {
+                            let from_bo = from_cfg.build_options();
+                            let to_bos: Vec<_> =
+                                g.to_cfgs.iter().map(|c| c.build_options()).collect();
+                            for (cls, o1) in &from_bo.fragments {
+                                for (name, v1) in o1 {
+                                    let mut vals = Vec::new();
+                                    let mut changed = false;
+                                    for tbo in &to_bos {
+                                        if let Some(v2) =
+                                            tbo.fragments.get(cls).and_then(|m| m.get(name))
+                                        {
+                                            if v2 != v1 {
+                                                changed = true;
+                                            }
+                                            let ds = v2.display();
+                                            if !vals.contains(&ds) {
+                                                vals.push(ds);
+                                            }
+                                        }
+                                    }
+                                    if changed && !vals.is_empty() {
+                                        results.push(format!(
+                                            "    {name}:{} -> [{}]",
+                                            v1.display(),
+                                            vals.join(", ")
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -3046,9 +3282,15 @@ fn cquery_graph(
     fopts: &FormatOpts,
 ) -> String {
     let mut deps_of: HashMap<Node, Vec<Node>> = HashMap::new();
+    let saved_imp = env.tenv.opts.implicit_deps;
+    let saved_tool = env.tenv.opts.tool_deps;
+    env.tenv.opts.implicit_deps = fopts.implicit_deps;
+    env.tenv.opts.tool_deps = fopts.tool_deps;
     for n in nodes {
         deps_of.insert(n.clone(), env.analysis_deps(n).unwrap_or_default());
     }
+    env.tenv.opts.implicit_deps = saved_imp;
+    env.tenv.opts.tool_deps = saved_tool;
     let mut dig_deps = |n: &Node| deps_of.get(n).cloned().unwrap_or_default();
     let g = crate::engine::Digraph::build(nodes, &mut dig_deps);
     let dot_cmp = |a: &Node, b: &Node| -> std::cmp::Ordering {
@@ -3075,11 +3317,16 @@ fn cquery_graph(
                     )
             })
             .then_with(|| a.label.name().cmp(b.label.name()))
-            .then_with(|| match (&a.cfg, &b.cfg) {
-                (None, None) => std::cmp::Ordering::Equal,
-                (None, _) => std::cmp::Ordering::Less,
-                (_, None) => std::cmp::Ordering::Greater,
-                (Some(x), Some(y)) => x.cmp(y),
+            .then_with(|| {
+                match (
+                    a.cfg_full.as_ref().or(a.cfg.as_ref()),
+                    b.cfg_full.as_ref().or(b.cfg.as_ref()),
+                ) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, _) => std::cmp::Ordering::Less,
+                    (_, None) => std::cmp::Ordering::Greater,
+                    (Some(x), Some(y)) => x.cmp(y),
+                }
             })
     };
     format::write_dot(
@@ -3100,24 +3347,52 @@ fn cquery_proto(
     popts: &PostOpts,
     fopts: &FormatOpts,
 ) -> Result<Vec<u8>, String> {
-    let numbering = config_numbering(nodes);
+    let mut numbering: Vec<String> = Vec::new();
+    let intern_cfg = |numbering: &mut Vec<String>, key: Option<&str>| -> u32 {
+        let Some(c) = key else { return 0 };
+        if let Some(pos) = numbering.iter().position(|x| x == c) {
+            pos as u32 + 1
+        } else {
+            numbering.push(c.to_string());
+            numbering.len() as u32
+        }
+    };
+    let include_transitions = popts.transitions == "lite" || popts.transitions == "full";
     let mut results: Vec<Msg> = Vec::new();
+    let mut seen_rule_classes = std::collections::HashSet::new();
     for n in nodes {
         let Some(orig_info) = env.info_of(&n.label) else {
             continue;
         };
-        let Some(info) = resolved_info(env, n) else {
+        let Some(info) = try_resolved_info(env, n)? else {
             continue;
         };
-        let mut tmsg = format::target_proto_ex(&env.tenv, &info, fopts, true);
-        if fopts.proto_rule_inputs_and_outputs {
-            if let (Target::Rule(orig_rule), Some(PbVal::Msg(r))) = (
-                &orig_info.target,
-                tmsg.fields
-                    .iter_mut()
-                    .find(|f| f.num == 2)
-                    .map(|f| &mut f.val),
-            ) {
+        let node_cfg_id_num =
+            intern_cfg(&mut numbering, n.cfg_full.as_deref().or(n.cfg.as_deref()));
+        let configured_deps = if include_transitions && matches!(orig_info.target, Target::Rule(_))
+        {
+            env.sync_transitive_configs();
+            let saved_imp = env.tenv.opts.implicit_deps;
+            let saved_tool = env.tenv.opts.tool_deps;
+            env.tenv.opts.implicit_deps = fopts.implicit_deps;
+            env.tenv.opts.tool_deps = fopts.tool_deps;
+            let res = env.analysis_deps(n).unwrap_or_default();
+            env.tenv.opts.implicit_deps = saved_imp;
+            env.tenv.opts.tool_deps = saved_tool;
+            res
+        } else {
+            Vec::new()
+        };
+        let mut tmsg =
+            format::try_target_proto_ex(&env.tenv, &info, fopts, true, &mut seen_rule_classes)?;
+        if let (Target::Rule(orig_rule), Some(PbVal::Msg(r))) = (
+            &orig_info.target,
+            tmsg.fields
+                .iter_mut()
+                .find(|f| f.num == 2)
+                .map(|f| &mut f.val),
+        ) {
+            if fopts.proto_rule_inputs_and_outputs {
                 r.fields.retain(|f| f.num != 5 && f.num != 6);
                 let mut inputs: Vec<Label> = crate::target_env::rule_deps_ext(
                     orig_rule,
@@ -3135,6 +3410,7 @@ fn cquery_proto(
                 })
                 .collect();
                 inputs.sort_by(label_cmp);
+                inputs.dedup();
                 for l in inputs {
                     r.rstr(5, "rule_input", lp(&l));
                 }
@@ -3142,12 +3418,28 @@ fn cquery_proto(
                     r.rstr(6, "rule_output", lp(&o));
                 }
             }
+            if include_transitions {
+                for dep_node in &configured_deps {
+                    let mut cri = Msg::new();
+                    cri.str(1, "label", lp(&dep_node.label));
+                    let dep_full = env
+                        .node_config_key(dep_node)
+                        .map(|k| k.checksum())
+                        .or_else(|| dep_node.cfg_full.clone());
+                    if let Some(cs) = dep_full {
+                        let cid = intern_cfg(&mut numbering, Some(cs.as_str()));
+                        cri.str(2, "configuration_checksum", cs);
+                        if cid != 0 {
+                            cri.add(3, "configuration_id", PbVal::Uint32(cid));
+                        }
+                    }
+                    r.rmsg(15, "configured_rule_input", cri);
+                }
+            }
         }
         let mut ct = Msg::new();
         ct.msg(1, "target", tmsg);
         if popts.proto_include_configurations {
-            // Deprecated `ConfiguredTarget.configuration { checksum }`: `String.valueOf(checksum)`,
-            // i.e. "null" for targets without a configuration (ProtoOutputFormatterCallback).
             let checksum = env
                 .node_config_key(n)
                 .map(|k| k.checksum())
@@ -3156,15 +3448,8 @@ fn cquery_proto(
             cfg.str(4, "checksum", checksum);
             ct.msg(2, "configuration", cfg);
         }
-        if let Some(c) = n.cfg_full.as_ref().or(n.cfg.as_ref()) {
-            let idx = numbering
-                .iter()
-                .position(|x| x == c)
-                .map(|p| p as u32 + 1)
-                .unwrap_or(0);
-            if idx != 0 {
-                ct.add(3, "configuration_id", PbVal::Uint32(idx));
-            }
+        if node_cfg_id_num != 0 {
+            ct.add(3, "configuration_id", PbVal::Uint32(node_cfg_id_num));
         }
         results.push(ct);
     }

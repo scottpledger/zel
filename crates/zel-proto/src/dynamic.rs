@@ -206,10 +206,16 @@ impl Msg {
     pub fn put_map(&mut self, name: &str, key: Value, value: Value) -> &mut Self {
         let f = self.field(name);
         assert!(f.map.is_some(), "{name} is not a map field");
-        self.fields
-            .entry(f.number)
-            .or_default()
-            .push(Value::MapEntry(Box::new(key), Box::new(value)));
+        let list = self.fields.entry(f.number).or_default();
+        for existing in list.iter_mut() {
+            if let Value::MapEntry(ek, ev) = existing {
+                if **ek == key {
+                    **ev = value;
+                    return self;
+                }
+            }
+        }
+        list.push(Value::MapEntry(Box::new(key), Box::new(value)));
         self
     }
 
@@ -375,10 +381,20 @@ impl Msg {
                         _ => wire::skip_field(ew, entry, &mut ep)?,
                     }
                 }
-                self.fields
-                    .entry(f.number)
-                    .or_default()
-                    .push(Value::MapEntry(Box::new(k), Box::new(v)));
+                let list = self.fields.entry(f.number).or_default();
+                let mut updated = false;
+                for existing in list.iter_mut() {
+                    if let Value::MapEntry(ek, ev) = existing {
+                        if **ek == k {
+                            **ev = v.clone();
+                            updated = true;
+                            break;
+                        }
+                    }
+                }
+                if !updated {
+                    list.push(Value::MapEntry(Box::new(k), Box::new(v)));
+                }
                 continue;
             }
             let expected = wire_type_of(&f.ty);
@@ -446,8 +462,79 @@ impl Msg {
                 out.push('"');
                 return;
             }
+            "google.protobuf.Any" => {
+                let type_url = self.get_str("type_url");
+                let raw = self.get_bytes("value");
+                if type_url.is_empty() && raw.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                let full_name = type_url
+                    .rsplit_once('/')
+                    .map(|(_, n)| n)
+                    .unwrap_or(type_url);
+                if !full_name.is_empty() {
+                    if let Ok(inner) = Msg::decode(full_name, raw) {
+                        let mut any_items: Vec<(String, String)> = Vec::new();
+                        let mut ts = String::new();
+                        json_str(type_url, &mut ts);
+                        any_items.push(("@type".to_string(), ts));
+                        if matches!(
+                            full_name,
+                            "google.protobuf.Timestamp" | "google.protobuf.Duration"
+                        ) {
+                            let mut vs = String::new();
+                            inner.write_json(&mut vs, indent, depth + 1);
+                            any_items.push(("value".to_string(), vs));
+                        } else {
+                            for (k, v) in inner.collect_json_items(indent, depth) {
+                                any_items.push((k.to_string(), v));
+                            }
+                        }
+                        out.push('{');
+                        for (i, (k, v)) in any_items.iter().enumerate() {
+                            if i > 0 {
+                                out.push(',');
+                            }
+                            nl(out, indent, depth + 1);
+                            json_str(k, out);
+                            out.push(':');
+                            if indent.is_some() {
+                                out.push(' ');
+                            }
+                            out.push_str(v);
+                        }
+                        nl(out, indent, depth);
+                        out.push('}');
+                        return;
+                    }
+                }
+            }
             _ => {}
         }
+        let items = self.collect_json_items(indent, depth);
+        if items.is_empty() {
+            out.push_str("{}");
+            return;
+        }
+        out.push('{');
+        for (i, (k, v)) in items.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            nl(out, indent, depth + 1);
+            json_str(k, out);
+            out.push(':');
+            if indent.is_some() {
+                out.push(' ');
+            }
+            out.push_str(v);
+        }
+        nl(out, indent, depth);
+        out.push('}');
+    }
+
+    fn collect_json_items(&self, indent: Option<usize>, depth: usize) -> Vec<(&str, String)> {
         let mut items: Vec<(&str, String)> = Vec::new();
         for f in &self.desc.fields {
             let Some(vals) = self.fields.get(&f.number) else {
@@ -504,25 +591,7 @@ impl Msg {
                 items.push((&f.json_name, s));
             }
         }
-        if items.is_empty() {
-            out.push_str("{}");
-            return;
-        }
-        out.push('{');
-        for (i, (k, v)) in items.iter().enumerate() {
-            if i > 0 {
-                out.push(',');
-            }
-            nl(out, indent, depth + 1);
-            json_str(k, out);
-            out.push(':');
-            if indent.is_some() {
-                out.push(' ');
-            }
-            out.push_str(v);
-        }
-        nl(out, indent, depth);
-        out.push('}');
+        items
     }
 
     // ----------------------------------------------------------------------------------
@@ -553,8 +622,12 @@ impl Msg {
                     Value::MapEntry(k, val) => {
                         let (kt, vt) = f.map.as_ref().unwrap();
                         out.push_str(&format!("{pad}{} {{\n", f.name));
-                        text_field("key", kt, k, out, depth + 1);
-                        text_field("value", vt, val, out, depth + 1);
+                        if !is_default(kt, k) {
+                            text_field("key", kt, k, out, depth + 1);
+                        }
+                        if !is_default(vt, val) {
+                            text_field("value", vt, val, out, depth + 1);
+                        }
                         out.push_str(&format!("{pad}}}\n"));
                     }
                     _ => text_field(&f.name, &f.ty, v, out, depth),
@@ -832,10 +905,14 @@ fn encode_scalar_value(ty: &FieldType, v: &Value, buf: &mut Vec<u8>) {
 fn encode_field_value(f: &FieldDesc, v: &Value, buf: &mut Vec<u8>) {
     if let (Some((kt, vt)), Value::MapEntry(k, val)) = (&f.map, v) {
         let mut inner = Vec::new();
-        wire::encode_tag(1, wire_type_of(kt), &mut inner);
-        encode_scalar_value(kt, k, &mut inner);
-        wire::encode_tag(2, wire_type_of(vt), &mut inner);
-        encode_scalar_value(vt, val, &mut inner);
+        if !is_default(kt, k) {
+            wire::encode_tag(1, wire_type_of(kt), &mut inner);
+            encode_scalar_value(kt, k, &mut inner);
+        }
+        if !is_default(vt, val) {
+            wire::encode_tag(2, wire_type_of(vt), &mut inner);
+            encode_scalar_value(vt, val, &mut inner);
+        }
         wire::encode_tag(f.number, wire::WIRE_TYPE_LENGTH_DELIMITED, buf);
         wire::encode_varint(inner.len() as u64, buf);
         buf.extend_from_slice(&inner);
@@ -1050,5 +1127,36 @@ mod tests {
         raw.extend_from_slice(&[0xf8, 0x7f, 0x01]); // unknown field 2047 varint
         let d = Msg::decode("build_event_stream.BuildEventId", &raw).unwrap();
         assert_eq!(d.encode_to_vec(), raw);
+    }
+
+    #[test]
+    fn map_defaults_dedup_and_any_json() {
+        let mut md = Msg::new("build_event_stream.BuildMetadata");
+        md.put_map("metadata", Value::Str("k".into()), Value::Str("v1".into()));
+        md.put_map("metadata", Value::Str("k".into()), Value::Str("".into()));
+        assert_eq!(md.to_json(), r#"{"metadata":{"k":""}}"#);
+        assert_eq!(md.to_text(), "metadata {\n  key: \"k\"\n}\n");
+        let bin = md.encode_to_vec();
+        // field 1 (metadata) len 3 { field 1 (key) "k" }, default empty value omitted
+        assert_eq!(bin, vec![0x0a, 3, 0x0a, 1, b'k']);
+        let decoded = Msg::decode("build_event_stream.BuildMetadata", &bin).unwrap();
+        assert_eq!(decoded, md);
+
+        let mut inner = Msg::new("build_event_stream.BuildMetadata");
+        inner.put_map(
+            "metadata",
+            Value::Str("role".into()),
+            Value::Str("ci".into()),
+        );
+        let mut any = Msg::new("google.protobuf.Any");
+        any.set_str(
+            "type_url",
+            "type.googleapis.com/build_event_stream.BuildMetadata",
+        );
+        any.set_bytes("value", inner.encode_to_vec());
+        assert_eq!(
+            any.to_json(),
+            r#"{"@type":"type.googleapis.com/build_event_stream.BuildMetadata","metadata":{"role":"ci"}}"#
+        );
     }
 }

@@ -357,49 +357,56 @@ impl Parser<'_> {
     }
 
     fn parse_quant(&mut self, atom: Node, atom_start: usize) -> Result<Node, RegexError> {
-        let mut node = atom;
-        loop {
-            self.skip_comments();
-            let (min, max) = match self.peek() {
-                Some('*') => {
-                    self.pos += 1;
-                    (0, NO_MAX)
-                }
-                Some('+') => {
-                    self.pos += 1;
-                    (1, NO_MAX)
-                }
-                Some('?') => {
-                    self.pos += 1;
-                    (0, 1)
-                }
-                Some('{') => {
-                    let save = self.pos;
-                    match self.try_parse_braces() {
-                        Some(r) => r?,
-                        None => {
-                            self.pos = save;
-                            return self.err("Illegal repetition", save);
-                        }
+        self.skip_comments();
+        let (min, max) = match self.peek() {
+            Some('*') => {
+                self.pos += 1;
+                (0, NO_MAX)
+            }
+            Some('+') => {
+                self.pos += 1;
+                (1, NO_MAX)
+            }
+            Some('?') => {
+                self.pos += 1;
+                (0, 1)
+            }
+            Some('{') => {
+                let save = self.pos;
+                match self.try_parse_braces() {
+                    Some(r) => r?,
+                    None => {
+                        self.pos = save;
+                        return self.err("Illegal repetition", save);
                     }
                 }
-                _ => return Ok(node),
-            };
-            let kind = if self.eat('?') {
-                RepKind::Lazy
-            } else if self.eat('+') {
-                RepKind::Possessive
-            } else {
-                RepKind::Greedy
-            };
-            let _ = atom_start;
-            node = Node::Repeat {
-                node: Box::new(node),
-                min,
-                max,
-                kind,
-            };
+            }
+            _ => return Ok(atom),
+        };
+        let kind = if self.eat('?') {
+            RepKind::Lazy
+        } else if self.eat('+') {
+            RepKind::Possessive
+        } else {
+            RepKind::Greedy
+        };
+        let _ = atom_start;
+        self.skip_comments();
+        match self.peek() {
+            Some(ch @ ('*' | '+' | '?')) => {
+                return self.err(&format!("Dangling meta character '{ch}'"), self.pos);
+            }
+            Some('{') => {
+                return self.err("Illegal repetition", self.pos);
+            }
+            _ => {}
         }
+        Ok(Node::Repeat {
+            node: Box::new(atom),
+            min,
+            max,
+            kind,
+        })
     }
 
     /// Parses `{n}`, `{n,}`, `{n,m}` at `self.pos`.
@@ -773,7 +780,7 @@ impl Parser<'_> {
         }
         if c == 'E' {
             self.pos += 1;
-            return Ok(None);
+            return self.err("Illegal/unsupported escape sequence", self.pos - 1);
         }
         match self.parse_escape_common(start, false)? {
             Esc::Ch(ch) => Ok(Some(Node::Char(ch, ci))),
@@ -858,8 +865,18 @@ impl Parser<'_> {
         let body = if intersect.is_empty() {
             ClassNode::Union(items)
         } else {
-            intersect.push(ClassNode::Union(items));
-            ClassNode::Intersect(intersect)
+            if !items.is_empty() {
+                intersect.push(ClassNode::Union(items));
+            }
+            if intersect.len() == 1 && matches!(&intersect[0], ClassNode::Union(u) if u.is_empty())
+            {
+                return self.err("Bad class syntax", start);
+            }
+            if intersect.len() == 1 {
+                intersect.pop().unwrap()
+            } else {
+                ClassNode::Intersect(intersect)
+            }
         };
         let _ = start;
         Ok(if negate {
@@ -1419,6 +1436,13 @@ mod tests {
         assert_eq!(e.description, "Unmatched closing ')'");
         assert!(Regex::new("a{2,1}").is_err());
         assert!(Regex::new("\\p{Nope}").is_err());
+        let e = Regex::new("a**").unwrap_err();
+        assert_eq!(e.description, "Dangling meta character '*'");
+        let e = Regex::new("\\E").unwrap_err();
+        assert_eq!(e.description, "Illegal/unsupported escape sequence");
+        assert!(Regex::new("[&&]").is_err());
+        assert!(f("^[a-z&&]+$", "abc"));
+        assert!(!f("^[a-z&&]+$", "123"));
     }
 
     #[test]

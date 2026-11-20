@@ -121,6 +121,11 @@ impl BlazeRuntime {
             prune_unused_actions: flag("prune_unused_actions", false),
             output_groups: crate::loading::opt_list(parsed, "output_groups"),
             line_terminator: fopts.line_terminator.clone(),
+            explicit_aspects: flag("experimental_explicit_aspects", false),
+            incompatible_disable_target_default_provider_fields: flag(
+                "incompatible_disable_target_default_provider_fields",
+                false,
+            ),
             ..Default::default()
         };
         let tr = {

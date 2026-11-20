@@ -275,6 +275,7 @@ pub struct ProfilerOptions {
     pub include_primary_output: bool,
     pub include_target_label: bool,
     pub include_configuration: bool,
+    pub record_all_durations: bool,
     pub bazel_version: String,
     pub build_id: String,
     pub output_base: String,
@@ -307,6 +308,7 @@ impl ProfilerOptions {
             include_primary_output: false,
             include_target_label: false,
             include_configuration: false,
+            record_all_durations: false,
             bazel_version: crate::BUILD_TOOL_VERSION.to_string(),
             build_id: build_id.to_string(),
             output_base: output_base.to_string(),
@@ -321,9 +323,10 @@ impl ProfilerOptions {
         build_id: &str,
         output_base: &str,
     ) -> Result<Self, String> {
-        let b = |n: &str, d: bool| match get(n).as_deref() {
-            Some("0") | Some("false") | Some("no") => false,
-            Some(_) => true,
+        let b = |n: &str, d: bool| match get(n).map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("0") | Some("false") | Some("f") | Some("no") | Some("n") => false,
+            Some("1") | Some("true") | Some("t") | Some("yes") | Some("y") => true,
+            Some(_) => d,
             None => d,
         };
         let mut additional = Vec::new();
@@ -336,7 +339,9 @@ impl ProfilerOptions {
             }
         }
         let mut o = Self::new(build_id, output_base);
-        o.profiled_tasks = Self::default_tasks(&additional, b("record_full_profiler_data", false));
+        let record_full = b("record_full_profiler_data", false);
+        o.record_all_durations = record_full;
+        o.profiled_tasks = Self::default_tasks(&additional, record_full);
         let slim = get("slim_profile").or_else(|| get("experimental_slim_json_profile"));
         o.slim = match slim {
             Some(s) => SlimProfile::parse(&s)?,
@@ -345,9 +350,12 @@ impl ProfilerOptions {
         o.include_primary_output = b("experimental_profile_include_primary_output", false);
         o.include_target_label = b("experimental_profile_include_target_label", false);
         o.include_configuration = b("experimental_profile_include_target_configuration", false);
-        o.compress = match get("profile") {
-            Some(p) if !p.is_empty() => p.ends_with(".gz"),
-            _ => true,
+        o.compress = match get("experimental_json_trace_compression") {
+            Some(_) => b("experimental_json_trace_compression", true),
+            None => match get("profile") {
+                Some(p) if !p.is_empty() => p.ends_with(".gz"),
+                _ => true,
+            },
         };
         Ok(o)
     }
@@ -553,9 +561,11 @@ impl Profiler {
         if !self.is_profiling(task) {
             return;
         }
-        let min = task.min_duration_nanos();
-        if min >= 0 && dur_ns < min {
-            return;
+        if !self.opts.record_all_durations {
+            let min = task.min_duration_nanos();
+            if min >= 0 && dur_ns < min {
+                return;
+            }
         }
         let mut inner = self.inner.lock().unwrap();
         let tid = self.tid(&mut inner);
@@ -690,22 +700,18 @@ impl Profiler {
         }
     }
 
-    /// `action count` counter lane from `(start_ns, end_ns)` pairs of local actions.
+    /// `action count` counter lane from `(start_ns, end_ns)` pairs using fractional bucket overlap.
     pub fn add_action_count_series(&self, actions: &[(i64, i64)], bucket_ns: i64) {
         if actions.is_empty() || bucket_ns <= 0 {
             return;
         }
-        let end = actions.iter().map(|a| a.1).max().unwrap_or(0);
-        let n = (end / bucket_ns + 1) as usize;
-        let mut v = vec![0.0; n];
-        for (s, e) in actions {
-            let (a, b) = (
-                (s / bucket_ns).max(0) as usize,
-                (e / bucket_ns).max(0) as usize,
-            );
-            for x in v.iter_mut().take(b.min(n - 1) + 1).skip(a) {
-                *x += 1.0;
-            }
+        let mut ts = TimeSeries::new(0, bucket_ns);
+        for &(s, e) in actions {
+            ts.add_range(s, e, 1.0);
+        }
+        let v = ts.into_values();
+        if v.is_empty() {
+            return;
         }
         self.add_counter_series(
             "action count",
@@ -1043,7 +1049,79 @@ impl Merged {
     }
 }
 
+/// Fractional bucket accumulator (`TimeSeries.java`).
+#[derive(Debug, Clone)]
+pub struct TimeSeries {
+    start_ns: i64,
+    bucket_ns: i64,
+    values: Vec<f64>,
+}
+
+impl TimeSeries {
+    pub fn new(start_ns: i64, bucket_ns: i64) -> Self {
+        Self {
+            start_ns,
+            bucket_ns: bucket_ns.max(1),
+            values: Vec::new(),
+        }
+    }
+
+    /// Adds `value` weighted by the fraction of each bucket overlapped by `[range_start_ns, range_end_ns)`.
+    pub fn add_range(&mut self, range_start_ns: i64, range_end_ns: i64, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+        let s = range_start_ns.max(self.start_ns);
+        let e = range_end_ns;
+        if e <= s {
+            return;
+        }
+        let b = self.bucket_ns as f64;
+        let pos_start = (s - self.start_ns) as f64 / b;
+        let pos_end = (e - self.start_ns) as f64 / b;
+        let i_start = pos_start.floor() as usize;
+        let i_end = pos_end.floor() as usize;
+        let frac_end = pos_end - i_end as f64;
+        let needed = if frac_end > 0.0 {
+            i_end + 1
+        } else {
+            i_end.max(i_start + 1)
+        };
+        if self.values.len() < needed {
+            self.values.resize(needed, 0.0);
+        }
+        if i_start == i_end {
+            self.values[i_start] += value * (pos_end - pos_start);
+        } else {
+            self.values[i_start] += value * ((i_start + 1) as f64 - pos_start);
+            for slot in self.values.iter_mut().take(i_end).skip(i_start + 1) {
+                *slot += value;
+            }
+            if frac_end > 0.0 {
+                self.values[i_end] += value * frac_end;
+            }
+        }
+    }
+
+    pub fn resize_to_ns(&mut self, end_ns: i64) {
+        if end_ns <= self.start_ns {
+            return;
+        }
+        let n = ((end_ns - self.start_ns + self.bucket_ns - 1) / self.bucket_ns) as usize;
+        if self.values.len() < n {
+            self.values.resize(n, 0.0);
+        }
+    }
+
+    pub fn into_values(self) -> Vec<f64> {
+        self.values
+    }
+}
+
 fn fmt_double(v: f64) -> String {
+    if !v.is_finite() {
+        return "0.0".to_string();
+    }
     if v == v.trunc() && v.abs() < 1e7 {
         format!("{v:.1}")
     } else {
@@ -1741,5 +1819,40 @@ mod tests {
             java_date_string("2020-06-16T06:59:40.123Z"),
             "Tue Jun 16 06:59:40 UTC 2020"
         );
+    }
+
+    #[test]
+    fn time_series_fractional_buckets_and_full_profiler_durations() {
+        let mut ts = TimeSeries::new(0, 100);
+        // [25, 150) overlaps 0.75 of bucket 0 and 0.50 of bucket 1
+        ts.add_range(25, 150, 2.0);
+        // Exact boundary [100, 200) adds 1.0 to bucket 1 and does not allocate bucket 2
+        ts.add_range(100, 200, 1.0);
+        let vals = ts.into_values();
+        assert_eq!(vals.len(), 2);
+        assert!((vals[0] - 1.5).abs() < 1e-9);
+        assert!((vals[1] - 2.0).abs() < 1e-9);
+        assert_eq!(fmt_double(f64::NAN), "0.0");
+        assert_eq!(fmt_double(f64::INFINITY), "0.0");
+
+        let m: std::collections::HashMap<&str, &str> = [
+            ("record_full_profiler_data", "true"),
+            ("experimental_json_trace_compression", "false"),
+        ]
+        .into_iter()
+        .collect();
+        let opts = ProfilerOptions::from_flags(
+            &|n| m.get(n).map(|s| s.to_string()),
+            &|_| vec![],
+            "id",
+            "/ob",
+        )
+        .unwrap();
+        assert!(opts.record_all_durations);
+        let p = Profiler::with_options(opts);
+        // VFS_STAT normally has min_duration_nanos = 10ms; with record_all_durations, 100ns is kept.
+        p.log_simple_task(1_000, 100, ProfilerTask::VFS_STAT, "/pkg/BUILD");
+        let s = String::from_utf8(p.to_bytes()).unwrap();
+        assert!(s.contains("\"/pkg/BUILD\""), "{s}");
     }
 }

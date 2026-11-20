@@ -623,6 +623,24 @@ impl Parser {
         Ok(expr)
     }
 
+    pub fn parse_standalone_expr(&mut self) -> Result<Expr, StarlarkError> {
+        while matches!(self.peek(), TokenKind::Newline) {
+            self.next();
+        }
+        let expr = self.parse_expr()?;
+        while matches!(self.peek(), TokenKind::Newline) {
+            self.next();
+        }
+        if !matches!(self.peek(), TokenKind::Eof) {
+            let loc = self.loc();
+            let got = token_desc(self.peek());
+            return Err(StarlarkError(format!(
+                "{loc}: syntax error at {got}: expected 'newline'"
+            )));
+        }
+        Ok(expr)
+    }
+
     fn parse_lambda(&mut self) -> Result<Expr, StarlarkError> {
         let loc = self.loc();
         self.next(); // lambda

@@ -117,6 +117,11 @@ impl BlazeRuntime {
         };
         let mut printer = LabelPrinter {
             consistent: flag(parsed, "consistent_labels", false),
+            unambiguous: flag(
+                parsed,
+                "incompatible_unambiguous_label_stringification",
+                true,
+            ),
             ..Default::default()
         };
         for (apparent, canonical) in resolver.main_mapping.entries() {
@@ -187,7 +192,7 @@ impl BlazeRuntime {
                 "proto:include_synthetic_attribute_hash",
                 false,
             ),
-            proto_include_starlark_rule_env: flag(parsed, "proto:include_starlark_rule_env", false),
+            proto_include_starlark_rule_env: flag(parsed, "proto:include_starlark_rule_env", true),
             nodep_deps: flag(parsed, "nodep_deps", true),
             include_aspects: flag(parsed, "include_aspects", true),
             xml_line_numbers: flag(parsed, "xml:line_numbers", true),
@@ -195,7 +200,10 @@ impl BlazeRuntime {
             graph_node_limit: int_flag(parsed, "graph:node_limit", 512),
             graph_factored: flag(parsed, "graph:factored", true),
             graph_conditional_edges_limit: int_flag(parsed, "graph:conditional_edges_limit", 4),
-            ..FormatOpts::default()
+            aspect_deps: parsed
+                .get_str("aspect_deps")
+                .unwrap_or("conservative")
+                .to_string(),
         }
     }
 
@@ -235,16 +243,22 @@ impl BlazeRuntime {
                 let opts = self.query_opts(&parsed);
                 let fmt = self.query_format_opts(&parsed, &resolver, "label");
                 let output_file = parsed.get_str("output_file").filter(|s| !s.is_empty());
-                if let Some(out_path) = output_file {
+                let mut opened_file = if let Some(out_path) = output_file {
                     // `QueryRuntimeHelper.FileQueryRuntimeHelper.create`: open/truncate the file
                     // up front (failing immediately with exit 36 if the parent directory is
                     // missing or unwritable) before running the query.
                     let file_path = cwd.join(out_path);
-                    if let Err(code) = open_query_output_file(&file_path, stderr) {
-                        return code;
+                    match open_query_output_file(&file_path, stderr) {
+                        Ok(f) => Some((file_path, f)),
+                        Err(code) => return code,
                     }
-                    let outcome = zel_query::run_query(&resolver, &expr_str, &opts, &fmt);
-                    if let Err(code) = write_query_output_file(&file_path, &outcome.stdout, stderr)
+                } else {
+                    None
+                };
+                let outcome = zel_query::run_query(&resolver, &expr_str, &opts, &fmt);
+                if let Some((file_path, mut f)) = opened_file.take() {
+                    if let Err(code) =
+                        finish_query_output_file(&file_path, &mut f, &outcome.stdout, stderr)
                     {
                         return code;
                     }
@@ -253,7 +267,6 @@ impl BlazeRuntime {
                     }
                     return exit_from_code(outcome.exit_code);
                 }
-                let outcome = zel_query::run_query(&resolver, &expr_str, &opts, &fmt);
                 if parsed
                     .get_bool("experimental_ui_debug_all_events")
                     .unwrap_or(false)
@@ -277,11 +290,33 @@ impl BlazeRuntime {
 pub(crate) fn open_query_output_file(
     path: &std::path::Path,
     stderr: &mut Vec<u8>,
+) -> Result<std::fs::File, ExitCode> {
+    match std::fs::File::create(path) {
+        Ok(f) => Ok(f),
+        Err(_) => {
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: Could not open query output file {}", path.display()),
+            );
+            Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR)
+        }
+    }
+}
+
+pub(crate) fn finish_query_output_file(
+    path: &std::path::Path,
+    f: &mut std::fs::File,
+    data: &[u8],
+    stderr: &mut Vec<u8>,
 ) -> Result<(), ExitCode> {
-    if std::fs::File::create(path).is_err() {
+    use std::io::Write;
+    if f.write_all(data).is_err() || f.flush().is_err() {
         writeln_bytes(
             stderr,
-            &format!("ERROR: Could not open query output file {}", path.display()),
+            &format!(
+                "ERROR: Could not close query output file {}",
+                path.display()
+            ),
         );
         return Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR);
     }
@@ -296,29 +331,8 @@ pub(crate) fn write_query_output_file(
     data: &[u8],
     stderr: &mut Vec<u8>,
 ) -> Result<(), ExitCode> {
-    use std::io::Write;
-    match std::fs::File::create(path) {
-        Ok(mut f) => {
-            if f.write_all(data).is_err() || f.flush().is_err() {
-                writeln_bytes(
-                    stderr,
-                    &format!(
-                        "ERROR: Could not close query output file {}",
-                        path.display()
-                    ),
-                );
-                return Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR);
-            }
-            Ok(())
-        }
-        Err(_) => {
-            writeln_bytes(
-                stderr,
-                &format!("ERROR: Could not open query output file {}", path.display()),
-            );
-            Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR)
-        }
-    }
+    let mut f = open_query_output_file(path, stderr)?;
+    finish_query_output_file(path, &mut f, data, stderr)
 }
 
 /// `@Option(deprecationWarning = ...)` texts extracted from the HEAD sources (the generated flag

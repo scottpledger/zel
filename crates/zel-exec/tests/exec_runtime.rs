@@ -1296,3 +1296,225 @@ fn streamed_test_output_emits_full_trailers_after_setup_line_cleaning() {
         "expected full sharding diagnostic trailer in streamed output, got: {out2:?}"
     );
 }
+
+#[test]
+fn output_filter_compiled_once_and_applied_across_multiple_actions() {
+    let w = ws("output-filter-multi");
+    let cache = CompactPersistentActionCache::new();
+    let fs = LocalFileSystem::default();
+    let rt = runtime(&w, StrategyOptions::default(), 4.0);
+
+    let mk_action = |owner: &str, mnemonic: &str, out_name: &str| {
+        let owner_lbl = Label::parse_canonical(owner).unwrap();
+        let art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create(out_name),
+            owner_lbl.clone(),
+        );
+        ActionAnalysisMetadata::SpawnAction {
+            owner: owner_lbl,
+            mnemonic: mnemonic.into(),
+            progress_message: format!("Doing {mnemonic} {owner}"),
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!(
+                    "echo out-{out_name}; echo err-{out_name} >&2; echo ok > {}",
+                    art.exec_path.path_string()
+                ),
+            ],
+            env: BTreeMap::new(),
+            inherited_env: Default::default(),
+            unset_env: Default::default(),
+            inputs: Vec::new(),
+            outputs: vec![art],
+            execution_info: BTreeMap::from([("local".into(), String::new())]),
+            tools: Vec::new(),
+            java_compile: None,
+        }
+    };
+
+    // 1. Lazy compilation via `ExecOptions { output_filter: Some(...), ..Default::default() }`
+    // populates the shared `CompiledOutputFilter` once and reuses it across clones and actions.
+    let opts = ExecOptions {
+        runtime: Some(rt.clone()),
+        output_filter: Some("^//keep:(alpha|gamma)$".into()),
+        ..Default::default()
+    };
+    assert!(!opts.compiled_output_filter.is_compiled());
+    let cloned_opts = opts.clone();
+    let reporter = Reporter::new();
+
+    let a_match1 = mk_action("//keep:alpha", "Genrule", "keep/a.out");
+    let a_drop = mk_action("//drop:beta", "Genrule", "drop/b.out");
+    let a_match2 = mk_action("//keep:gamma", "Genrule", "keep/c.out");
+    let a_test = mk_action("//drop:unit_test", "TestRunner", "drop/t.out");
+
+    let r1 = execute_action_with(&a_match1, &w.execroot, &fs, &cache, &reporter, &opts).unwrap();
+    assert!(opts.compiled_output_filter.is_compiled());
+    // Cloned `ExecOptions` shares the exact same `Arc<OnceLock<...>>` cache.
+    assert!(cloned_opts.compiled_output_filter.is_compiled());
+    assert_eq!(String::from_utf8_lossy(&r1.stdout).trim(), "out-keep/a.out");
+    assert_eq!(String::from_utf8_lossy(&r1.stderr).trim(), "err-keep/a.out");
+
+    let r2 =
+        execute_action_with(&a_drop, &w.execroot, &fs, &cache, &reporter, &cloned_opts).unwrap();
+    assert!(r2.stdout.is_empty(), "expected filtered stdout to be empty");
+    assert!(r2.stderr.is_empty(), "expected filtered stderr to be empty");
+
+    let r3 =
+        execute_action_with(&a_match2, &w.execroot, &fs, &cache, &reporter, &cloned_opts).unwrap();
+    assert_eq!(String::from_utf8_lossy(&r3.stdout).trim(), "out-keep/c.out");
+    assert_eq!(String::from_utf8_lossy(&r3.stderr).trim(), "err-keep/c.out");
+
+    // `TestRunnerAction.showsOutputUnconditionally()` bypasses `--output_filter`.
+    let r4 =
+        execute_action_with(&a_test, &w.execroot, &fs, &cache, &reporter, &cloned_opts).unwrap();
+    assert_eq!(String::from_utf8_lossy(&r4.stdout).trim(), "out-drop/t.out");
+    assert_eq!(String::from_utf8_lossy(&r4.stderr).trim(), "err-drop/t.out");
+
+    // 2. Eager pre-compilation via `CompiledOutputFilter::from_pattern` + `Reporter` fallback.
+    let precompiled = CompiledOutputFilter::from_pattern("//eager:.*");
+    assert!(precompiled.is_compiled());
+    assert!(precompiled.show_output("//eager:.*", "//eager:target"));
+    assert!(!precompiled.show_output("//eager:.*", "//other:target"));
+
+    let rep_filtered = Reporter::new();
+    rep_filtered.set_output_filter(zel_events::OutputFilter::from_regex("^//rep:ok$").unwrap());
+    let opts_via_reporter = ExecOptions {
+        runtime: Some(rt),
+        ..Default::default()
+    };
+    let r5 = execute_action_with(
+        &mk_action("//rep:skip", "Genrule", "rep/skip.out"),
+        &w.execroot,
+        &fs,
+        &cache,
+        &rep_filtered,
+        &opts_via_reporter,
+    )
+    .unwrap();
+    assert!(r5.stdout.is_empty() && r5.stderr.is_empty());
+    let r6 = execute_action_with(
+        &mk_action("//rep:ok", "Genrule", "rep/ok.out"),
+        &w.execroot,
+        &fs,
+        &cache,
+        &rep_filtered,
+        &opts_via_reporter,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&r6.stdout).trim(), "out-rep/ok.out");
+}
+
+#[test]
+fn sandboxed_flaky_retry_cleans_failed_attempt_extras() {
+    use std::os::unix::fs::PermissionsExt;
+    use zel_exec::test_runner::{
+        install_test_setup, run_test_in, TestBaseEnv, TestExec, TestSpec, TestStatus,
+    };
+
+    let w = ws("sandboxed-flaky-extras");
+    let er = std::path::Path::new(w.execroot.path_string());
+    let rt = runtime(&w, StrategyOptions::default(), 4.0);
+    let setup = er.join("test-setup.sh");
+    install_test_setup(&setup).unwrap();
+    let rf = er.join("pkg/flaky.runfiles/_main/pkg");
+    std::fs::create_dir_all(&rf).unwrap();
+    let state_file = w.root.join("sandbox_retry_marker");
+    let _ = std::fs::remove_file(&state_file);
+    let bin = rf.join("flaky.sh");
+    std::fs::write(
+        &bin,
+        format!(
+            concat!(
+                "#!/bin/sh\n",
+                "set -eu\n",
+                "if [ ! -e \"{marker}\" ]; then\n",
+                "  touch \"{marker}\"\n",
+                "  printf 'warn1\\n' > \"$TEST_WARNINGS_OUTPUT_FILE\"\n",
+                "  printf 'unused1\\n' > \"$TEST_UNUSED_RUNFILES_LOG_FILE\"\n",
+                "  printf 'infra1\\n' > \"$TEST_INFRASTRUCTURE_FAILURE_FILE\"\n",
+                "  printf 'split1\\n' > \"$TEST_LOGSPLITTER_OUTPUT_FILE\"\n",
+                "  printf 'err1\\n' > \"$(dirname \"$XML_OUTPUT_FILE\")/test.err\"\n",
+                "  printf 'only1' > \"$TEST_UNDECLARED_OUTPUTS_DIR/fail_only.txt\"\n",
+                "  printf 'ann1' > \"$TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR/a.part\"\n",
+                "  exit 1\n",
+                "fi\n",
+                "exit 0\n",
+            ),
+            marker = state_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let log_dir = er.join("testlogs/pkg/flaky");
+    let spec = TestSpec {
+        label: "//pkg:flaky".into(),
+        exe_runfiles_path: "pkg/flaky.sh".into(),
+        exe_path: bin.clone(),
+        runfiles_dir: er.join("pkg/flaky.runfiles"),
+        exec_root: er.to_path_buf(),
+        workspace_name: "_main".into(),
+        test_log_dir: log_dir.clone(),
+        size: "small".into(),
+        timeout_secs: 30,
+        shard_count: 0,
+        runs_per_test: 1,
+        flaky_attempts: 2,
+        runs_per_test_detects_flakes: false,
+        run_under: None,
+        args: vec![],
+        env: BTreeMap::new(),
+        base_env: TestBaseEnv {
+            action_env: zel_util::action_env::EnvConfig::default().action_environment(false),
+            ..Default::default()
+        },
+        test_filter: None,
+        coverage: false,
+        coverage_script: None,
+        lcov_merger: None,
+        coverage_manifest: None,
+        zip_undeclared_outputs: false,
+        setup_script: setup,
+        kill_delay_ms: None,
+        test_tmpdir: None,
+        check_sharding_support: false,
+        test_runner_fail_fast: false,
+    };
+    let rep = Reporter::new();
+    let te = TestExec {
+        runtime: &rt,
+        reporter: &rep,
+        inputs: vec!["test-setup.sh".into()],
+        execution_info: BTreeMap::new(),
+        resources: zel_exec::resources::ResourceSet::default(),
+        announce_subcommands: false,
+        config_checksum: "deadbeef".into(),
+        cache_results: false,
+        streamed_out: None,
+    };
+    let res = run_test_in(&spec, Some(&te)).unwrap();
+    assert_eq!(res.status, TestStatus::Flaky);
+    assert_eq!(res.attempts.len(), 2);
+
+    let att = log_dir.join("test_attempts");
+    assert!(att.join("attempt_1.warnings").exists());
+    assert!(att.join("attempt_1.unused_runfiles_log").exists());
+    assert!(att.join("attempt_1.infrastructure_failure").exists());
+    assert!(att.join("attempt_1.raw_splitlogs/test.splitlogs").exists());
+    assert!(att.join("attempt_1.err").exists());
+    assert!(att.join("attempt_1.outputs/fail_only.txt").exists());
+    assert!(att.join("attempt_1.outputs_manifest/MANIFEST").exists());
+    assert!(att.join("attempt_1.outputs_manifest/ANNOTATIONS").exists());
+
+    assert!(!log_dir.join("test.warnings").exists());
+    assert!(!log_dir.join("test.unused_runfiles_log").exists());
+    assert!(!log_dir.join("test.infrastructure_failure").exists());
+    assert!(!log_dir.join("test.raw_splitlogs/test.splitlogs").exists());
+    assert!(!log_dir.join("test.err").exists());
+    assert!(!log_dir.join("test.outputs/fail_only.txt").exists());
+    assert!(!log_dir.join("test.outputs_manifest/MANIFEST").exists());
+    assert!(!log_dir.join("test.outputs_manifest/ANNOTATIONS").exists());
+}

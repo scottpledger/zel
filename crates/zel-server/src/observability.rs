@@ -32,6 +32,124 @@ use zel_proto::failure_details::{Category, FailureDetail};
 use zel_util::{DetailedExitCode, ExitCode};
 use zel_vfs::{FileSystem, PathFragment};
 
+struct ActionSpan {
+    start_ns: i64,
+    end_ns: i64,
+    start_millis: i64,
+    end_millis: i64,
+    is_local_spawn: bool,
+    cache_hit: bool,
+    mnemonic: String,
+    runner: String,
+    description: String,
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+}
+
+struct SamplerShared {
+    stop: std::sync::Mutex<bool>,
+    cv: std::sync::Condvar,
+    /// `(rel_ns, cpu_secs, rss_mb, load_avg)` samples collected every ~200ms.
+    samples: std::sync::Mutex<Vec<(i64, f64, f64, f64)>>,
+}
+
+struct ResourceSampler {
+    shared: Arc<SamplerShared>,
+    handle: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl ResourceSampler {
+    fn start(started: Instant) -> Self {
+        let shared = Arc::new(SamplerShared {
+            stop: std::sync::Mutex::new(false),
+            cv: std::sync::Condvar::new(),
+            samples: std::sync::Mutex::new(vec![(
+                0,
+                crate::sys::cpu_seconds(),
+                crate::sys::resident_bytes() as f64 / (1024.0 * 1024.0),
+                crate::sys::load_average(),
+            )]),
+        });
+        let sh = shared.clone();
+        let h = std::thread::Builder::new()
+            .name("zel-resource-sampler".into())
+            .spawn(move || {
+                let mut stop = sh.stop.lock().unwrap();
+                while !*stop {
+                    let (guard, _) = sh
+                        .cv
+                        .wait_timeout(stop, std::time::Duration::from_millis(200))
+                        .unwrap();
+                    stop = guard;
+                    if *stop {
+                        break;
+                    }
+                    let rel_ns = started.elapsed().as_nanos().min(i64::MAX as u128) as i64;
+                    sh.samples.lock().unwrap().push((
+                        rel_ns,
+                        crate::sys::cpu_seconds(),
+                        crate::sys::resident_bytes() as f64 / (1024.0 * 1024.0),
+                        crate::sys::load_average(),
+                    ));
+                }
+            })
+            .ok();
+        Self {
+            shared,
+            handle: std::sync::Mutex::new(h),
+        }
+    }
+
+    fn stop_and_take(&self, started: Instant) -> Vec<(i64, f64, f64, f64)> {
+        {
+            let mut stop = self.shared.stop.lock().unwrap();
+            *stop = true;
+            self.shared.cv.notify_all();
+        }
+        if let Some(h) = self.handle.lock().unwrap().take() {
+            let _ = h.join();
+        }
+        let rel_ns = started.elapsed().as_nanos().max(1).min(i64::MAX as u128) as i64;
+        let mut samples = self.shared.samples.lock().unwrap();
+        samples.push((
+            rel_ns,
+            crate::sys::cpu_seconds(),
+            crate::sys::resident_bytes() as f64 / (1024.0 * 1024.0),
+            crate::sys::load_average(),
+        ));
+        std::mem::take(&mut *samples)
+    }
+}
+
+impl Drop for ResourceSampler {
+    fn drop(&mut self) {
+        {
+            let mut stop = self.shared.stop.lock().unwrap();
+            *stop = true;
+            self.shared.cv.notify_all();
+        }
+        if let Some(h) = self.handle.lock().unwrap().take() {
+            let _ = h.join();
+        }
+    }
+}
+
+static CUMULATIVE_ANALYSES: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static CUMULATIVE_BUILDS: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+#[derive(Default)]
+struct AnalysisStats {
+    packages_loaded: i64,
+    targets_configured: i64,
+    actions_created: i64,
+    source_artifacts: usize,
+    output_artifacts: usize,
+    top_level_artifacts: usize,
+    analysis_done_ns: i64,
+    created_by_mnemonic: std::collections::BTreeMap<String, i64>,
+    rule_classes: std::collections::BTreeMap<String, (u64, u64)>,
+}
+
 pub(crate) struct BuildObserver {
     pub reporter: Arc<Reporter>,
     pub profiler: Arc<Profiler>,
@@ -39,18 +157,25 @@ pub(crate) struct BuildObserver {
     ui: Arc<UiEventHandler>,
     out: Arc<BufferOutErr>,
     profile_path: Option<(String, bool)>,
+    sampler: Option<ResourceSampler>,
     bes: Option<Arc<bes::BesTransport>>,
     setup_errors: std::sync::Mutex<Vec<String>>,
     started: Instant,
+    cpu_at_start: f64,
     command: String,
-    named_sets: std::sync::atomic::AtomicU64,
+    perform_build: bool,
+    record_all_mnemonics: bool,
+    memory_profile: bool,
+    namer: std::sync::Mutex<bep::ArtifactGroupNamer>,
+    workspace_dir: std::sync::Mutex<String>,
+    stats: std::sync::Mutex<AnalysisStats>,
     /// Events announced by `BuildStarted` that Bazel posts later (canonical command line, workspace
     /// status): released in order by `analysis_done`, or by `finish` if analysis never completed.
     late_nodes: std::sync::Mutex<std::collections::VecDeque<zel_events::bep::BuildEventNode>>,
     patterns: std::sync::Mutex<Vec<String>>,
     analysis_complete: std::sync::atomic::AtomicBool,
     bep_enabled: bool,
-    bep_files: (Option<String>, Option<String>, Option<String>),
+    bep_opts: BepOptions,
     build_metadata: Vec<(String, String)>,
     convenience_symlinks_bep_event: bool,
     convenience_symlinks: std::sync::Mutex<Vec<(String, String, bool)>>,
@@ -82,11 +207,11 @@ struct ActionObserver {
     bep: bool,
     publish_all: bool,
     config_id: std::sync::Mutex<String>,
+    execroot: std::sync::Mutex<String>,
     exec_log: Option<ExecutionLogWriter>,
     include_label: bool,
-    /// `(start_ns, end_ns, is_local_spawn, description)` of every finished action, for the
-    /// `action count` counters and the critical path component of the profile.
-    spans: std::sync::Mutex<Vec<(i64, i64, bool, String)>>,
+    /// Finished action spans for `action count` counters, `BuildMetrics`, and critical path.
+    spans: std::sync::Mutex<Vec<ActionSpan>>,
 }
 
 impl ActionListener for ActionObserver {
@@ -123,14 +248,49 @@ impl ActionListener for ActionObserver {
             ProfilerTask::ACTION_COMPLETE,
             &a.progress_message,
         );
-        self.spans.lock().unwrap().push((
-            (end_ns - dur_ns).max(0),
+        let runner_name = if r.cache_hit {
+            "disk cache hit".to_string()
+        } else if let Some(rn) = &r.runner {
+            rn.clone()
+        } else if a.is_spawn {
+            "local".to_string()
+        } else {
+            "internal".to_string()
+        };
+        self.spans.lock().unwrap().push(ActionSpan {
+            start_ns: (end_ns - dur_ns).max(0),
             end_ns,
-            a.is_spawn && !r.cache_hit,
-            a.progress_message.clone(),
-        ));
+            start_millis: r.start_millis,
+            end_millis: r.start_millis + r.wall_time_ms as i64,
+            is_local_spawn: a.is_spawn && !r.cache_hit,
+            cache_hit: r.cache_hit,
+            mnemonic: a.mnemonic.clone(),
+            runner: runner_name,
+            description: a.progress_message.clone(),
+            inputs: a.inputs.iter().map(|(p, _)| p.clone()).collect(),
+            outputs: a.outputs.clone(),
+        });
         if self.bep && (!r.success || self.publish_all) {
             let cfg = self.config_id.lock().unwrap().clone();
+            let po_path = if r.success {
+                let er = self.execroot.lock().unwrap().clone();
+                let rel = a
+                    .outputs
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(a.id.as_str());
+                if !er.is_empty() && !rel.is_empty() {
+                    let candidate = format!("{er}/{rel}");
+                    std::fs::metadata(&candidate)
+                        .ok()
+                        .filter(|m| m.is_file())
+                        .map(|_| candidate)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let fd = (!r.success).then(|| {
                 FailureDetail::new(
                     r.error.clone().unwrap_or_else(|| {
@@ -142,8 +302,9 @@ impl ActionListener for ActionObserver {
                     }),
                 )
             });
-            reporter.post_bep_node(BepBuilder::action_executed(
+            reporter.post_bep_node(BepBuilder::action_executed_with_primary_output_path(
                 &a.id,
+                po_path.as_deref(),
                 &a.owner,
                 &cfg,
                 &a.mnemonic,
@@ -244,6 +405,12 @@ impl BuildObserver {
         let ui = Arc::new(UiEventHandler::new(out.clone(), ui_opts));
         let reporter = Arc::new(Reporter::new());
         reporter.add_handler(ui.clone());
+        if let Some(pat) = get("output_filter") {
+            match zel_events::OutputFilter::from_regex(&pat) {
+                Ok(f) => reporter.set_output_filter(f),
+                Err(e) => setup_errors.push(format!("--output_filter: {e}")),
+            }
+        }
 
         // Build Event Protocol.
         let bep_opts = BepOptions::from_flags(&get, &get_all);
@@ -345,11 +512,29 @@ impl BuildObserver {
             bep: bep_enabled,
             publish_all: bep_opts.publish_all_actions,
             config_id: std::sync::Mutex::new("none".to_string()),
+            execroot: std::sync::Mutex::new(String::new()),
             exec_log,
             include_label: false,
             spans: Default::default(),
         });
         reporter.add_action_listener(actions.clone());
+
+        let started = Instant::now();
+        let cpu_at_start = crate::sys::cpu_seconds();
+        let sampler = profile_path
+            .as_ref()
+            .map(|_| ResourceSampler::start(started));
+        let parse_bool =
+            |n: &str, d: bool| match get(n).map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                Some("0") | Some("false") | Some("f") | Some("no") | Some("n") => false,
+                Some("1") | Some("true") | Some("t") | Some("yes") | Some("y") => true,
+                Some(_) => d,
+                None => d,
+            };
+        let perform_build = parse_bool("build", true);
+        let record_all_mnemonics =
+            parse_bool("experimental_record_metrics_for_all_mnemonics", false);
+        let memory_profile = get("memory_profile").is_some_and(|s| !s.is_empty());
 
         Self {
             reporter,
@@ -358,20 +543,23 @@ impl BuildObserver {
             ui,
             out,
             profile_path,
+            sampler,
             bes: bes_t,
             setup_errors: std::sync::Mutex::new(setup_errors),
-            started: Instant::now(),
+            started,
+            cpu_at_start,
             command: command.to_string(),
-            named_sets: std::sync::atomic::AtomicU64::new(0),
+            perform_build,
+            record_all_mnemonics,
+            memory_profile,
+            namer: std::sync::Mutex::new(bep::ArtifactGroupNamer::new()),
+            workspace_dir: Default::default(),
+            stats: Default::default(),
             late_nodes: Default::default(),
             patterns: Default::default(),
             analysis_complete: Default::default(),
             bep_enabled,
-            bep_files: (
-                bep_opts.json_file.clone(),
-                bep_opts.binary_file.clone(),
-                bep_opts.text_file.clone(),
-            ),
+            bep_opts,
             build_metadata,
             convenience_symlinks_bep_event: parsed
                 .and_then(|p| p.get_bool("experimental_convenience_symlinks_bep_event"))
@@ -404,6 +592,7 @@ impl BuildObserver {
         server_pid: u32,
         explicit_options: &[String],
     ) {
+        *self.workspace_dir.lock().unwrap() = workspace.to_string();
         if !self.bep_enabled {
             return;
         }
@@ -501,16 +690,66 @@ impl BuildObserver {
         // tracker state is maintained here (see AGENT_NOTES.md).
         self.analysis_complete
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        CUMULATIVE_ANALYSES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.perform_build {
+            CUMULATIVE_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.ui.analysis_complete_silent();
         self.ui.execution_phase_started();
-        self.ui
-            .set_total_actions(configured.iter().map(|c| c.actions.len() as u64).sum());
+        let total_actions: u64 = configured.iter().map(|c| c.actions.len() as u64).sum();
+        self.ui.set_total_actions(total_actions);
+        {
+            let mut st = self.stats.lock().unwrap();
+            let mut pkgs = HashSet::new();
+            let mut srcs = HashSet::new();
+            let mut outs = HashSet::new();
+            let mut top_arts = 0usize;
+            for ct in configured {
+                pkgs.insert(ct.label.package_identifier().clone());
+                let entry = st
+                    .rule_classes
+                    .entry(ct.rule_class.clone())
+                    .or_insert((0, 0));
+                entry.0 += 1;
+                entry.1 += ct.actions.len() as u64;
+                for act in &ct.actions {
+                    *st.created_by_mnemonic
+                        .entry(act.mnemonic().to_string())
+                        .or_insert(0) += 1;
+                    for inp in act.inputs() {
+                        if inp.is_source {
+                            srcs.insert(inp.exec_path.path_string().to_string());
+                        }
+                    }
+                    for out in act.outputs() {
+                        outs.insert(out.exec_path.path_string().to_string());
+                    }
+                }
+                if roots.contains(&ct.label.canonical_form()) {
+                    top_arts += ct
+                        .default_info
+                        .files
+                        .iter()
+                        .chain(ct.default_info.executable.iter())
+                        .filter(|a| !a.is_source)
+                        .count();
+                }
+            }
+            st.packages_loaded = pkgs.len() as i64;
+            st.targets_configured = configured.len() as i64;
+            st.actions_created = total_actions as i64;
+            st.source_artifacts = srcs.len();
+            st.output_artifacts = outs.len();
+            st.top_level_artifacts = top_arts;
+            st.analysis_done_ns = self.profiler.now_ns();
+        }
         if !self.bep_enabled {
             return;
         }
         let cfg_id = bep_config_id(&self.command, cpu, mode);
         self.reporter.set_default_config_id(&cfg_id);
         *self.actions.config_id.lock().unwrap() = cfg_id.clone();
+        *self.actions.execroot.lock().unwrap() = execroot.to_string();
         let root_labels: Vec<String> = configured
             .iter()
             .map(|c| c.label.canonical_form())
@@ -562,7 +801,7 @@ impl BuildObserver {
                 &format!("{} rule", ct.rule_class),
                 &[],
                 None,
-                true,
+                self.perform_build,
             );
             self.reporter.post_bep_node(n);
         }
@@ -581,18 +820,19 @@ impl BuildObserver {
         max_named_set_entries: Option<usize>,
         test_units: &std::collections::HashMap<String, (i32, i32)>,
     ) {
-        if !self.bep_enabled {
+        if !self.bep_enabled || !self.perform_build {
             return;
         }
         let cfg_id = bep_config_id(&self.command, cpu, mode);
-        let _ = execroot;
         for ct in configured {
             let l = ct.label.canonical_form();
             if !roots.contains(&l) {
                 continue;
             }
             let success = !failed.contains(&l);
-            let mut groups: Vec<(String, Vec<String>, bool)> = Vec::new();
+            let mut groups: Vec<bep::BepOutputGroup> = Vec::new();
+            let mut directory_outputs: Vec<zel_proto::dynamic::Msg> = Vec::new();
+            let mut seen_dir = HashSet::new();
             if success {
                 let mut all: Vec<(String, Vec<_>)> = vec![(
                     "default".to_string(),
@@ -613,38 +853,81 @@ impl BuildObserver {
                     ));
                 }
                 for (name, files) in all {
-                    if files.is_empty() {
+                    let mut seen = HashSet::new();
+                    let dedup_files: Vec<_> = files
+                        .into_iter()
+                        .filter(|a| seen.insert(a.exec_path.path_string().to_string()))
+                        .collect();
+                    if dedup_files.is_empty() {
                         continue;
                     }
-                    let msgs: Vec<_> = files
+                    let msgs: Vec<_> = dedup_files
                         .iter()
                         .map(|a| {
                             let p = a.exec_path.path_string().to_string();
                             let (prefix, rest) = split_exec_path(&p);
-                            BepBuilder::file(&rest, &format!("{execroot}/{p}"), &prefix, None, None)
+                            if a.is_tree_artifact {
+                                let dir_msg = BepBuilder::file_without_uri(&rest, &prefix);
+                                if seen_dir.insert(p) {
+                                    directory_outputs.push(dir_msg.clone());
+                                }
+                                dir_msg
+                            } else if a.is_unresolved_symlink {
+                                BepBuilder::file_without_uri(&rest, &prefix)
+                            } else {
+                                let full_path = format!("{execroot}/{p}");
+                                let (len, dig) = match zel_util::sha256::hash_file(
+                                    std::path::Path::new(&full_path),
+                                ) {
+                                    Ok((bytes_len, hex)) => (Some(bytes_len as i64), Some(hex)),
+                                    Err(_) => (None, None),
+                                };
+                                BepBuilder::file(&rest, &full_path, &prefix, len, dig.as_deref())
+                            }
                         })
                         .collect();
-                    let key = self
-                        .named_sets
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                        .to_string();
-                    let (root_id, nodes) =
-                        BepBuilder::named_sets(&key, msgs, max_named_set_entries);
-                    for n in nodes {
-                        self.reporter.post_bep_node(n);
+                    let group_mode = self.bep_opts.output_group_mode(&name);
+                    let mut file_sets = Vec::new();
+                    let mut inline_files = Vec::new();
+                    if matches!(
+                        group_mode,
+                        bep::OutputGroupMode::NamedSetOfFilesOnly | bep::OutputGroupMode::Both
+                    ) {
+                        let (set_id, nodes) = self
+                            .namer
+                            .lock()
+                            .unwrap()
+                            .maybe_deposit(msgs.clone(), max_named_set_entries);
+                        for n in nodes {
+                            self.reporter.post_bep_node(n);
+                        }
+                        file_sets.push(set_id);
                     }
-                    groups.push((
+                    if matches!(
+                        group_mode,
+                        bep::OutputGroupMode::InlineOnly | bep::OutputGroupMode::Both
+                    ) {
+                        inline_files = msgs;
+                    }
+                    groups.push(bep::BepOutputGroup {
                         name,
-                        vec![root_id
-                            .get_msg("named_set")
-                            .map(|m| m.get_str("id").to_string())
-                            .unwrap_or(key)],
-                        false,
-                    ));
+                        file_sets,
+                        inline_files,
+                        incomplete: false,
+                    });
                 }
             }
             let tags: Vec<String> = Vec::new();
-            let mut node = BepBuilder::target_completed(&l, &cfg_id, success, &groups, &tags, None);
+            let mut node = BepBuilder::target_completed_with_groups(
+                &l,
+                &cfg_id,
+                None,
+                success,
+                &groups,
+                &directory_outputs,
+                &tags,
+                None,
+            );
             // Named sets are chained in through progress events rather than announced here.
             node.children = Vec::new();
             if !success {
@@ -665,8 +948,8 @@ impl BuildObserver {
             }
             if success {
                 if let Some((runs, shards)) = test_units.get(&l) {
-                    for run in 1..=*runs {
-                        for shard in 1..=*shards {
+                    for run in 0..*runs {
+                        for shard in 0..*shards {
                             node.children
                                 .push(ids::test_result(&l, &cfg_id, run, shard, 1));
                         }
@@ -777,70 +1060,158 @@ impl BuildObserver {
             }
         }
         self.profiler.mark_phase(ProfilePhase::FINISH);
+        let mut critical_path_ns = 0i64;
         {
-            // `action count` / `action count (local)` lanes and the critical path component.
-            let spans = self.actions.spans.lock().unwrap().clone();
+            // `action count` / `action count (local)` lanes and multi-component critical path.
+            let spans = self.actions.spans.lock().unwrap();
             if !spans.is_empty() {
                 let bucket = 200_000_000i64;
-                let all: Vec<(i64, i64)> = spans.iter().map(|s| (s.0, s.1)).collect();
+                let all: Vec<(i64, i64)> = spans.iter().map(|s| (s.start_ns, s.end_ns)).collect();
                 self.profiler.add_action_count_series(&all, bucket);
-                let local: Vec<(i64, i64)> =
-                    spans.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect();
+                let local: Vec<(i64, i64)> = spans
+                    .iter()
+                    .filter(|s| s.is_local_spawn)
+                    .map(|s| (s.start_ns, s.end_ns))
+                    .collect();
                 if !local.is_empty() {
-                    let end = local.iter().map(|a| a.1).max().unwrap_or(0);
-                    let n = (end / bucket + 1) as usize;
-                    let mut v = vec![0.0; n];
-                    for (st, en) in &local {
-                        for x in v
-                            .iter_mut()
-                            .take(((en / bucket).max(0) as usize).min(n - 1) + 1)
-                            .skip((st / bucket).max(0) as usize)
-                        {
-                            *x += 1.0;
+                    let mut ts = profiler::TimeSeries::new(0, bucket);
+                    for &(st, en) in &local {
+                        ts.add_range(st, en, 1.0);
+                    }
+                    let v = ts.into_values();
+                    if !v.is_empty() {
+                        self.profiler.add_counter_series(
+                            "action count (local)",
+                            None,
+                            0,
+                            bucket,
+                            &[("action".to_string(), v)],
+                        );
+                    }
+                }
+                let mut producer: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::new();
+                for (i, s) in spans.iter().enumerate() {
+                    for out in &s.outputs {
+                        producer.entry(out.as_str()).or_insert(i);
+                    }
+                }
+                let mut cum_ns = vec![0i64; spans.len()];
+                let mut pred: Vec<Option<usize>> = vec![None; spans.len()];
+                for (i, s) in spans.iter().enumerate() {
+                    let mut seen_p = HashSet::new();
+                    let mut best_p: Option<(usize, i64)> = None;
+                    for inp in &s.inputs {
+                        if let Some(&p) = producer.get(inp.as_str()) {
+                            if p < i && seen_p.insert(p) {
+                                let pf = cum_ns[p];
+                                if best_p.map(|(_, b)| pf > b).unwrap_or(true) {
+                                    best_p = Some((p, pf));
+                                }
+                            }
                         }
                     }
-                    self.profiler.add_counter_series(
-                        "action count (local)",
-                        None,
-                        0,
-                        bucket,
-                        &[("action".to_string(), v)],
-                    );
+                    pred[i] = best_p.map(|(p, _)| p);
+                    let dur = (s.end_ns - s.start_ns).max(0);
+                    cum_ns[i] = best_p.map(|(_, b)| b).unwrap_or(0) + dur;
                 }
-                if let Some(longest) = spans.iter().max_by_key(|s| s.1 - s.0) {
-                    self.profiler.log_critical_path_component(
-                        longest.0,
-                        longest.1 - longest.0,
-                        &format!("action '{}'", longest.3),
-                    );
+                let mut best_root: Option<(usize, i64)> = None;
+                for (i, &c) in cum_ns.iter().enumerate() {
+                    if best_root.map(|(_, b)| c > b).unwrap_or(true) {
+                        best_root = Some((i, c));
+                    }
+                }
+                if let Some((root_idx, total_ns)) = best_root {
+                    critical_path_ns = total_ns;
+                    let mut cur = Some(root_idx);
+                    while let Some(ci) = cur {
+                        let s = &spans[ci];
+                        self.profiler.log_critical_path_component(
+                            s.start_ns,
+                            (s.end_ns - s.start_ns).max(0),
+                            &format!("action '{}'", s.description),
+                        );
+                        cur = pred[ci];
+                    }
                 }
             }
         }
-        // Counter lanes of `CollectLocalResourceUsage` (first and last sample of the command).
+        // Counter lanes of `CollectLocalResourceUsage`.
         {
             let wall = self.started.elapsed();
-            let ns = wall.as_nanos().max(1) as i64;
-            let cpu = (crate::sys::cpu_seconds() / wall.as_secs_f64().max(0.001)).min(64.0);
-            let rss_mb = crate::sys::resident_bytes() as f64 / (1024.0 * 1024.0);
-            let load = crate::sys::load_average();
-            let lanes: [(&str, f64); 8] = [
-                ("CPU usage (Bazel)", cpu),
-                ("CPU usage (total)", cpu),
-                ("Memory usage (Bazel)", rss_mb),
-                ("Memory usage (total)", rss_mb),
-                ("Network Down usage (total)", 0.0),
-                ("Network Up usage (total)", 0.0),
-                ("System load average", load),
-                ("Total worker memory usage", 0.0),
-            ];
-            for (lane, v) in lanes {
-                self.profiler.add_counter_series(
-                    lane,
-                    None,
-                    0,
-                    ns,
-                    &[(lane.to_string(), vec![v, v])],
-                );
+            let ns = wall.as_nanos().max(1).min(i64::MAX as u128) as i64;
+            let samples = self
+                .sampler
+                .as_ref()
+                .map(|s| s.stop_and_take(self.started))
+                .unwrap_or_default();
+            if samples.len() >= 3 && ns >= 200_000_000 {
+                let bucket = 200_000_000i64;
+                let mut cpu_ts = profiler::TimeSeries::new(0, bucket);
+                let mut rss_ts = profiler::TimeSeries::new(0, bucket);
+                let mut load_ts = profiler::TimeSeries::new(0, bucket);
+                for win in samples.windows(2) {
+                    let (t0, c0, _, _) = win[0];
+                    let (t1, c1, r1, l1) = win[1];
+                    if t1 <= t0 {
+                        continue;
+                    }
+                    let dt_s = ((t1 - t0) as f64 / 1_000_000_000.0).max(1e-6);
+                    let cpu_cores = ((c1 - c0).max(0.0) / dt_s).min(64.0);
+                    cpu_ts.add_range(t0, t1, cpu_cores);
+                    rss_ts.add_range(t0, t1, r1);
+                    load_ts.add_range(t0, t1, l1);
+                }
+                let cpu_v = cpu_ts.into_values();
+                let rss_v = rss_ts.into_values();
+                let load_v = load_ts.into_values();
+                let zeroes = vec![0.0; cpu_v.len().max(1)];
+                let series: [(&str, &[f64]); 8] = [
+                    ("CPU usage (Bazel)", &cpu_v),
+                    ("CPU usage (total)", &cpu_v),
+                    ("Memory usage (Bazel)", &rss_v),
+                    ("Memory usage (total)", &rss_v),
+                    ("Network Down usage (total)", &zeroes),
+                    ("Network Up usage (total)", &zeroes),
+                    ("System load average", &load_v),
+                    ("Total worker memory usage", &zeroes),
+                ];
+                for (lane, v) in series {
+                    if !v.is_empty() {
+                        self.profiler.add_counter_series(
+                            lane,
+                            None,
+                            0,
+                            bucket,
+                            &[(lane.to_string(), v.to_vec())],
+                        );
+                    }
+                }
+            } else {
+                let cpu = ((crate::sys::cpu_seconds() - self.cpu_at_start).max(0.0)
+                    / wall.as_secs_f64().max(0.001))
+                .min(64.0);
+                let rss_mb = crate::sys::resident_bytes() as f64 / (1024.0 * 1024.0);
+                let load = crate::sys::load_average();
+                let lanes: [(&str, f64); 8] = [
+                    ("CPU usage (Bazel)", cpu),
+                    ("CPU usage (total)", cpu),
+                    ("Memory usage (Bazel)", rss_mb),
+                    ("Memory usage (total)", rss_mb),
+                    ("Network Down usage (total)", 0.0),
+                    ("Network Up usage (total)", 0.0),
+                    ("System load average", load),
+                    ("Total worker memory usage", 0.0),
+                ];
+                for (lane, v) in lanes {
+                    self.profiler.add_counter_series(
+                        lane,
+                        None,
+                        0,
+                        ns,
+                        &[(lane.to_string(), vec![v, v])],
+                    );
+                }
             }
         }
         let analysis_ran = self
@@ -882,6 +1253,9 @@ impl BuildObserver {
                 },
                 "",
             );
+            for (url, ok) in zel_bzlmod::registry::take_recorded_fetches() {
+                r.post_bep_node(BepBuilder::fetch(&url, ok));
+            }
             if analysis_ran {
                 if self.convenience_symlinks_bep_event {
                     let links = self.convenience_symlinks.lock().unwrap().clone();
@@ -894,14 +1268,14 @@ impl BuildObserver {
                     failure,
                 ));
             } else {
-                // Analysis never completed (e.g. a missing target): the empty pattern expansion
-                // and the workspace status precede `BuildFinished`; the canonical command line
-                // (not announced as a child of anything posted yet) trails it.
+                // Analysis never completed (e.g. a missing target): emit pattern expansion and
+                // all late events announced by `BuildStarted` (canonical command line, workspace
+                // status) prior to `BuildFinished` so none are erroneously aborted.
                 let pats = self.patterns.lock().unwrap().clone();
                 r.post_bep_node(BepBuilder::pattern_expanded(&pats, &[]));
-                let ws = self.late_nodes.lock().unwrap().pop_back();
-                if let Some(ws) = ws {
-                    r.post_bep_node(ws);
+                let rest: Vec<_> = self.late_nodes.lock().unwrap().drain(..).collect();
+                for n in rest {
+                    r.post_bep_node(n);
                 }
                 r.post_bep_node(BepBuilder::build_finished(
                     name,
@@ -909,31 +1283,72 @@ impl BuildObserver {
                     zel_events::now_millis(),
                     failure,
                 ));
-                let rest: Vec<_> = self.late_nodes.lock().unwrap().drain(..).collect();
-                for n in rest {
-                    r.post_bep_node(n);
-                }
             }
             r.post_bep_node(BepBuilder::build_tool_logs(&[]));
-            r.post_bep_node(BepBuilder::build_metrics(zel_proto::dynamic::Msg::new(
-                "build_event_stream.BuildMetrics",
-            )));
+            r.post_bep_node(BepBuilder::build_metrics(
+                self.build_metrics_msg(critical_path_ns),
+            ));
             if let Some(b) = &self.bes {
                 b.set_success(num == 0);
             }
             r.finish_bep();
-            for (path, fmt) in [
-                (&self.bep_files.0, bep::BepFormat::Json),
-                (&self.bep_files.1, bep::BepFormat::Binary),
-                (&self.bep_files.2, bep::BepFormat::Text),
+            let ws_dir = self.workspace_dir.lock().unwrap().clone();
+            let resolve_bep_path = |raw: &str| -> String {
+                let p = std::path::Path::new(raw);
+                if p.is_absolute() || ws_dir.is_empty() {
+                    raw.to_string()
+                } else {
+                    std::path::Path::new(&ws_dir)
+                        .join(p)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+            };
+            let mut wrote_any_bep_file = false;
+            let mut file_write_failed = false;
+            for (path, fmt, conv) in [
+                (
+                    &self.bep_opts.json_file,
+                    bep::BepFormat::Json,
+                    self.bep_opts.json_path_conversion,
+                ),
+                (
+                    &self.bep_opts.binary_file,
+                    bep::BepFormat::Binary,
+                    self.bep_opts.binary_path_conversion,
+                ),
+                (
+                    &self.bep_opts.text_file,
+                    bep::BepFormat::Text,
+                    self.bep_opts.text_path_conversion,
+                ),
             ] {
-                if let Some(p) = path {
-                    let _ = r.force_write_bep_file(fs, &PathFragment::create(p), fmt);
+                if let Some(raw) = path {
+                    let resolved = resolve_bep_path(raw);
+                    let pf = PathFragment::create(&resolved);
+                    match r.force_write_bep_file_with_options(
+                        fs,
+                        &pf,
+                        fmt,
+                        conv,
+                        self.bep_opts.remote_bytestream_uri_prefix.as_deref(),
+                    ) {
+                        Ok(()) => {
+                            wrote_any_bep_file = wrote_any_bep_file || fs.exists(&pf, true);
+                        }
+                        Err(e) => {
+                            file_write_failed = true;
+                            r.handle(Event::error(
+                                None,
+                                format!("Unable to write to '{resolved}': {e}"),
+                            ));
+                        }
+                    }
                 }
             }
             let errs = s.close_errors();
-            if !errs.is_empty() {
-                if self.bes.is_some() {
+            if !errs.is_empty() || file_write_failed {
+                if self.bes.is_some() && !errs.is_empty() {
                     r.handle(Event::info(""));
                     r.handle(Event::info(""));
                 }
@@ -946,25 +1361,13 @@ impl BuildObserver {
                     r.handle(Event::error(None, msg));
                 }
                 if code == ExitCode::SUCCESS {
-                    code = ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR;
+                    code = if file_write_failed && errs.is_empty() {
+                        ExitCode::LOCAL_ENVIRONMENTAL_ERROR
+                    } else {
+                        ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR
+                    };
                 }
-            } else if code != ExitCode::LOCAL_ENVIRONMENTAL_ERROR
-                && (self
-                    .bep_files
-                    .0
-                    .as_ref()
-                    .is_some_and(|p| std::path::Path::new(p).exists())
-                    || self
-                        .bep_files
-                        .1
-                        .as_ref()
-                        .is_some_and(|p| std::path::Path::new(p).exists())
-                    || self
-                        .bep_files
-                        .2
-                        .as_ref()
-                        .is_some_and(|p| std::path::Path::new(p).exists()))
-            {
+            } else if code != ExitCode::LOCAL_ENVIRONMENTAL_ERROR && wrote_any_bep_file {
                 r.handle(Event::info(
                     "Build Event Protocol files produced successfully.",
                 ));
@@ -1025,8 +1428,204 @@ impl BuildObserver {
             .lock()
             .unwrap()
             .iter()
-            .map(|s| s.3.clone())
+            .map(|s| s.description.clone())
             .collect()
+    }
+
+    fn build_metrics_msg(&self, critical_path_ns: i64) -> zel_proto::dynamic::Msg {
+        use zel_proto::dynamic::Msg;
+        let mut m = Msg::new("build_event_stream.BuildMetrics");
+        let st = self.stats.lock().unwrap();
+        let spans = self.actions.spans.lock().unwrap();
+
+        // ActionSummary
+        let mut action_summary = Msg::new("build_event_stream.BuildMetrics.ActionSummary");
+        action_summary.set_int("actions_created", st.actions_created);
+        action_summary.set_int("actions_created_not_including_aspects", st.actions_created);
+        let executed_count = spans.iter().filter(|s| !s.cache_hit).count() as i64;
+        action_summary.set_int("actions_executed", executed_count);
+
+        #[derive(Default)]
+        struct MnemonicAgg {
+            executed: i64,
+            created: i64,
+            first_started_ms: Option<i64>,
+            last_ended_ms: Option<i64>,
+        }
+        let mut by_mnem: std::collections::BTreeMap<String, MnemonicAgg> =
+            std::collections::BTreeMap::new();
+        for (mn, &c) in &st.created_by_mnemonic {
+            by_mnem.entry(mn.clone()).or_default().created = c;
+        }
+        let mut runners: std::collections::BTreeMap<String, i32> =
+            std::collections::BTreeMap::new();
+        let mut cache_hit_outputs = 0usize;
+        let mut exec_outputs = 0usize;
+        for sp in spans.iter() {
+            if sp.cache_hit {
+                cache_hit_outputs += sp.outputs.len();
+            } else {
+                exec_outputs += sp.outputs.len();
+                let agg = by_mnem.entry(sp.mnemonic.clone()).or_default();
+                agg.executed += 1;
+                agg.first_started_ms = Some(
+                    agg.first_started_ms
+                        .map(|f| f.min(sp.start_millis))
+                        .unwrap_or(sp.start_millis),
+                );
+                agg.last_ended_ms = Some(
+                    agg.last_ended_ms
+                        .map(|l| l.max(sp.end_millis))
+                        .unwrap_or(sp.end_millis),
+                );
+            }
+            *runners.entry(sp.runner.clone()).or_insert(0) += 1;
+        }
+        let mut mnem_list: Vec<(String, MnemonicAgg)> = by_mnem.into_iter().collect();
+        mnem_list.sort_by(|a, b| {
+            b.1.executed
+                .cmp(&a.1.executed)
+                .then_with(|| b.1.created.cmp(&a.1.created))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        if !self.record_all_mnemonics && mnem_list.len() > 20 {
+            mnem_list.truncate(20);
+        }
+        for (mn, agg) in mnem_list {
+            let mut ad = Msg::new("build_event_stream.BuildMetrics.ActionSummary.ActionData");
+            ad.set_str("mnemonic", mn);
+            ad.set_int("actions_executed", agg.executed);
+            ad.set_int("actions_created", agg.created);
+            if let Some(fs_ms) = agg.first_started_ms {
+                ad.set_int("first_started_ms", fs_ms);
+            }
+            if let Some(le_ms) = agg.last_ended_ms {
+                ad.set_int("last_ended_ms", le_ms);
+            }
+            action_summary.set_msg("action_data", ad);
+        }
+        for (rname, rcount) in runners {
+            let mut rc = Msg::new("build_event_stream.BuildMetrics.ActionSummary.RunnerCount");
+            let exec_kind = if rname.contains("cache") {
+                "Cached"
+            } else if rname == "internal" {
+                "Internal"
+            } else {
+                "Local"
+            };
+            rc.set_str("name", rname);
+            rc.set_int("count", rcount as i64);
+            rc.set_str("exec_kind", exec_kind);
+            action_summary.set_msg("runner_count", rc);
+        }
+        m.set_msg("action_summary", action_summary);
+
+        // MemoryMetrics
+        let mut mem = Msg::new("build_event_stream.BuildMetrics.MemoryMetrics");
+        if self.memory_profile {
+            mem.set_int(
+                "used_heap_size_post_build",
+                crate::sys::resident_bytes() as i64,
+            );
+        }
+        m.set_msg("memory_metrics", mem);
+
+        // TargetMetrics
+        let mut tm = Msg::new("build_event_stream.BuildMetrics.TargetMetrics");
+        tm.set_int("targets_configured", st.targets_configured);
+        tm.set_int(
+            "targets_configured_not_including_aspects",
+            st.targets_configured,
+        );
+        m.set_msg("target_metrics", tm);
+
+        // PackageMetrics
+        let mut pm = Msg::new("build_event_stream.BuildMetrics.PackageMetrics");
+        pm.set_int("packages_loaded", st.packages_loaded);
+        m.set_msg("package_metrics", pm);
+
+        // TimingMetrics
+        let mut timing = Msg::new("build_event_stream.BuildMetrics.TimingMetrics");
+        let wall_ms = self.started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        let cpu_ms = ((crate::sys::cpu_seconds() - self.cpu_at_start).max(0.0) * 1000.0) as i64;
+        let analysis_ms = (st.analysis_done_ns / 1_000_000).max(0);
+        timing.set_int("wall_time_in_ms", wall_ms);
+        timing.set_int("cpu_time_in_ms", cpu_ms);
+        timing.set_int("analysis_phase_time_in_ms", analysis_ms);
+        if let (Some(first_s), Some(last_e)) = (
+            spans.iter().map(|s| s.start_ns).min(),
+            spans.iter().map(|s| s.end_ns).max(),
+        ) {
+            timing.set_int(
+                "actions_execution_start_in_ms",
+                (first_s / 1_000_000).max(0),
+            );
+            timing.set_int(
+                "execution_phase_time_in_ms",
+                ((last_e - first_s) / 1_000_000).max(0),
+            );
+        }
+        if critical_path_ns > 0 {
+            let mut dur = Msg::new("google.protobuf.Duration");
+            dur.set_int("seconds", critical_path_ns / 1_000_000_000);
+            dur.set_int("nanos", critical_path_ns % 1_000_000_000);
+            timing.set_msg("critical_path_time", dur);
+        }
+        m.set_msg("timing_metrics", timing);
+
+        // CumulativeMetrics
+        let mut cum = Msg::new("build_event_stream.BuildMetrics.CumulativeMetrics");
+        cum.set_int(
+            "num_analyses",
+            CUMULATIVE_ANALYSES.load(std::sync::atomic::Ordering::SeqCst) as i64,
+        );
+        cum.set_int(
+            "num_builds",
+            CUMULATIVE_BUILDS.load(std::sync::atomic::Ordering::SeqCst) as i64,
+        );
+        m.set_msg("cumulative_metrics", cum);
+
+        // ArtifactMetrics
+        let files_metric = |count: usize| {
+            let mut fm = Msg::new("build_event_stream.BuildMetrics.ArtifactMetrics.FilesMetric");
+            fm.set_int("count", count as i64);
+            fm
+        };
+        let mut am = Msg::new("build_event_stream.BuildMetrics.ArtifactMetrics");
+        am.set_msg("source_artifacts_read", files_metric(st.source_artifacts));
+        am.set_msg(
+            "output_artifacts_seen",
+            files_metric(exec_outputs + cache_hit_outputs),
+        );
+        am.set_msg(
+            "output_artifacts_from_action_cache",
+            files_metric(cache_hit_outputs),
+        );
+        am.set_msg("top_level_artifacts", files_metric(st.top_level_artifacts));
+        m.set_msg("artifact_metrics", am);
+
+        // BuildGraphMetrics
+        let mut bgm = Msg::new("build_event_stream.BuildMetrics.BuildGraphMetrics");
+        bgm.set_int("action_lookup_value_count", st.targets_configured);
+        bgm.set_int(
+            "action_lookup_value_count_not_including_aspects",
+            st.targets_configured,
+        );
+        bgm.set_int("action_count", st.actions_created);
+        bgm.set_int("action_count_not_including_aspects", st.actions_created);
+        bgm.set_int("output_artifact_count", st.output_artifacts as i64);
+        for (rc_name, &(cnt, act_cnt)) in &st.rule_classes {
+            let mut rcc =
+                Msg::new("build_event_stream.BuildMetrics.BuildGraphMetrics.RuleClassCount");
+            rcc.set_str("key", rc_name.clone());
+            rcc.set_str("rule_class", rc_name.clone());
+            rcc.set_uint("count", cnt);
+            rcc.set_uint("action_count", act_cnt);
+            bgm.set_msg("rule_class", rcc);
+        }
+        m.set_msg("build_graph_metrics", bgm);
+
+        m
     }
 }
 
@@ -1182,7 +1781,7 @@ mod tests {
             "\"exitCode\":{\"name\":\"SUCCESS\"}",
             "\"expanded\":{}",
             "\"configuration\":{\"mnemonic\":\"",
-            "\"buildMetrics\":{}",
+            "\"buildMetrics\":{\"actionSummary\":{",
         ] {
             assert!(json.contains(needle), "missing {needle} in {json}");
         }
@@ -1193,7 +1792,8 @@ mod tests {
             "{json}"
         );
         assert!(
-            json.contains("\"action\":{\"success\":true,\"type\":\"Genrule\""),
+            json.contains("\"action\":{\"success\":true,\"primaryOutput\":{\"uri\":\"file://")
+                && json.contains("\"type\":\"Genrule\""),
             "{json}"
         );
         // Execution logs: JSON lines and a zstd-framed compact log.
@@ -1265,6 +1865,116 @@ mod tests {
             bad.contains("\"spawn\":{\"code\":\"NON_ZERO_EXIT\"}"),
             "{bad}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bep_bytestream_end_to_end_build_and_test() {
+        let root = std::env::temp_dir().join(format!("zel-obs-bs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("p")).unwrap();
+        std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
+        std::fs::write(
+            ws.join("p/defs.bzl"),
+            concat!(
+                "def _t_impl(ctx):\n",
+                "    exe = ctx.actions.declare_file(ctx.label.name + '.sh')\n",
+                "    ctx.actions.write(exe, '#!/bin/sh\\necho test-run-ok\\nexit 0\\n', is_executable = True)\n",
+                "    return [DefaultInfo(executable = exe)]\n",
+                "my_test = rule(implementation = _t_impl, test = True)\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("p/BUILD"),
+            concat!(
+                "load('//p:defs.bzl', 'my_test')\n",
+                "genrule(name='out', outs=['out.txt'], cmd='printf gen-payload > $@')\n",
+                "my_test(name='ok_test')\n",
+            ),
+        )
+        .unwrap();
+
+        let rt = runtime(&root, &ws);
+        let r = |n: &str| root.join(n).to_str().unwrap().to_string();
+
+        // 1. Even without a remote prefix, `NamedSetOfFiles` populates `digest` and `length`
+        //    (`TargetCompleteEvent.newFile`).
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                &format!("--build_event_json_file={}", r("local_bep.json")),
+                "//p:out",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let local_bep = std::fs::read_to_string(root.join("local_bep.json")).unwrap();
+        let expected_hash = zel_util::sha256::hex_digest(b"gen-payload");
+        assert!(
+            local_bep.contains(&format!("\"digest\":\"{expected_hash}\"")),
+            "{local_bep}"
+        );
+        assert!(local_bep.contains("\"length\":\"11\""), "{local_bep}");
+
+        // 2. With `--remote_bytestream_uri_prefix`, `NamedSetOfFiles`, `ActionExecuted`,
+        //    `TestResult`, and `TestSummary` all emit `bytestream://` URIs and zero `file://` URIs.
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "test",
+                "--nocache_test_results",
+                "--build_event_publish_all_actions",
+                "--remote_bytestream_uri_prefix=cas.example.com:9092/main",
+                &format!("--build_event_json_file={}", r("remote_bep.json")),
+                "//p:out",
+                "//p:ok_test",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let remote_bep = std::fs::read_to_string(root.join("remote_bep.json")).unwrap();
+        assert!(
+            remote_bep.contains(&format!(
+                "bytestream://cas.example.com:9092/main/blobs/{expected_hash}/11"
+            )),
+            "{remote_bep}"
+        );
+        assert!(!remote_bep.contains("file://"), "{remote_bep}");
+        let mut saw_action_bs = false;
+        let mut saw_test_result_bs = false;
+        let mut saw_test_summary_bs = false;
+        for line in remote_bep.lines() {
+            if line.contains("\"action\":{") && line.contains("\"type\":\"Genrule\"") {
+                saw_action_bs |= line.contains(
+                    &format!(
+                        "\"primaryOutput\":{{\"uri\":\"bytestream://cas.example.com:9092/main/blobs/{expected_hash}/11\"}}"
+                    ),
+                );
+            }
+            if line.contains("\"testResult\":{") {
+                saw_test_result_bs |=
+                    line.contains("bytestream://cas.example.com:9092/main/blobs/");
+            }
+            if line.contains("\"testSummary\":{") {
+                saw_test_summary_bs |=
+                    line.contains("bytestream://cas.example.com:9092/main/blobs/");
+            }
+        }
+        assert!(
+            saw_action_bs,
+            "ActionExecuted missing bytestream primaryOutput: {remote_bep}"
+        );
+        assert!(
+            saw_test_result_bs,
+            "TestResult missing bytestream testActionOutput: {remote_bep}"
+        );
+        assert!(
+            saw_test_summary_bs,
+            "TestSummary missing bytestream log: {remote_bep}"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

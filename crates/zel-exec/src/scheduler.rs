@@ -18,6 +18,15 @@ pub enum ActionState {
     Failed,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CriticalPathEntry {
+    pub action_index: usize,
+    pub duration_ms: u64,
+    pub cumulative_ms: u64,
+    pub primary_output: String,
+    pub progress_message: String,
+}
+
 #[derive(Debug)]
 pub struct ScheduleResult {
     /// One entry per *unique* action (deduplicated by first output), in input order.
@@ -25,6 +34,8 @@ pub struct ScheduleResult {
     /// Indices into `actions` in completion order.
     pub completion_order: Vec<usize>,
     pub critical_path_ms: u64,
+    /// Critical path components in reverse execution order (`AggregatingCriticalPath.components`).
+    pub critical_path: Vec<CriticalPathEntry>,
     /// Set when the action graph contains a dependency cycle.
     pub cycle: Option<Vec<String>>,
 }
@@ -74,6 +85,7 @@ struct State {
     results: Vec<Option<ActionExecutionOutcome>>,
     io_errors: Vec<Option<String>>,
     finished_at: Vec<u64>,
+    crit_pred: Vec<Option<usize>>,
     running: usize,
     stop: bool,
     catastrophic_stop: bool,
@@ -129,12 +141,14 @@ pub fn execute_actions(
             producer.insert(o.exec_path.path_string().to_string(), i);
         }
     }
+    let mut deps_ordered: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut deps: Vec<HashSet<usize>> = vec![HashSet::new(); n];
     let mut dependents: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (i, a) in uniq.iter().enumerate() {
         for inp in a.inputs() {
             if let Some(&p) = producer.get(inp.exec_path.path_string()) {
                 if p != i && deps[i].insert(p) {
+                    deps_ordered[i].push(p);
                     dependents[p].push(i);
                 }
             }
@@ -143,6 +157,7 @@ pub fn execute_actions(
         if let ActionAnalysisMetadata::SymlinkAction { input_path, .. } = a {
             if let Some(&p) = producer.get(input_path.path_string()) {
                 if p != i && deps[i].insert(p) {
+                    deps_ordered[i].push(p);
                     dependents[p].push(i);
                 }
             }
@@ -157,6 +172,7 @@ pub fn execute_actions(
         results: (0..n).map(|_| None).collect(),
         io_errors: vec![None; n],
         finished_at: vec![0; n],
+        crit_pred: vec![None; n],
         running: 0,
         stop: false,
         catastrophic_stop: false,
@@ -211,11 +227,15 @@ pub fn execute_actions(
                 st.io_errors[idx] = err;
                 st.completion.push(idx);
                 st.done_or_dead += 1;
-                let dep_finish = deps[idx]
-                    .iter()
-                    .map(|&d| st.finished_at[d])
-                    .max()
-                    .unwrap_or(0);
+                let mut best_dep: Option<(usize, u64)> = None;
+                for &d in &deps_ordered[idx] {
+                    let df = st.finished_at[d];
+                    if best_dep.map(|(_, b)| df > b).unwrap_or(true) {
+                        best_dep = Some((d, df));
+                    }
+                }
+                let dep_finish = best_dep.map(|(_, df)| df).unwrap_or(0);
+                st.crit_pred[idx] = best_dep.map(|(d, _)| d);
                 let dur = st.results[idx]
                     .as_ref()
                     .map(|o| o.wall_time_ms)
@@ -274,7 +294,39 @@ pub fn execute_actions(
                 )
             }
         };
-    let critical = st.finished_at.iter().copied().max().unwrap_or(0);
+    let mut best_root: Option<(usize, u64)> = None;
+    for i in 0..n {
+        if st.states[i] != ActionState::NotRun {
+            let f = st.finished_at[i];
+            if best_root.is_none_or(|(_, b)| f > b) {
+                best_root = Some((i, f));
+            }
+        }
+    }
+    let critical = best_root.map(|(_, f)| f).unwrap_or(0);
+    let mut critical_path = Vec::new();
+    let mut cur = best_root.map(|(i, _)| i);
+    while let Some(ci) = cur {
+        let dur_ms = st.results[ci].as_ref().map(|o| o.wall_time_ms).unwrap_or(0);
+        let primary_output = uniq[ci]
+            .outputs()
+            .first()
+            .map(|o| o.exec_path.path_string().to_string())
+            .unwrap_or_default();
+        let progress_message = st.results[ci]
+            .as_ref()
+            .map(|o| o.progress.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| action_info(uniq[ci]).progress_message);
+        critical_path.push(CriticalPathEntry {
+            action_index: ci,
+            duration_ms: dur_ms,
+            cumulative_ms: st.finished_at[ci],
+            primary_output,
+            progress_message,
+        });
+        cur = st.crit_pred[ci];
+    }
     let actions_out = (0..n)
         .map(|i| ActionResult {
             state: st.states[i],
@@ -297,6 +349,7 @@ pub fn execute_actions(
         actions: actions_out,
         completion_order: st.completion,
         critical_path_ms: critical,
+        critical_path,
         cycle,
     }
 }

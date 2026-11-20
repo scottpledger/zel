@@ -247,6 +247,19 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
         if let Some(first) = parse_errs.first() {
             return Err(format!("invalid --starlark:expr: {}", first.message));
         }
+        let expr_tokens = zel_starlark::Lexer::new("--starlark:expr", expr)
+            .lex_all()
+            .map_err(|e| {
+                let s = e.to_string();
+                let cleaned = s.split_once(": ").map(|(_, r)| r).unwrap_or(&s);
+                format!("invalid --starlark:expr: {cleaned}")
+            })?;
+        let mut expr_parser = zel_starlark::Parser::new(expr_tokens);
+        expr_parser.parse_standalone_expr().map_err(|e| {
+            let s = e.0.trim();
+            let cleaned = s.split_once(": ").map(|(_, r)| r).unwrap_or(s);
+            format!("invalid --starlark:expr: {cleaned}")
+        })?;
         (
             format!("{PRELUDE}def format(target): return ({expr})\n"),
             "invalid --starlark:expr: ",
@@ -255,6 +268,10 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
     };
     let mut ctx = EvalContext::new(PathFragment::empty(), None);
     ctx.strict_names = true;
+    ctx.globals
+        .insert("depset".into(), Value::BuiltinFunction("depset".into()));
+    ctx.globals
+        .insert("struct".into(), Value::BuiltinFunction("struct".into()));
     ctx.file_name = if is_expr {
         "--starlark:expr".to_string()
     } else {
@@ -269,8 +286,23 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
         };
         format!("{prefix}{cleaned}")
     })?;
-    if !ctx.globals.contains_key("format") {
-        return Err(format!("{prefix}file does not define 'format'"));
+    match ctx.globals.get("format") {
+        None => return Err(format!("{prefix}file does not define 'format'")),
+        Some(Value::UserFunction(def)) => {
+            if def.params.len() != 1
+                || def.params[0].is_args
+                || def.params[0].is_kwargs
+                || def.params[0].is_kw_only
+            {
+                return Err(format!("{prefix}'format' function must take 1 argument"));
+            }
+        }
+        Some(other) => {
+            return Err(format!(
+                "{prefix}expected function value for 'format', got {}",
+                other.type_name()
+            ));
+        }
     }
     Ok((source, prefix, is_expr))
 }
@@ -792,7 +824,18 @@ pub(crate) fn run(
             by_host_id.insert(hid.clone(), node_data_list.len());
         }
 
-        let opts = if let Some(cfg) = env.node_config_key(n).cloned() {
+        let is_unconfigured_target = n.cfg.is_none()
+            || matches!(
+                info.as_ref().map(|i| &i.target),
+                Some(
+                    Target::InputFile { .. }
+                        | Target::PackageGroup { .. }
+                        | Target::EnvironmentGroup { .. }
+                )
+            );
+        let opts = if is_unconfigured_target {
+            None
+        } else if let Some(cfg) = env.node_config_key(n).cloned() {
             let adjusted = env.adjust_key(&target_label, &cfg);
             Some(build_options_entries(&adjusted))
         } else {
@@ -1079,6 +1122,10 @@ pub(crate) fn run(
 
     let mut ctx = EvalContext::new(PathFragment::empty(), None);
     ctx.strict_names = true;
+    ctx.globals
+        .insert("depset".into(), Value::BuiltinFunction("depset".into()));
+    ctx.globals
+        .insert("struct".into(), Value::BuiltinFunction("struct".into()));
     ctx.host = Some(host_fn);
     ctx.file_name = if is_expr {
         "--starlark:expr".to_string()
