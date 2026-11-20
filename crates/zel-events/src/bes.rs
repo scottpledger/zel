@@ -41,7 +41,7 @@ use zel_remote::digest::DigestFn;
 use zel_remote::grpc::{BidiStream, CallOptions, Channel, ChannelConfig, GrpcStatus};
 use zel_remote::http_cache::HttpCacheClient;
 use zel_remote::merkle::BlobSource;
-use zel_remote::options::{BuildEventUploadMode, Endpoint};
+use zel_remote::options::{basic_auth_header_for_userinfo, BuildEventUploadMode, Endpoint};
 use zel_remote::reapi_client::{ActionMeta, ReapiClient};
 use zel_remote::transport::{Connector, TlsConfig};
 use zel_util::base64_encode;
@@ -73,9 +73,14 @@ pub struct BesUploadError {
 
 impl BesUploadError {
     fn from_grpc(st: &GrpcStatus) -> Self {
-        let kind = match st.code {
-            code::INVALID_ARGUMENT | code::PERMISSION_DENIED => BesErrorKind::Persistent,
-            _ => BesErrorKind::Transient,
+        let kind = if st.credential_helper_error
+            || matches!(
+                st.code,
+                code::INVALID_ARGUMENT | code::PERMISSION_DENIED | code::UNAUTHENTICATED
+            ) {
+            BesErrorKind::Persistent
+        } else {
+            BesErrorKind::Transient
         };
         Self {
             kind,
@@ -727,6 +732,7 @@ pub struct BesConfig {
     pub google_credentials: Option<String>,
     pub google_auth_scopes: Vec<String>,
     pub credential_helpers: Vec<String>,
+    pub workspace: Option<PathBuf>,
     pub credential_helper_timeout: Duration,
     pub credential_helper_cache_duration: Duration,
     pub netrc: Option<String>,
@@ -772,6 +778,7 @@ impl BesConfig {
             google_credentials: o.google_credentials.clone(),
             google_auth_scopes: o.google_auth_scopes.clone(),
             credential_helpers: o.credential_helpers.clone(),
+            workspace: None,
             credential_helper_timeout: o
                 .credential_helper_timeout
                 .unwrap_or(Duration::from_secs(5)),
@@ -784,10 +791,15 @@ impl BesConfig {
         })
     }
 
-    /// Supplies the invoking command's `client_env` (`NETRC`/`HOME`/`USERPROFILE`).
+    /// Supplies the invoking command's `client_env` (`NETRC`/`HOME`/`USERPROFILE`/credential helpers/ADC).
     pub fn set_client_env(&mut self, env: std::collections::BTreeMap<String, String>) {
         self.client_env = env;
         self.has_client_env = true;
+    }
+
+    /// Supplies the workspace root for `%workspace%` expansion and credential helper `cwd`.
+    pub fn set_workspace(&mut self, workspace: Option<PathBuf>) {
+        self.workspace = workspace;
     }
 
     /// Effective `project_id` sent on BES requests (`--project_id` or `--bes_instance_name`).
@@ -857,11 +869,22 @@ impl BesConfig {
         )]
     }
 
+    #[cfg(test)]
     fn build_credentials(&self) -> Result<Option<Arc<dyn CallCredentialsProvider>>, String> {
+        self.build_credentials_with_userinfo(None)
+    }
+
+    fn build_credentials_with_userinfo(
+        &self,
+        userinfo: Option<(String, String)>,
+    ) -> Result<Option<Arc<dyn CallCredentialsProvider>>, String> {
+        let client_env =
+            (self.has_client_env || !self.client_env.is_empty()).then_some(&self.client_env);
         let helper = if !self.credential_helpers.is_empty() {
-            Some(CredentialHelperProvider::from_specs(
+            Some(CredentialHelperProvider::from_specs_with_env(
                 &self.credential_helpers,
-                None,
+                self.workspace.as_deref(),
+                client_env,
                 self.credential_helper_timeout,
                 self.credential_helper_cache_duration,
             ))
@@ -875,33 +898,41 @@ impl BesConfig {
                 self.tls_config.clone(),
             ))
         } else if self.google_default_credentials {
-            Some(
+            let provider = if let Some(env) = client_env {
+                GoogleAuthCallCredentialsProvider::from_adc_with_client_env(
+                    self.google_auth_scopes.clone(),
+                    self.tls_config.clone(),
+                    env,
+                )
+            } else {
                 GoogleAuthCallCredentialsProvider::from_adc(
                     self.google_auth_scopes.clone(),
                     self.tls_config.clone(),
                 )
-                .map_err(|e| e.to_string())?,
-            )
+            }
+            .map_err(|e| e.to_string())?;
+            Some(provider)
         } else {
             None
         };
         let netrc = if let Some(path) = &self.netrc {
             Some(NetrcCredentialsProvider::from_file(Path::new(path))?)
         } else if google.is_none() {
-            if self.has_client_env || !self.client_env.is_empty() {
-                NetrcCredentialsProvider::from_client_env(&self.client_env)?
+            if let Some(env) = client_env {
+                NetrcCredentialsProvider::from_client_env(env)?
             } else {
                 NetrcCredentialsProvider::try_from_env()?
             }
         } else {
             None
         };
-        if helper.is_none() && google.is_none() && netrc.is_none() {
+        if helper.is_none() && google.is_none() && userinfo.is_none() && netrc.is_none() {
             return Ok(None);
         }
         Ok(Some(Arc::new(CompositeCredentialsProvider {
             helper,
             google,
+            userinfo,
             netrc,
         })))
     }
@@ -911,7 +942,7 @@ impl BesConfig {
     /// uses Unix domain sockets), applying `--bes_proxy`, TLS/mTLS, headers, and credentials.
     pub fn channel(&self) -> Result<Arc<Channel>, String> {
         self.tls_config.validate()?;
-        let ep = Endpoint::parse_grpc(&self.backend)?;
+        let (ep, userinfo) = Endpoint::parse_grpc_with_userinfo(&self.backend)?;
         let proxy = match &self.proxy {
             Some(p) => {
                 if !p.starts_with("unix:") {
@@ -936,12 +967,16 @@ impl BesConfig {
                 collapsed.push((lk, v.clone()));
             }
         }
-        let creds = self.build_credentials()?;
-        let auth_uri = if self.backend.contains("://") || self.backend.starts_with("unix:") {
-            self.backend.clone()
+        let has_explicit_auth = collapsed
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+        let userinfo_hdr = if has_explicit_auth {
+            None
         } else {
-            ep.auth_uri()
+            userinfo.as_deref().and_then(basic_auth_header_for_userinfo)
         };
+        let creds = self.build_credentials_with_userinfo(userinfo_hdr)?;
+        let auth_uri = ep.auth_uri();
         Ok(Arc::new(Channel::with_config(
             conn,
             ChannelConfig {
@@ -1294,6 +1329,7 @@ fn run_bidi_stream(
 ) -> Result<(), BesUploadError> {
     let mut attempt = 0u32;
     let mut delay = Duration::from_millis(100);
+    let mut refreshed_auth = false;
     let req_meta = cfg.request_metadata_headers();
 
     loop {
@@ -1461,6 +1497,18 @@ fn run_bidi_stream(
                 if made_progress {
                     attempt = 0;
                     delay = Duration::from_millis(100);
+                    refreshed_auth = false;
+                }
+                if !refreshed_auth
+                    && st.code == code::UNAUTHENTICATED
+                    && !st.credential_helper_error
+                    && channel.has_refreshable_credentials()
+                {
+                    refreshed_auth = true;
+                    if let Err(refresh_err) = channel.refresh_credentials() {
+                        return Err(BesUploadError::from_grpc(&refresh_err));
+                    }
+                    continue;
                 }
                 if !is_bes_stream_retriable(&st) || attempt >= BES_MAX_RETRIES {
                     return Err(BesUploadError::from_grpc(&st));
@@ -1477,9 +1525,15 @@ fn run_bidi_stream(
 }
 
 fn is_bes_stream_retriable(st: &GrpcStatus) -> bool {
+    if st.credential_helper_error {
+        return false;
+    }
     !matches!(
         st.code,
-        code::INVALID_ARGUMENT | code::PERMISSION_DENIED | code::FAILED_PRECONDITION
+        code::INVALID_ARGUMENT
+            | code::PERMISSION_DENIED
+            | code::FAILED_PRECONDITION
+            | code::UNAUTHENTICATED
     )
 }
 
@@ -1611,6 +1665,29 @@ impl BuildEventTransport for BesTransport {
     }
 }
 
+fn transport_from_options_inner(
+    o: &crate::bep::BepOptions,
+    build_id: &str,
+    invocation_id: &str,
+    command: &str,
+    client_env: Option<&std::collections::BTreeMap<String, String>>,
+    workspace: Option<&Path>,
+) -> Result<Option<(Arc<BesTransport>, BesConfig)>, String> {
+    if let Some(err) = &o.bes_upload_mode_error {
+        return Err(err.clone());
+    }
+    let Some(mut cfg) = BesConfig::from_options(o, build_id, invocation_id, command) else {
+        return Ok(None);
+    };
+    if let Some(env) = client_env {
+        cfg.set_client_env(env.clone());
+    }
+    cfg.set_workspace(workspace.map(Path::to_path_buf));
+    let ch = cfg.channel()?;
+    let t = BesTransport::start(cfg.clone(), ch);
+    Ok(Some((t, cfg)))
+}
+
 /// Convenience: build a transport from options, or `None` when `--bes_backend` is unset.
 pub fn transport_from_options(
     o: &crate::bep::BepOptions,
@@ -1618,13 +1695,7 @@ pub fn transport_from_options(
     invocation_id: &str,
     command: &str,
 ) -> Result<Option<(Arc<BesTransport>, BesConfig)>, String> {
-    transport_from_options_with_env(
-        o,
-        build_id,
-        invocation_id,
-        command,
-        &std::collections::BTreeMap::new(),
-    )
+    transport_from_options_inner(o, build_id, invocation_id, command, None, None)
 }
 
 /// Builds a BES transport from options and the invoking command's `client_env` (`$NETRC`/`$HOME`).
@@ -1635,16 +1706,27 @@ pub fn transport_from_options_with_env(
     command: &str,
     client_env: &std::collections::BTreeMap<String, String>,
 ) -> Result<Option<(Arc<BesTransport>, BesConfig)>, String> {
-    if let Some(err) = &o.bes_upload_mode_error {
-        return Err(err.clone());
-    }
-    let Some(mut cfg) = BesConfig::from_options(o, build_id, invocation_id, command) else {
-        return Ok(None);
-    };
-    cfg.set_client_env(client_env.clone());
-    let ch = cfg.channel()?;
-    let t = BesTransport::start(cfg.clone(), ch);
-    Ok(Some((t, cfg)))
+    transport_from_options_inner(o, build_id, invocation_id, command, Some(client_env), None)
+}
+
+/// Builds a BES transport from options, the invoking command's `client_env`, and the workspace root
+/// (for `%workspace%` expansion and credential helper `cwd`).
+pub fn transport_from_options_with_env_and_workspace(
+    o: &crate::bep::BepOptions,
+    build_id: &str,
+    invocation_id: &str,
+    command: &str,
+    client_env: &std::collections::BTreeMap<String, String>,
+    workspace: Option<&Path>,
+) -> Result<Option<(Arc<BesTransport>, BesConfig)>, String> {
+    transport_from_options_inner(
+        o,
+        build_id,
+        invocation_id,
+        command,
+        Some(client_env),
+        workspace,
+    )
 }
 
 #[allow(unused)]
@@ -3279,5 +3361,447 @@ mod tests {
             "fully-acknowledged OK stream must not retry on close_send race"
         );
         assert_eq!(*lifecycle_count.lock().unwrap(), 4);
+    }
+
+    #[test]
+    fn bes_channel_userinfo_redaction_and_normalized_auth_uri() {
+        let mut c = cfg();
+        c.backend = "grpcs://bb-secret-key@remote.buildbuddy.io".into();
+        c.headers.clear();
+        c.set_client_env(BTreeMap::new());
+        let ch = c.channel().unwrap();
+        assert_eq!(ch.authority(), "remote.buildbuddy.io");
+        assert_eq!(ch.auth_uri(), "https://remote.buildbuddy.io");
+        assert!(!ch.has_refreshable_credentials());
+        let hdrs = ch
+            .credentials()
+            .unwrap()
+            .get_credentials(ch.auth_uri())
+            .unwrap();
+        assert_eq!(
+            hdrs,
+            vec![(
+                "authorization".to_string(),
+                format!("Basic {}", base64_encode(b"bb-secret-key:"))
+            )]
+        );
+
+        // Explicit Authorization header suppresses userinfo Basic auth.
+        let mut c_override = c.clone();
+        c_override.headers = vec![("Authorization".into(), "Bearer explicit".into())];
+        let ch_override = c_override.channel().unwrap();
+        assert!(ch_override.credentials().is_none());
+
+        // Plaintext grpc:// normalizes to http:// in auth_uri.
+        let mut c_plain = cfg();
+        c_plain.backend = "grpc://127.0.0.1:8980".into();
+        c_plain.set_client_env(BTreeMap::new());
+        let ch_plain = c_plain.channel().unwrap();
+        assert_eq!(ch_plain.auth_uri(), "http://127.0.0.1:8980");
+
+        // BEP `remote_bytestream_uri_prefix` derived from `--remote_cache` strips userinfo.
+        let bep_opts = crate::bep::BepOptions::from_flags(
+            &|name| match name {
+                "remote_cache" => Some("grpcs://bb-secret-key@remote.buildbuddy.io".into()),
+                "remote_instance_name" => Some("main".into()),
+                _ => None,
+            },
+            &|_| Vec::new(),
+        );
+        assert_eq!(
+            bep_opts.remote_bytestream_uri_prefix.as_deref(),
+            Some("remote.buildbuddy.io/main")
+        );
+    }
+
+    #[test]
+    fn bes_config_workspace_expansion_and_client_env_for_credential_helper_and_adc() {
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-bes-ws-env-{}-{}",
+            std::process::id(),
+            zel_util::uuid_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ws = tmp.join("ws");
+        let tools = ws.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+
+        #[cfg(unix)]
+        let helper_spec = {
+            use std::os::unix::fs::PermissionsExt;
+            let script = tools.join("bes_helper.sh");
+            std::fs::write(
+                &script,
+                concat!(
+                    "#!/bin/sh\n",
+                    "read req\n",
+                    "cwd=$(pwd -P)\n",
+                    "printf '{\"headers\":{\"Authorization\":[\"Bearer %s\"],\"X-Req\":[\"%s\"],\"X-Cwd\":[\"%s\"]}}\\n' ",
+                    "\"$BES_CLIENT_TOK\" \"$(printf '%s' \"$req\" | sed 's/\"/\\\\\"/g')\" \"$cwd\"\n",
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            "remote.buildbuddy.io=%workspace%/tools/bes_helper.sh"
+        };
+        #[cfg(windows)]
+        let helper_spec = {
+            let script = tools.join("bes_helper.cmd");
+            std::fs::write(
+                &script,
+                "@echo off\r\nset /p REQ=\r\necho {\"headers\":{\"Authorization\":[\"Bearer %BES_CLIENT_TOK%\"],\"X-Cwd\":[\"%CD%\"]}}\r\n",
+            )
+            .unwrap();
+            "remote.buildbuddy.io=%workspace%/tools/bes_helper.cmd"
+        };
+
+        let mut env = BTreeMap::new();
+        env.insert("BES_CLIENT_TOK".into(), "bes-from-client-env".into());
+        #[cfg(unix)]
+        if let Ok(path) = std::env::var("PATH") {
+            env.insert("PATH".into(), path);
+        }
+        #[cfg(windows)]
+        for k in ["PATH", "SystemRoot", "COMSPEC"] {
+            if let Ok(v) = std::env::var(k) {
+                env.insert(k.into(), v);
+            }
+        }
+
+        let mut c = cfg();
+        c.backend = "grpcs://remote.buildbuddy.io".into();
+        c.credential_helpers = vec![helper_spec.into()];
+        c.set_workspace(Some(ws.clone()));
+        c.set_client_env(env);
+        let ch = c.channel().unwrap();
+        assert_eq!(ch.auth_uri(), "https://remote.buildbuddy.io");
+        assert!(ch.has_refreshable_credentials());
+        let hdrs = ch
+            .credentials()
+            .unwrap()
+            .get_credentials(ch.auth_uri())
+            .unwrap();
+        let find = |k: &str| {
+            hdrs.iter()
+                .find(|(hk, _)| hk == k)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("")
+        };
+        assert_eq!(find("authorization"), "Bearer bes-from-client-env");
+        assert_eq!(
+            std::fs::canonicalize(find("x-cwd")).unwrap(),
+            std::fs::canonicalize(&ws).unwrap()
+        );
+        #[cfg(unix)]
+        assert_eq!(find("x-req"), r#"{"uri":"https://remote.buildbuddy.io"}"#);
+
+        // Google ADC also honors `client_env` (`GOOGLE_APPLICATION_CREDENTIALS`).
+        let adc_file = tmp.join("bes_adc.json");
+        std::fs::write(&adc_file, r#"{"access_token":"bes-adc-tok"}"#).unwrap();
+        let mut adc_env = BTreeMap::new();
+        adc_env.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS".into(),
+            adc_file.to_string_lossy().into_owned(),
+        );
+        let mut c_adc = cfg();
+        c_adc.backend = "grpcs://remote.buildbuddy.io".into();
+        c_adc.google_default_credentials = true;
+        c_adc.set_client_env(adc_env);
+        let creds_adc = c_adc.build_credentials().unwrap().unwrap();
+        assert_eq!(
+            creds_adc
+                .get_credentials("https://remote.buildbuddy.io")
+                .unwrap(),
+            vec![(
+                "authorization".to_string(),
+                "Bearer bes-adc-tok".to_string()
+            )]
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn bes_bidi_stream_refreshes_dynamic_credentials_once_on_unauthenticated_and_fails_fast_otherwise(
+    ) {
+        use std::sync::atomic::AtomicUsize;
+        use zel_remote::credentials::CredentialError;
+
+        struct AuthCheckingBesConn {
+            accepted_auth: String,
+            stream_attempts: Arc<AtomicUsize>,
+            seen_auths: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Connector for AuthCheckingBesConn {
+            fn authority(&self) -> String {
+                "bes.auth.local".into()
+            }
+
+            fn connect(&self) -> io::Result<Transport> {
+                let (c, s) = memory_pair();
+                let accepted_auth = self.accepted_auth.clone();
+                let stream_attempts = self.stream_attempts.clone();
+                let seen_auths = self.seen_auths.clone();
+                std::thread::spawn(move || {
+                    let Ok((_conn, rx)) = Conn::server_from(s, LocalSettings::default()) else {
+                        return;
+                    };
+                    while let Ok(st) = rx.recv() {
+                        let accepted_auth = accepted_auth.clone();
+                        let stream_attempts = stream_attempts.clone();
+                        let seen_auths = seen_auths.clone();
+                        std::thread::spawn(move || {
+                            let mut parser = MessageParser::default();
+                            let mut msgs = Vec::new();
+                            loop {
+                                match st.recv(None) {
+                                    Ok(Event::Headers(h)) => {
+                                        let path = h
+                                            .iter()
+                                            .find(|kv| kv.0 == ":path")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        let auth = h
+                                            .iter()
+                                            .find(|kv| kv.0 == "authorization")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        if path == PUBLISH_STREAM {
+                                            stream_attempts.fetch_add(1, Ordering::SeqCst);
+                                            seen_auths.lock().unwrap().push(auth.clone());
+                                            if auth != accepted_auth {
+                                                let _ = st.send_headers(
+                                                    &[
+                                                        (":status".to_string(), "200".to_string()),
+                                                        (
+                                                            "content-type".to_string(),
+                                                            "application/grpc".to_string(),
+                                                        ),
+                                                        (
+                                                            "grpc-status".to_string(),
+                                                            code::UNAUTHENTICATED.to_string(),
+                                                        ),
+                                                        (
+                                                            "grpc-message".to_string(),
+                                                            "stale or invalid token".to_string(),
+                                                        ),
+                                                    ],
+                                                    true,
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                    Ok(Event::Data(d)) => {
+                                        parser.push(&d);
+                                        while let Ok(Some(m)) = parser.next() {
+                                            msgs.push(m);
+                                        }
+                                    }
+                                    Ok(Event::End) => break,
+                                    _ => return,
+                                }
+                            }
+                            let ok_headers = [
+                                (":status".to_string(), "200".to_string()),
+                                ("content-type".to_string(), "application/grpc".to_string()),
+                            ];
+                            let _ = st.send_headers(&ok_headers, false);
+                            for m in &msgs {
+                                let r = Msg::decode(
+                                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                                    m,
+                                )
+                                .unwrap();
+                                let o = r.get_msg("ordered_build_event").unwrap();
+                                let mut resp = Msg::new(
+                                    "google.devtools.build.v1.PublishBuildToolEventStreamResponse",
+                                );
+                                resp.set_int("sequence_number", o.get_i64("sequence_number"));
+                                if let Some(sid) = o.get_msg("stream_id") {
+                                    resp.set_msg("stream_id", sid.clone());
+                                }
+                                let _ = st.send_data(
+                                    &frame_message(&resp.encode_to_vec()),
+                                    false,
+                                    None,
+                                );
+                            }
+                            let _ = st.send_headers(
+                                &[("grpc-status".to_string(), "0".to_string())],
+                                true,
+                            );
+                        });
+                    }
+                });
+                Ok(c)
+            }
+        }
+
+        struct RotatingCreds {
+            tokens: Mutex<Vec<String>>,
+            refreshes: Arc<AtomicUsize>,
+            fail_refresh: bool,
+        }
+
+        impl CallCredentialsProvider for RotatingCreds {
+            fn get_credentials(
+                &self,
+                _uri: &str,
+            ) -> Result<Vec<(String, String)>, CredentialError> {
+                let g = self.tokens.lock().unwrap();
+                let tok = g.first().cloned().unwrap_or_default();
+                Ok(vec![("authorization".into(), tok)])
+            }
+            fn refresh(&self) -> Result<(), CredentialError> {
+                self.refreshes.fetch_add(1, Ordering::SeqCst);
+                if self.fail_refresh {
+                    return Err(CredentialError::Helper("helper refresh failed".into()));
+                }
+                let mut g = self.tokens.lock().unwrap();
+                if g.len() > 1 {
+                    g.remove(0);
+                }
+                Ok(())
+            }
+        }
+
+        // 1. Dynamic credentials rotate on UNAUTHENTICATED -> refreshes once and succeeds!
+        let attempts1 = Arc::new(AtomicUsize::new(0));
+        let seen1 = Arc::new(Mutex::new(Vec::new()));
+        let refreshes1 = Arc::new(AtomicUsize::new(0));
+        let creds1: Arc<dyn CallCredentialsProvider> = Arc::new(RotatingCreds {
+            tokens: Mutex::new(vec!["Bearer stale".into(), "Bearer fresh".into()]),
+            refreshes: refreshes1.clone(),
+            fail_refresh: false,
+        });
+        let ch1 = Arc::new(Channel::with_config(
+            Arc::new(AuthCheckingBesConn {
+                accepted_auth: "Bearer fresh".into(),
+                stream_attempts: attempts1.clone(),
+                seen_auths: seen1.clone(),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(creds1),
+                auth_uri: "https://bes.auth.local".into(),
+            },
+        ));
+        let mut c1 = cfg();
+        c1.lifecycle_events = false;
+        let t1 = BesTransport::start(c1, ch1);
+        t1.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        t1.close()
+            .expect("bidi stream should succeed after one credential refresh");
+        assert_eq!(refreshes1.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts1.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *seen1.lock().unwrap(),
+            vec!["Bearer stale".to_string(), "Bearer fresh".to_string()]
+        );
+
+        // 2. Dynamic credentials still rejected after refresh -> refreshes once, attempts twice
+        //    (no pointless 4x retry backoff), classified as Persistent.
+        let attempts2 = Arc::new(AtomicUsize::new(0));
+        let refreshes2 = Arc::new(AtomicUsize::new(0));
+        let creds2: Arc<dyn CallCredentialsProvider> = Arc::new(RotatingCreds {
+            tokens: Mutex::new(vec!["Bearer bad1".into(), "Bearer bad2".into()]),
+            refreshes: refreshes2.clone(),
+            fail_refresh: false,
+        });
+        let ch2 = Arc::new(Channel::with_config(
+            Arc::new(AuthCheckingBesConn {
+                accepted_auth: "Bearer valid".into(),
+                stream_attempts: attempts2.clone(),
+                seen_auths: Arc::new(Mutex::new(Vec::new())),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(creds2),
+                auth_uri: "https://bes.auth.local".into(),
+            },
+        ));
+        let mut c2 = cfg();
+        c2.lifecycle_events = false;
+        let t2 = BesTransport::start(c2, ch2);
+        t2.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        assert!(t2.close().is_err());
+        assert_eq!(refreshes2.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts2.load(Ordering::SeqCst), 2);
+        assert_eq!(t2.last_error().unwrap().kind, BesErrorKind::Persistent);
+
+        // 3. Refresh itself fails -> fails immediately after 1 attempt as Persistent.
+        let attempts3 = Arc::new(AtomicUsize::new(0));
+        let refreshes3 = Arc::new(AtomicUsize::new(0));
+        let creds3: Arc<dyn CallCredentialsProvider> = Arc::new(RotatingCreds {
+            tokens: Mutex::new(vec!["Bearer stale".into()]),
+            refreshes: refreshes3.clone(),
+            fail_refresh: true,
+        });
+        let ch3 = Arc::new(Channel::with_config(
+            Arc::new(AuthCheckingBesConn {
+                accepted_auth: "Bearer valid".into(),
+                stream_attempts: attempts3.clone(),
+                seen_auths: Arc::new(Mutex::new(Vec::new())),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(creds3),
+                auth_uri: "https://bes.auth.local".into(),
+            },
+        ));
+        let mut c3 = cfg();
+        c3.lifecycle_events = false;
+        let t3 = BesTransport::start(c3, ch3);
+        t3.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        let err3 = t3.close().unwrap_err();
+        assert!(err3.contains("helper refresh failed"), "{err3}");
+        assert_eq!(refreshes3.load(Ordering::SeqCst), 1);
+        assert_eq!(attempts3.load(Ordering::SeqCst), 1);
+        assert_eq!(t3.last_error().unwrap().kind, BesErrorKind::Persistent);
+
+        // 4. No dynamic credentials (or static userinfo/netrc) -> fails immediately after 1
+        //    attempt as Persistent (zero pointless retries!).
+        let attempts4 = Arc::new(AtomicUsize::new(0));
+        let static_creds: Arc<dyn CallCredentialsProvider> =
+            Arc::new(CompositeCredentialsProvider {
+                helper: None,
+                google: None,
+                userinfo: basic_auth_header_for_userinfo("bad-key"),
+                netrc: None,
+            });
+        let ch4 = Arc::new(Channel::with_config(
+            Arc::new(AuthCheckingBesConn {
+                accepted_auth: "Bearer valid".into(),
+                stream_attempts: attempts4.clone(),
+                seen_auths: Arc::new(Mutex::new(Vec::new())),
+            }),
+            ChannelConfig {
+                tls: false,
+                max_connections: 1,
+                max_concurrency_per_connection: 100,
+                default_metadata: vec![],
+                credentials: Some(static_creds),
+                auth_uri: "https://bes.auth.local".into(),
+            },
+        ));
+        assert!(!ch4.has_refreshable_credentials());
+        let mut c4 = cfg();
+        c4.lifecycle_events = false;
+        let t4 = BesTransport::start(c4, ch4);
+        t4.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        assert!(t4.close().is_err());
+        assert_eq!(attempts4.load(Ordering::SeqCst), 1);
+        assert_eq!(t4.last_error().unwrap().kind, BesErrorKind::Persistent);
     }
 }

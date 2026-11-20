@@ -2361,8 +2361,16 @@ fn extract_remote_authority(endpoint: &str) -> Option<&str> {
         Some((_, rest)) => rest,
         None => s,
     };
-    let authority = after_scheme.split('/').next().unwrap_or("").trim();
-    (!authority.is_empty()).then_some(authority)
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, hp)| hp)
+        .unwrap_or(authority);
+    (!hostport.is_empty()).then_some(hostport)
 }
 
 fn compute_remote_bytestream_prefix(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {

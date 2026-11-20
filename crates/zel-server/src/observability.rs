@@ -398,6 +398,7 @@ impl BuildObserver {
         parsed: Option<&ParsedCommandOptions>,
         command: &str,
         output_base: &str,
+        workspace_dir: &str,
         fallback_invocation_id: Option<&str>,
         client_env: &std::collections::BTreeMap<String, String>,
     ) -> Self {
@@ -480,6 +481,8 @@ impl BuildObserver {
         let include_run_residue = parsed
             .and_then(|p| p.get_bool("experimental_run_bep_event_include_residue"))
             .unwrap_or(false);
+        let workspace_path =
+            (!workspace_dir.is_empty()).then(|| std::path::PathBuf::from(workspace_dir));
         let mut bes_t = None;
         let mut bes_streaming_msg = None;
         let mut artifact_uploader: Option<Arc<bes::ByteStreamBuildEventArtifactUploader>> = None;
@@ -495,6 +498,7 @@ impl BuildObserver {
                         if ropts.build_request_id.is_none() {
                             ropts.build_request_id = Some(build_request_id.clone());
                         }
+                        ropts.workspace = workspace_path.clone();
                         let target = ropts
                             .remote_cache
                             .as_deref()
@@ -535,12 +539,13 @@ impl BuildObserver {
                     }
                 }
             }
-            match bes::transport_from_options_with_env(
+            match bes::transport_from_options_with_env_and_workspace(
                 &bep_opts,
                 &build_request_id,
                 &invocation_id,
                 command,
                 client_env,
+                workspace_path.as_deref(),
             ) {
                 Ok(Some((t, cfg))) => {
                     if let Some(u) = &artifact_uploader {
@@ -669,7 +674,7 @@ impl BuildObserver {
             record_all_mnemonics,
             memory_profile,
             namer: std::sync::Mutex::new(bep::ArtifactGroupNamer::new()),
-            workspace_dir: Default::default(),
+            workspace_dir: std::sync::Mutex::new(workspace_dir.to_string()),
             stats: Default::default(),
             late_nodes: Default::default(),
             patterns: Default::default(),
@@ -2350,6 +2355,7 @@ mod tests {
             Some(&parsed),
             "build",
             &ob,
+            "",
             Some("99999999-9999-4999-8999-999999999999"),
             &env,
         );
@@ -2367,6 +2373,7 @@ mod tests {
             Some(&parsed_empty),
             "build",
             &ob,
+            "",
             Some(env_inv),
             &env,
         );
@@ -2384,6 +2391,7 @@ mod tests {
             Some(&parsed_auto),
             "build",
             &ob,
+            "",
             None,
             &env,
         );
@@ -3331,6 +3339,221 @@ mod tests {
             !mi_err.contains("downloader") && !mi_err.contains("main repository mapping"),
             "mobile-install should not run downloader or repo checks: {mi_err}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_observer_expands_workspace_for_bes_and_artifact_uploader_credential_helper() {
+        use std::os::unix::fs::PermissionsExt;
+        use zel_proto::dynamic::Msg;
+        use zel_remote::grpc::{frame_message, MessageParser};
+        use zel_remote::http2::{Conn, Event, LocalSettings};
+        use zel_remote::transport::Transport;
+
+        let cas_listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIPPED: loopback sockets are not permitted ({e})");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let cas_port = cas_listener.local_addr().unwrap().port();
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", cas_port)) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SKIPPED: loopback connect not permitted ({e})");
+                return;
+            }
+            panic!("{e}");
+        }
+        let cas_server = zel_remote::fake_server::FakeReapiServer::new();
+        cas_server.serve_tcp(cas_listener);
+
+        let bes_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let bes_port = bes_listener.local_addr().unwrap().port();
+        let bes_auth_headers: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let bes_auth_clone = bes_auth_headers.clone();
+        std::thread::spawn(move || {
+            for tcp in bes_listener.incoming().flatten() {
+                let (Ok(r), Ok(w)) = (tcp.try_clone(), tcp.try_clone()) else {
+                    continue;
+                };
+                let t = Transport {
+                    reader: Box::new(r),
+                    writer: Box::new(w),
+                    shutdown: Box::new(move || {
+                        let _ = tcp.shutdown(std::net::Shutdown::Both);
+                    }),
+                };
+                let auth_log = bes_auth_clone.clone();
+                std::thread::spawn(move || {
+                    let Ok((_conn, rx)) = Conn::server_from(t, LocalSettings::default()) else {
+                        return;
+                    };
+                    while let Ok(st) = rx.recv() {
+                        let auth_log = auth_log.clone();
+                        std::thread::spawn(move || {
+                            let mut path = String::new();
+                            let mut parser = MessageParser::default();
+                            let mut msgs = Vec::new();
+                            loop {
+                                match st.recv(None) {
+                                    Ok(Event::Headers(h)) => {
+                                        path = h
+                                            .iter()
+                                            .find(|kv| kv.0 == ":path")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        if let Some((_, v)) =
+                                            h.iter().find(|kv| kv.0 == "authorization")
+                                        {
+                                            auth_log.lock().unwrap().push(v.clone());
+                                        }
+                                    }
+                                    Ok(Event::Data(d)) => {
+                                        parser.push(&d);
+                                        while let Ok(Some(m)) = parser.next() {
+                                            msgs.push(m);
+                                        }
+                                    }
+                                    Ok(Event::End) => break,
+                                    _ => return,
+                                }
+                            }
+                            let ok_headers = [
+                                (":status".to_string(), "200".to_string()),
+                                ("content-type".to_string(), "application/grpc".to_string()),
+                            ];
+                            let _ = st.send_headers(&ok_headers, false);
+                            if path == bes::PUBLISH_LIFECYCLE {
+                                let _ = st.send_data(&frame_message(&[]), false, None);
+                            } else if path == bes::PUBLISH_STREAM {
+                                for m in &msgs {
+                                    let r = Msg::decode(
+                                        "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                                        m,
+                                    )
+                                    .unwrap();
+                                    let o = r.get_msg("ordered_build_event").unwrap();
+                                    let mut resp = Msg::new(
+                                        "google.devtools.build.v1.PublishBuildToolEventStreamResponse",
+                                    );
+                                    resp.set_int("sequence_number", o.get_i64("sequence_number"));
+                                    if let Some(sid) = o.get_msg("stream_id") {
+                                        resp.set_msg("stream_id", sid.clone());
+                                    }
+                                    let _ = st.send_data(
+                                        &frame_message(&resp.encode_to_vec()),
+                                        false,
+                                        None,
+                                    );
+                                }
+                            }
+                            let _ = st.send_headers(
+                                &[("grpc-status".to_string(), "0".to_string())],
+                                true,
+                            );
+                        });
+                    }
+                });
+            }
+        });
+
+        let root = std::env::temp_dir().join(format!(
+            "zel-obs-cred-{}-{}",
+            std::process::id(),
+            zel_util::uuid_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("tools")).unwrap();
+        std::fs::create_dir_all(ws.join("p")).unwrap();
+        std::fs::write(ws.join("WORKSPACE"), "").unwrap();
+        std::fs::write(
+            ws.join("p/BUILD"),
+            "genrule(name='out', outs=['out.txt'], cmd='printf payload > $@')\n",
+        )
+        .unwrap();
+
+        let helper_log = root.join("helper.log");
+        let helper_script = ws.join("tools/cred_helper.sh");
+        std::fs::write(
+            &helper_script,
+            format!(
+                "#!/bin/sh\nread req\nprintf '%s|%s\\n' \"$req\" \"$(pwd -P)\" >> {}\nprintf '{{\"headers\":{{\"Authorization\":[\"Bearer %s\"]}}}}\\n' \"$OBS_CLIENT_TOK\"\n",
+                helper_log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let rt = runtime(&root, &ws);
+        let path_env = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                "--noenable_bzlmod",
+                "--noremote_accept_cached",
+                "--noremote_upload_local_results",
+                &format!("--client_env=PATH={path_env}"),
+                "--client_env=OBS_CLIENT_TOK=ws-cred-ok",
+                "--credential_helper=127.0.0.1=%workspace%/tools/cred_helper.sh",
+                &format!("--bes_backend=grpc://127.0.0.1:{bes_port}"),
+                &format!("--remote_cache=grpc://127.0.0.1:{cas_port}"),
+                "//p:out",
+            ],
+        );
+        assert_eq!(
+            code, 0,
+            "build with %workspace% credential helper failed: {err}"
+        );
+
+        // 1. BES server received Bearer token from `%workspace%` helper with `client_env`.
+        let bes_auths = bes_auth_headers.lock().unwrap().clone();
+        assert!(
+            bes_auths.iter().any(|v| v == "Bearer ws-cred-ok"),
+            "BES did not receive credential helper auth: {bes_auths:?}"
+        );
+
+        // 2. CAS server (used by ByteStreamBuildEventArtifactUploader and remote cache) received
+        //    Bearer token from `%workspace%` helper with `client_env`.
+        let cas_hdrs = cas_server
+            .last_headers("FindMissingBlobs")
+            .expect("CAS FindMissingBlobs should have been called");
+        assert!(
+            cas_hdrs.contains(&("authorization".to_string(), "Bearer ws-cred-ok".to_string())),
+            "CAS did not receive credential helper auth: {cas_hdrs:?}"
+        );
+
+        // 3. Helper invocations received normalized `http://` URIs (not `grpc://`) and ran with
+        //    workspace as cwd.
+        let log_text = std::fs::read_to_string(&helper_log).unwrap();
+        let expected_ws = std::fs::canonicalize(&ws).unwrap();
+        let expected_bes_uri = format!(r#"{{"uri":"http://127.0.0.1:{bes_port}"}}"#);
+        let expected_cas_uri = format!(r#"{{"uri":"http://127.0.0.1:{cas_port}"}}"#);
+        assert!(
+            log_text.contains(&expected_bes_uri),
+            "helper log missing normalized BES URI ({expected_bes_uri}): {log_text}"
+        );
+        assert!(
+            log_text.contains(&expected_cas_uri),
+            "helper log missing normalized CAS URI ({expected_cas_uri}): {log_text}"
+        );
+        assert!(
+            !log_text.contains("grpc://"),
+            "helper must never receive non-standard grpc:// URI: {log_text}"
+        );
+        for line in log_text.lines() {
+            let cwd = line.split('|').nth(1).unwrap_or("");
+            assert_eq!(
+                std::fs::canonicalize(cwd).unwrap(),
+                expected_ws,
+                "helper did not run with workspace as cwd: {line}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

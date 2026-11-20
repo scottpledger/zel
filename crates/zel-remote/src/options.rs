@@ -99,6 +99,58 @@ pub enum Endpoint {
     },
 }
 
+fn redact_endpoint_userinfo(raw: &str) -> String {
+    if raw.starts_with("unix:") {
+        return raw.to_string();
+    }
+    let (prefix, rest) = match raw.split_once("://") {
+        Some((sc, r)) => (Some(sc), r),
+        None => (None, raw),
+    };
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    let tail = &rest[auth_end..];
+    let redacted_auth = match authority.rsplit_once('@') {
+        Some((_, hostport)) => format!("***@{hostport}"),
+        None => authority.to_string(),
+    };
+    match prefix {
+        Some(sc) => format!("{sc}://{redacted_auth}{tail}"),
+        None => format!("{redacted_auth}{tail}"),
+    }
+}
+
+fn split_userinfo_hostport(authority: &str) -> (Option<String>, &str) {
+    match authority.rsplit_once('@') {
+        Some((ui, hp)) => {
+            let userinfo = (!ui.is_empty()).then(|| ui.to_string());
+            (userinfo, hp)
+        }
+        None => (None, authority),
+    }
+}
+
+/// Builds an HTTP Basic `authorization` header from raw URL `userinfo` (`<api-key>` or
+/// `<user>:<password>`), percent-decoding components and ensuring RFC 7617 `userid:password`
+/// formatting (`<key>` -> `<key>:` so Go/RFC-7617 Basic auth parsers accept it).
+pub fn basic_auth_header_for_userinfo(userinfo: &str) -> Option<Header> {
+    if userinfo.is_empty() {
+        return None;
+    }
+    let formatted = match userinfo.split_once(':') {
+        Some((user, pass)) => format!(
+            "{}:{}",
+            crate::grpc::percent_decode(user),
+            crate::grpc::percent_decode(pass)
+        ),
+        None => format!("{}:", crate::grpc::percent_decode(userinfo)),
+    };
+    Some((
+        "authorization".to_string(),
+        format!("Basic {}", zel_util::base64_encode(formatted.as_bytes())),
+    ))
+}
+
 fn split_host_port(hp: &str, default: u16, raw: &str) -> Result<(String, u16), String> {
     let hp = hp.trim_end_matches('/');
     if hp.is_empty() {
@@ -132,13 +184,14 @@ fn split_host_port(hp: &str, default: u16, raw: &str) -> Result<(String, u16), S
 
 impl Endpoint {
     /// Parses a gRPC endpoint (`--remote_executor`, `--bes_backend`, or gRPC `--remote_cache`)
-    /// matching Bazel's `GoogleAuthUtils.newChannel`:
+    /// matching Bazel's `GoogleAuthUtils.newChannel`, returning the sanitized [`Endpoint`] and
+    /// any stripped raw `userinfo` (`grpcs://<api-key>@host` or `grpcs://user:pass@host`):
     /// - `unix:...` strips `"unix:"` and `"grpc://"` (so `unix:grpc://foo` -> `foo`,
     ///   `unix:///tmp/s` -> `///tmp/s`);
-    /// - `grpc://host[:port]` uses plaintext HTTP/2 with default port **443**;
-    /// - `grpcs://host[:port]`, `https://host[:port]`, and bare `host[:port]` use TLS HTTP/2
-    ///   with default port **443**.
-    pub fn parse_grpc(s: &str) -> Result<Endpoint, String> {
+    /// - `grpc://[userinfo@]host[:port]` uses plaintext HTTP/2 with default port **443**;
+    /// - `grpcs://[userinfo@]host[:port]`, `https://[userinfo@]host[:port]`, and bare
+    ///   `[userinfo@]host[:port]` use TLS HTTP/2 with default port **443**.
+    pub fn parse_grpc_with_userinfo(s: &str) -> Result<(Endpoint, Option<String>), String> {
         if s.is_empty() {
             return Err("Empty remote endpoint".into());
         }
@@ -147,40 +200,55 @@ impl Endpoint {
             if sock.is_empty() {
                 return Err(format!("Invalid unix endpoint: {s}"));
             }
-            return Ok(Endpoint::Unix(sock));
+            return Ok((Endpoint::Unix(sock), None));
         }
+        let safe_raw = redact_endpoint_userinfo(s);
         let (scheme, rest) = match s.split_once("://") {
             Some((sc, r)) => (sc.to_ascii_lowercase(), r),
             None => (String::new(), s),
         };
         match scheme.as_str() {
             "grpc" => {
-                let hostport = rest.split('/').next().unwrap_or("");
-                let (host, port) = split_host_port(hostport, 443, s)?;
-                Ok(Endpoint::Tcp {
-                    host,
-                    port,
-                    tls: false,
-                })
+                let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+                let (userinfo, hostport) = split_userinfo_hostport(authority);
+                let (host, port) = split_host_port(hostport, 443, &safe_raw)?;
+                Ok((
+                    Endpoint::Tcp {
+                        host,
+                        port,
+                        tls: false,
+                    },
+                    userinfo,
+                ))
             }
             "grpcs" | "https" | "" => {
-                let hostport = rest.split('/').next().unwrap_or("");
-                let (host, port) = split_host_port(hostport, 443, s)?;
-                Ok(Endpoint::Tcp {
-                    host,
-                    port,
-                    tls: true,
-                })
+                let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+                let (userinfo, hostport) = split_userinfo_hostport(authority);
+                let (host, port) = split_host_port(hostport, 443, &safe_raw)?;
+                Ok((
+                    Endpoint::Tcp {
+                        host,
+                        port,
+                        tls: true,
+                    },
+                    userinfo,
+                ))
             }
             other => Err(format!(
-                "Unsupported gRPC scheme '{other}' in endpoint '{s}'"
+                "Unsupported gRPC scheme '{other}' in endpoint '{safe_raw}'"
             )),
         }
     }
 
+    /// Parses a gRPC endpoint (`--remote_executor`, `--bes_backend`, or gRPC `--remote_cache`),
+    /// stripping any embedded `userinfo@` from the returned host.
+    pub fn parse_grpc(s: &str) -> Result<Endpoint, String> {
+        Self::parse_grpc_with_userinfo(s).map(|(ep, _)| ep)
+    }
+
     /// Parses a `--remote_cache` value: `http://` and `https://` select the HTTP(S) REST cache
-    /// protocol; everything else follows [`Endpoint::parse_grpc`].
-    pub fn parse_cache(s: &str) -> Result<Endpoint, String> {
+    /// protocol; everything else follows [`Endpoint::parse_grpc_with_userinfo`].
+    pub fn parse_cache_with_userinfo(s: &str) -> Result<(Endpoint, Option<String>), String> {
         if s.is_empty() {
             return Err("Empty remote cache endpoint".into());
         }
@@ -189,26 +257,48 @@ impl Endpoint {
             if sock.is_empty() {
                 return Err(format!("Invalid unix endpoint: {s}"));
             }
-            return Ok(Endpoint::Unix(sock));
+            return Ok((Endpoint::Unix(sock), None));
         }
         if let Some((sc, rest)) = s.split_once("://") {
             let sc_lc = sc.to_ascii_lowercase();
             if sc_lc == "http" || sc_lc == "https" {
+                let safe_raw = redact_endpoint_userinfo(s);
                 let tls = sc_lc == "https";
-                let (hostport, prefix) = match rest.split_once('/') {
-                    Some((h, p)) => (h, format!("/{}", p.trim_end_matches('/'))),
-                    None => (rest, String::new()),
+                let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                let authority = &rest[..auth_end];
+                let tail = &rest[auth_end..];
+                let prefix = if let Some(after_slash) = tail.strip_prefix('/') {
+                    let clean_p = after_slash.split(['?', '#']).next().unwrap_or(after_slash);
+                    let trimmed = clean_p.trim_end_matches('/');
+                    if trimmed.is_empty() {
+                        String::new()
+                    } else {
+                        format!("/{trimmed}")
+                    }
+                } else {
+                    String::new()
                 };
-                let (host, port) = split_host_port(hostport, if tls { 443 } else { 80 }, s)?;
-                return Ok(Endpoint::Http {
-                    host,
-                    port,
-                    prefix: if prefix == "/" { String::new() } else { prefix },
-                    tls,
-                });
+                let (userinfo, hostport) = split_userinfo_hostport(authority);
+                let (host, port) =
+                    split_host_port(hostport, if tls { 443 } else { 80 }, &safe_raw)?;
+                return Ok((
+                    Endpoint::Http {
+                        host,
+                        port,
+                        prefix,
+                        tls,
+                    },
+                    userinfo,
+                ));
             }
         }
-        Self::parse_grpc(s)
+        Self::parse_grpc_with_userinfo(s)
+    }
+
+    /// Parses a `--remote_cache` value: `http://` and `https://` select the HTTP(S) REST cache
+    /// protocol; everything else follows [`Endpoint::parse_grpc`].
+    pub fn parse_cache(s: &str) -> Result<Endpoint, String> {
+        Self::parse_cache_with_userinfo(s).map(|(ep, _)| ep)
     }
 
     /// Parses an endpoint (`--remote_cache` / general helper). `tls_enabled` is retained for API
@@ -898,19 +988,31 @@ impl RemoteOptions {
         &self,
         workspace: Option<&Path>,
     ) -> Result<Option<Arc<dyn CallCredentialsProvider>>, String> {
+        self.build_credentials_provider_with_userinfo(workspace, None)
+    }
+
+    fn build_credentials_provider_with_userinfo(
+        &self,
+        workspace: Option<&Path>,
+        userinfo: Option<Header>,
+    ) -> Result<Option<Arc<dyn CallCredentialsProvider>>, String> {
         let workspace = workspace.or(self.workspace.as_deref());
+        let client_env =
+            (self.has_client_env || !self.client_env.is_empty()).then_some(&self.client_env);
         let helper = if !self.credential_helpers.is_empty() {
-            Some(CredentialHelperProvider::from_specs(
+            Some(CredentialHelperProvider::from_specs_with_env(
                 &self.credential_helpers,
                 workspace,
+                client_env,
                 self.credential_helper_timeout,
                 self.credential_helper_cache_duration,
             ))
         } else {
             self.credential_helper.as_ref().map(|single| {
-                CredentialHelperProvider::from_specs(
+                CredentialHelperProvider::from_specs_with_env(
                     std::slice::from_ref(single),
                     workspace,
+                    client_env,
                     self.credential_helper_timeout,
                     self.credential_helper_cache_duration,
                 )
@@ -924,13 +1026,20 @@ impl RemoteOptions {
                 self.tls_config.clone(),
             ))
         } else if self.google_default_credentials {
-            Some(
+            let provider = if let Some(env) = client_env {
+                GoogleAuthCallCredentialsProvider::from_adc_with_client_env(
+                    self.google_auth_scopes.clone(),
+                    self.tls_config.clone(),
+                    env,
+                )
+            } else {
                 GoogleAuthCallCredentialsProvider::from_adc(
                     self.google_auth_scopes.clone(),
                     self.tls_config.clone(),
                 )
-                .map_err(|e| e.to_string())?,
-            )
+            }
+            .map_err(|e| e.to_string())?;
+            Some(provider)
         } else {
             None
         };
@@ -938,8 +1047,8 @@ impl RemoteOptions {
         let netrc = if let Some(path) = &self.netrc {
             Some(NetrcCredentialsProvider::from_file(Path::new(path))?)
         } else if google.is_none() {
-            if self.has_client_env || !self.client_env.is_empty() {
-                NetrcCredentialsProvider::from_client_env(&self.client_env)?
+            if let Some(env) = client_env {
+                NetrcCredentialsProvider::from_client_env(env)?
             } else {
                 NetrcCredentialsProvider::try_from_env()?
             }
@@ -947,12 +1056,13 @@ impl RemoteOptions {
             None
         };
 
-        if helper.is_none() && google.is_none() && netrc.is_none() {
+        if helper.is_none() && google.is_none() && userinfo.is_none() && netrc.is_none() {
             return Ok(None);
         }
         Ok(Some(Arc::new(CompositeCredentialsProvider {
             helper,
             google,
+            userinfo,
             netrc,
         })))
     }
@@ -976,24 +1086,23 @@ impl RemoteOptions {
         }
     }
 
-    fn channel_for(
-        &self,
-        endpoint: &str,
-        extra: &[Header],
-        creds: Option<Arc<dyn CallCredentialsProvider>>,
-    ) -> Result<Arc<Channel>, String> {
-        let ep = Endpoint::parse_grpc(endpoint)?;
+    fn channel_for(&self, endpoint: &str, extra: &[Header]) -> Result<Arc<Channel>, String> {
+        let (ep, userinfo) = Endpoint::parse_grpc_with_userinfo(endpoint)?;
         let proxy = self.unix_proxy_path()?;
         let connector = ep.connector_with_tls(self.timeout, &self.tls_config, proxy.as_deref())?;
         let mut raw_headers = self.headers.clone();
         raw_headers.extend(extra.iter().cloned());
         let headers = collapse_headers(&raw_headers);
-        // Preserve endpoint scheme/host for credential helpers (e.g. `grpc://h:1` or `https://h`).
-        let auth_uri = if endpoint.contains("://") || endpoint.starts_with("unix:") {
-            endpoint.to_string()
+        let has_explicit_auth = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+        let userinfo_hdr = if has_explicit_auth {
+            None
         } else {
-            ep.auth_uri()
+            userinfo.as_deref().and_then(basic_auth_header_for_userinfo)
         };
+        let creds = self.build_credentials_provider_with_userinfo(None, userinfo_hdr)?;
+        let auth_uri = ep.auth_uri();
         Ok(Arc::new(Channel::with_config(
             connector,
             ChannelConfig {
@@ -1012,7 +1121,7 @@ impl RemoteOptions {
         let Some(cache_str) = &self.remote_cache else {
             return Ok(None);
         };
-        let ep = Endpoint::parse_cache(cache_str)?;
+        let (ep, userinfo) = Endpoint::parse_cache_with_userinfo(cache_str)?;
         let Endpoint::Http {
             ref prefix, tls, ..
         } = ep
@@ -1021,10 +1130,18 @@ impl RemoteOptions {
         };
         let proxy = self.unix_proxy_path()?;
         let connector = ep.connector_with_tls(self.timeout, &self.tls_config, proxy.as_deref())?;
-        let creds = self.build_credentials_provider(None)?;
         let mut raw_headers = self.headers.clone();
         raw_headers.extend(self.cache_headers.iter().cloned());
         let headers = collapse_headers(&raw_headers);
+        let has_explicit_auth = headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+        let userinfo_hdr = if has_explicit_auth {
+            None
+        } else {
+            userinfo.as_deref().and_then(basic_auth_header_for_userinfo)
+        };
+        let creds = self.build_credentials_provider_with_userinfo(None, userinfo_hdr)?;
         Ok(Some(Arc::new(HttpCacheClient::new(
             connector,
             HttpCacheConfig {
@@ -1056,8 +1173,7 @@ impl RemoteOptions {
         let Some(cache_ep) = cache_ep else {
             return Ok(None);
         };
-        let creds = self.build_credentials_provider(None)?;
-        let cache = self.channel_for(&cache_ep, &self.cache_headers, creds.clone())?;
+        let cache = self.channel_for(&cache_ep, &self.cache_headers)?;
         let exec = match &self.remote_executor {
             Some(e)
                 if (Some(e) == self.remote_cache.as_ref() || self.remote_cache.is_none())
@@ -1067,7 +1183,7 @@ impl RemoteOptions {
                 // with identical headers (Bazel RemoteModule parity).
                 Some(cache.clone())
             }
-            Some(e) => Some(self.channel_for(e, &self.exec_headers, creds)?),
+            Some(e) => Some(self.channel_for(e, &self.exec_headers)?),
             None => None,
         };
         Ok(Some(ReapiClient::new(
@@ -1463,5 +1579,270 @@ mod socket_tests {
         assert!(err.contains("Failed to parse"), "unexpected error: {err}");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn endpoint_userinfo_parsing_basic_auth_redaction_and_normalized_auth_uri() {
+        // 1. grpcs://<api-key>@remote.buildbuddy.io
+        let (ep, ui) =
+            Endpoint::parse_grpc_with_userinfo("grpcs://my-bb-key@remote.buildbuddy.io").unwrap();
+        assert_eq!(
+            ep,
+            Endpoint::Tcp {
+                host: "remote.buildbuddy.io".into(),
+                port: 443,
+                tls: true,
+            }
+        );
+        assert_eq!(ui.as_deref(), Some("my-bb-key"));
+        assert_eq!(ep.auth_uri(), "https://remote.buildbuddy.io");
+        assert_eq!(
+            basic_auth_header_for_userinfo("my-bb-key"),
+            Some((
+                "authorization".to_string(),
+                format!("Basic {}", zel_util::base64_encode(b"my-bb-key:"))
+            ))
+        );
+
+        // 2. grpcs://user:pass@host:443 and percent-encoded credentials
+        let (ep2, ui2) =
+            Endpoint::parse_grpc_with_userinfo("grpcs://alice:s3cr3t@host.example:443").unwrap();
+        assert_eq!(
+            ep2,
+            Endpoint::Tcp {
+                host: "host.example".into(),
+                port: 443,
+                tls: true,
+            }
+        );
+        assert_eq!(ui2.as_deref(), Some("alice:s3cr3t"));
+        assert_eq!(ep2.auth_uri(), "https://host.example");
+        assert_eq!(
+            basic_auth_header_for_userinfo("alice:s3cr3t"),
+            Some((
+                "authorization".to_string(),
+                format!("Basic {}", zel_util::base64_encode(b"alice:s3cr3t"))
+            ))
+        );
+        assert_eq!(
+            basic_auth_header_for_userinfo("user%40org:p%3Ass"),
+            Some((
+                "authorization".to_string(),
+                format!("Basic {}", zel_util::base64_encode(b"user@org:p:ss"))
+            ))
+        );
+
+        // 3. https://key@host/prefix REST cache endpoint
+        let (ep_http, ui_http) =
+            Endpoint::parse_cache_with_userinfo("https://cache-key@cache.example/v1/").unwrap();
+        assert_eq!(
+            ep_http,
+            Endpoint::Http {
+                host: "cache.example".into(),
+                port: 443,
+                prefix: "/v1".into(),
+                tls: true,
+            }
+        );
+        assert_eq!(ui_http.as_deref(), Some("cache-key"));
+        assert_eq!(ep_http.auth_uri(), "https://cache.example/v1");
+
+        // 4. IPv6 with userinfo and empty userinfo
+        let (ep_v6, ui_v6) =
+            Endpoint::parse_grpc_with_userinfo("grpcs://v6key@[::1]:8443").unwrap();
+        assert_eq!(
+            ep_v6,
+            Endpoint::Tcp {
+                host: "::1".into(),
+                port: 8443,
+                tls: true,
+            }
+        );
+        assert_eq!(ui_v6.as_deref(), Some("v6key"));
+        assert_eq!(ep_v6.auth_uri(), "https://[::1]:8443");
+
+        let (ep_empty_ui, ui_empty) =
+            Endpoint::parse_grpc_with_userinfo("grpcs://@remote.buildbuddy.io").unwrap();
+        assert_eq!(
+            ep_empty_ui,
+            Endpoint::Tcp {
+                host: "remote.buildbuddy.io".into(),
+                port: 443,
+                tls: true,
+            }
+        );
+        assert_eq!(ui_empty, None);
+
+        let (ep_q, ui_q) =
+            Endpoint::parse_cache_with_userinfo("https://q-key@cache.example.com?foo=bar/baz")
+                .unwrap();
+        assert_eq!(
+            ep_q,
+            Endpoint::Http {
+                host: "cache.example.com".into(),
+                port: 443,
+                prefix: String::new(),
+                tls: true,
+            }
+        );
+        assert_eq!(ui_q.as_deref(), Some("q-key"));
+
+        // 5. Error messages NEVER leak embedded credentials!
+        for bad in [
+            "grpcs://super-secret-token@remote.buildbuddy.io:notaport",
+            "grpcs://super-secret-token@",
+            "ftp://super-secret-token@remote.buildbuddy.io",
+            "https://super-secret-token@cache.example:badport/prefix",
+        ] {
+            let err = Endpoint::parse_cache(bad).unwrap_err();
+            assert!(
+                !err.contains("super-secret-token"),
+                "error leaked secret for '{bad}': {err}"
+            );
+        }
+
+        // 6. Channel authority, normalized auth_uri, and effective_bytestream_uri_prefix strip userinfo.
+        let mut o = RemoteOptions::from_source(&options_from_args(&[
+            "--remote_cache=grpcs://my-bb-key@remote.buildbuddy.io",
+            "--remote_instance_name=main",
+        ]))
+        .unwrap();
+        o.set_client_env(BTreeMap::new());
+        let client = o.build_client("inv").unwrap().unwrap();
+        assert_eq!(client.cache.authority(), "remote.buildbuddy.io");
+        assert_eq!(client.cache.auth_uri(), "https://remote.buildbuddy.io");
+        assert!(!client.cache.has_refreshable_credentials());
+        assert_eq!(
+            o.effective_bytestream_uri_prefix().as_deref(),
+            Some("remote.buildbuddy.io/main")
+        );
+        let hdrs = client
+            .cache
+            .credentials()
+            .unwrap()
+            .get_credentials(client.cache.auth_uri())
+            .unwrap();
+        assert_eq!(
+            hdrs,
+            vec![(
+                "authorization".to_string(),
+                format!("Basic {}", zel_util::base64_encode(b"my-bb-key:"))
+            )]
+        );
+
+        // Explicit Authorization header suppresses userinfo Basic auth.
+        let mut o_override = RemoteOptions::from_source(&options_from_args(&[
+            "--remote_cache=grpcs://my-bb-key@remote.buildbuddy.io",
+            "--remote_header=Authorization=Bearer explicit-tok",
+        ]))
+        .unwrap();
+        o_override.set_client_env(BTreeMap::new());
+        let c_override = o_override.build_client("inv").unwrap().unwrap();
+        assert!(c_override.cache.credentials().is_none());
+
+        // Plaintext grpc:// normalizes to http:// in auth_uri.
+        let mut o_plain = RemoteOptions::from_source(&options_from_args(&[
+            "--remote_cache=grpc://127.0.0.1:8980",
+        ]))
+        .unwrap();
+        o_plain.set_client_env(BTreeMap::new());
+        let c_plain = o_plain.build_client("inv").unwrap().unwrap();
+        assert_eq!(c_plain.cache.auth_uri(), "http://127.0.0.1:8980");
+    }
+
+    #[test]
+    fn remote_options_client_env_google_adc() {
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-remote-adc-{}-{}",
+            std::process::id(),
+            zel_util::uuid_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let adc = tmp.join("adc.json");
+        std::fs::write(&adc, r#"{"access_token":"adc-from-client-env"}"#).unwrap();
+
+        let mut o = RemoteOptions::from_source(&options_from_args(&[
+            "--remote_cache=grpcs://remote.example.com",
+            "--google_default_credentials",
+        ]))
+        .unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS".into(),
+            adc.to_string_lossy().into_owned(),
+        );
+        o.set_client_env(env);
+        let creds = o.build_credentials_provider(None).unwrap().unwrap();
+        assert_eq!(
+            creds.get_credentials("https://remote.example.com").unwrap(),
+            vec![(
+                "authorization".to_string(),
+                "Bearer adc-from-client-env".to_string()
+            )]
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn grpc_loopback_sends_userinfo_basic_auth_and_honors_explicit_header_override() {
+        let l = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("SKIPPED: loopback sockets are not permitted ({e})");
+                return;
+            }
+            Err(e) => panic!("{e}"),
+        };
+        let port = l.local_addr().unwrap().port();
+        if let Err(e) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                eprintln!("SKIPPED: loopback connect not permitted ({e})");
+                return;
+            }
+            panic!("{e}");
+        }
+        let s = FakeReapiServer::new();
+        s.serve_tcp(l);
+
+        // 1. URL userinfo sends Basic auth and strips userinfo from :authority.
+        let mut o = RemoteOptions::from_source(&options_from_args(&[&format!(
+            "--remote_cache=grpc://bb-api-key@127.0.0.1:{port}"
+        )]))
+        .unwrap();
+        o.set_client_env(BTreeMap::new());
+        let c = o.build_client("inv").unwrap().unwrap();
+        c.check_compatibility(false).unwrap();
+        let hdrs = s.last_headers("GetCapabilities").unwrap();
+        assert!(
+            hdrs.contains(&(
+                "authorization".to_string(),
+                format!("Basic {}", zel_util::base64_encode(b"bb-api-key:"))
+            )),
+            "missing Basic auth from userinfo: {hdrs:?}"
+        );
+        assert!(
+            hdrs.iter()
+                .all(|(k, v)| k != ":authority" || !v.contains("bb-api-key")),
+            ":authority leaked userinfo: {hdrs:?}"
+        );
+
+        // 2. Explicit Authorization header overrides userinfo (no duplicate authorization headers).
+        let mut o2 = RemoteOptions::from_source(&options_from_args(&[
+            &format!("--remote_cache=grpc://bb-api-key@127.0.0.1:{port}"),
+            "--remote_header=Authorization=Bearer override-tok",
+        ]))
+        .unwrap();
+        o2.set_client_env(BTreeMap::new());
+        let c2 = o2.build_client("inv").unwrap().unwrap();
+        c2.check_compatibility(false).unwrap();
+        let hdrs2 = s.last_headers("GetCapabilities").unwrap();
+        let auth_vals: Vec<&str> = hdrs2
+            .iter()
+            .filter(|(k, _)| k == "authorization")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(auth_vals, vec!["Bearer override-tok"]);
     }
 }

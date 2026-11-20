@@ -67,6 +67,12 @@ pub trait CallCredentialsProvider: Send + Sync {
 
     /// Refreshes cached credentials (invoked on `UNAUTHENTICATED` / `PERMISSION_DENIED` or 401).
     fn refresh(&self) -> Result<(), CredentialError>;
+
+    /// Returns `true` when `refresh()` can produce updated credentials for `uri` (e.g. a matching
+    /// credential helper or Google OAuth, rather than static `.netrc` or URL userinfo).
+    fn supports_refresh(&self, _uri: &str) -> bool {
+        true
+    }
 }
 
 /// Mirrors `CallCredentialsProvider.NO_CREDENTIALS`.
@@ -80,6 +86,10 @@ impl CallCredentialsProvider for NoCredentialsProvider {
 
     fn refresh(&self) -> Result<(), CredentialError> {
         Ok(())
+    }
+
+    fn supports_refresh(&self, _uri: &str) -> bool {
+        false
     }
 }
 
@@ -448,6 +458,31 @@ fn percent_decode_str(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Normalizes a URI for credential lookup / helper invocation per Bazel's Credential Helper spec:
+/// - `grpcs://` -> `https://`, `grpc://` -> `http://` (case-insensitive scheme)
+/// - strips any embedded `userinfo@` from the authority so credentials never leak to helpers.
+pub fn normalize_credential_uri(uri: &str) -> String {
+    if uri.starts_with("unix:") {
+        return uri.to_string();
+    }
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return uri.to_string();
+    };
+    let norm_scheme = match scheme.to_ascii_lowercase().as_str() {
+        "grpcs" => "https",
+        "grpc" => "http",
+        _ => scheme,
+    };
+    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..auth_end];
+    let tail = &rest[auth_end..];
+    let clean_authority = authority
+        .rsplit_once('@')
+        .map(|(_, hostport)| hostport)
+        .unwrap_or(authority);
+    format!("{norm_scheme}://{clean_authority}{tail}")
+}
+
 /// Extracts and normalizes the host component of `uri` following `URI.getHost()`:
 /// percent-decoded, IPv6 brackets removed, ASCII-lowercased.
 pub fn extract_uri_host(uri: &str) -> String {
@@ -748,7 +783,24 @@ pub fn invoke_credential_helper_process(
         .map_err(|e| format!("Credential helper '{path}' returned invalid output: {e}"))
 }
 
-fn resolve_helper_path(raw: &str, workspace: Option<&Path>) -> PathBuf {
+fn lookup_client_env(env: &BTreeMap<String, String>, name: &str) -> Option<String> {
+    if let Some(v) = env.get(name) {
+        return Some(v.clone());
+    }
+    #[cfg(windows)]
+    {
+        if let Some((_, v)) = env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+            return Some(v.clone());
+        }
+    }
+    None
+}
+
+fn resolve_helper_path_with_env(
+    raw: &str,
+    workspace: Option<&Path>,
+    client_env: Option<&BTreeMap<String, String>>,
+) -> PathBuf {
     if raw == "%workspace%"
         || raw
             .strip_prefix("%workspace%")
@@ -757,7 +809,16 @@ fn resolve_helper_path(raw: &str, workspace: Option<&Path>) -> PathBuf {
         return PathBuf::from(expand_credential_helper_path(raw, workspace));
     }
     if let Some(rel) = raw.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
+        let home = match client_env {
+            Some(env) => lookup_client_env(env, "HOME")
+                .filter(|s| !s.is_empty())
+                .or_else(|| lookup_client_env(env, "USERPROFILE").filter(|s| !s.is_empty())),
+            None => std::env::var("HOME")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .or_else(|| std::env::var("USERPROFILE").ok().filter(|s| !s.is_empty())),
+        };
+        if let Some(home) = home {
             return PathBuf::from(home).join(rel);
         }
     }
@@ -796,6 +857,8 @@ fn invoke_helper_process(
     path: &Path,
     uri: &str,
     timeout: Duration,
+    cwd: Option<&Path>,
+    client_env: Option<&BTreeMap<String, String>>,
 ) -> Result<HelperOutput, CredentialError> {
     let display = path.display().to_string();
     #[cfg(windows)]
@@ -805,13 +868,30 @@ fn invoke_helper_process(
     #[cfg(not(windows))]
     let exec_path: &Path = path;
     let mut child = retry_etxtbsy(|| {
-        Command::new(exec_path)
-            .arg("get")
+        let mut cmd = Command::new(exec_path);
+        cmd.arg("get")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_remove("RUN_UNDER_RUNFILES")
-            .spawn()
+            .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        if let Some(env) = client_env {
+            cmd.env_clear();
+            for (k, v) in env {
+                let is_run_under = if cfg!(windows) {
+                    k.eq_ignore_ascii_case("RUN_UNDER_RUNFILES")
+                } else {
+                    k == "RUN_UNDER_RUNFILES"
+                };
+                if !is_run_under {
+                    cmd.env(k, v);
+                }
+            }
+        } else {
+            cmd.env_remove("RUN_UNDER_RUNFILES");
+        }
+        cmd.spawn()
     })
     .map_err(|e| {
         CredentialError::Helper(format!(
@@ -876,12 +956,19 @@ fn invoke_helper_process(
 
 /// Runs a single helper spec (`<path> get`) for `uri` and returns headers.
 pub fn run_credential_helper(spec: &str, uri: &str) -> Result<Vec<Header>, String> {
-    let Some(path) = helper_applies(spec, uri) else {
+    let norm_uri = normalize_credential_uri(uri);
+    let Some(path) = helper_applies(spec, &norm_uri) else {
         return Ok(vec![]);
     };
-    invoke_helper_process(Path::new(&path), uri, Duration::from_secs(5))
-        .map(|o| o.headers)
-        .map_err(|e| e.to_string())
+    invoke_helper_process(
+        Path::new(&path),
+        &norm_uri,
+        Duration::from_secs(5),
+        None,
+        None,
+    )
+    .map(|o| o.headers)
+    .map_err(|e| e.to_string())
 }
 
 #[derive(Clone)]
@@ -912,6 +999,8 @@ impl CachedCreds {
 /// `CredentialCacheExpiry` caching.
 pub struct CredentialHelperProvider {
     entries: Vec<HelperEntry>,
+    workspace: Option<PathBuf>,
+    client_env: Option<BTreeMap<String, String>>,
     timeout: Duration,
     cache_duration: Duration,
     cache: Mutex<HashMap<String, CachedCreds>>,
@@ -924,22 +1013,34 @@ impl CredentialHelperProvider {
         timeout: Duration,
         cache_duration: Duration,
     ) -> Self {
+        Self::from_specs_with_env(specs, workspace, None, timeout, cache_duration)
+    }
+
+    pub fn from_specs_with_env(
+        specs: &[String],
+        workspace: Option<&Path>,
+        client_env: Option<&BTreeMap<String, String>>,
+        timeout: Duration,
+        cache_duration: Duration,
+    ) -> Self {
         let entries = specs
             .iter()
             .filter(|s| !s.is_empty())
             .map(|spec| match spec.split_once('=') {
                 Some((sc, p)) => HelperEntry {
                     scope: Some(sc.to_string()),
-                    path: resolve_helper_path(p, workspace),
+                    path: resolve_helper_path_with_env(p, workspace, client_env),
                 },
                 None => HelperEntry {
                     scope: None,
-                    path: resolve_helper_path(spec, workspace),
+                    path: resolve_helper_path_with_env(spec, workspace, client_env),
                 },
             })
             .collect();
         Self {
             entries,
+            workspace: workspace.map(Path::to_path_buf),
+            client_env: client_env.cloned(),
             timeout,
             cache_duration,
             cache: Mutex::new(HashMap::new()),
@@ -972,19 +1073,26 @@ impl CredentialHelperProvider {
 
 impl CallCredentialsProvider for CredentialHelperProvider {
     fn get_credentials(&self, uri: &str) -> Result<Vec<Header>, CredentialError> {
-        let Some(helper_path) = self.select_helper(uri) else {
+        let norm_uri = normalize_credential_uri(uri);
+        let Some(helper_path) = self.select_helper(&norm_uri) else {
             return Ok(Vec::new());
         };
         {
             let mut cache = self.cache.lock().unwrap();
-            if let Some(entry) = cache.get(uri) {
+            if let Some(entry) = cache.get(&norm_uri) {
                 if entry.is_valid() {
                     return Ok(entry.headers.clone());
                 }
-                cache.remove(uri);
+                cache.remove(&norm_uri);
             }
         }
-        let out = invoke_helper_process(helper_path, uri, self.timeout)?;
+        let out = invoke_helper_process(
+            helper_path,
+            &norm_uri,
+            self.timeout,
+            self.workspace.as_deref(),
+            self.client_env.as_ref(),
+        )?;
         let cached = match out.expires {
             Some(wall) => CachedCreds {
                 headers: out.headers.clone(),
@@ -1001,7 +1109,7 @@ impl CallCredentialsProvider for CredentialHelperProvider {
             }
         };
         if cached.is_valid() {
-            self.cache.lock().unwrap().insert(uri.to_string(), cached);
+            self.cache.lock().unwrap().insert(norm_uri, cached);
         }
         Ok(out.headers)
     }
@@ -1009,6 +1117,10 @@ impl CallCredentialsProvider for CredentialHelperProvider {
     fn refresh(&self) -> Result<(), CredentialError> {
         self.cache.lock().unwrap().clear();
         Ok(())
+    }
+
+    fn supports_refresh(&self, uri: &str) -> bool {
+        self.select_helper(uri).is_some()
     }
 }
 
@@ -1104,6 +1216,16 @@ impl GoogleAuthCallCredentialsProvider {
 
     pub fn from_adc(scopes: Vec<String>, tls: TlsConfig) -> Result<Self, CredentialError> {
         Self::from_adc_with_env(scopes, tls, cfg!(windows), |name| std::env::var(name).ok())
+    }
+
+    pub fn from_adc_with_client_env(
+        scopes: Vec<String>,
+        tls: TlsConfig,
+        client_env: &BTreeMap<String, String>,
+    ) -> Result<Self, CredentialError> {
+        Self::from_adc_with_env(scopes, tls, cfg!(windows), |name| {
+            lookup_client_env(client_env, name)
+        })
     }
 
     fn from_adc_with_env<F>(
@@ -1621,13 +1743,19 @@ impl CallCredentialsProvider for NetrcCredentialsProvider {
     fn refresh(&self) -> Result<(), CredentialError> {
         Ok(())
     }
+
+    fn supports_refresh(&self, _uri: &str) -> bool {
+        false
+    }
 }
 
-/// Chains `CredentialHelperProvider` -> `GoogleAuthCallCredentialsProvider` -> `NetrcCredentialsProvider`,
-/// matching Bazel's credential precedence (`CredentialModule` + `GoogleAuthUtils`).
+/// Chains `CredentialHelperProvider` -> `GoogleAuthCallCredentialsProvider` -> URL `userinfo` ->
+/// `NetrcCredentialsProvider`, matching Bazel's credential precedence (`CredentialModule` +
+/// `GoogleAuthUtils`).
 pub struct CompositeCredentialsProvider {
     pub helper: Option<CredentialHelperProvider>,
     pub google: Option<GoogleAuthCallCredentialsProvider>,
+    pub userinfo: Option<Header>,
     pub netrc: Option<NetrcCredentialsProvider>,
 }
 
@@ -1640,6 +1768,9 @@ impl CallCredentialsProvider for CompositeCredentialsProvider {
         }
         if let Some(g) = &self.google {
             return g.get_credentials(uri);
+        }
+        if let Some(u) = &self.userinfo {
+            return Ok(vec![u.clone()]);
         }
         if let Some(n) = &self.netrc {
             return n.get_credentials(uri);
@@ -1659,6 +1790,15 @@ impl CallCredentialsProvider for CompositeCredentialsProvider {
         }
         Ok(())
     }
+
+    fn supports_refresh(&self, uri: &str) -> bool {
+        if let Some(h) = &self.helper {
+            if h.select_helper(uri).is_some() {
+                return true;
+            }
+        }
+        self.google.is_some()
+    }
 }
 
 /// Resolves the best matching helper from `specs` and returns its HTTP/2 headers for `uri`.
@@ -1673,16 +1813,17 @@ pub fn run_credential_helpers_in_workspace(
     uri: &str,
     workspace: Option<&std::path::Path>,
 ) -> Result<Vec<Header>, String> {
+    let norm_uri = normalize_credential_uri(uri);
     let provider = CredentialHelperProvider::from_specs(
         specs,
         workspace,
         Duration::from_secs(5),
         Duration::from_secs(30 * 60),
     );
-    let Some(path) = provider.helper_for_uri(uri) else {
+    let Some(path) = provider.helper_for_uri(&norm_uri) else {
         return Ok(vec![]);
     };
-    let resp = invoke_credential_helper_process(path, uri, workspace, None)?;
+    let resp = invoke_credential_helper_process(path, &norm_uri, workspace, None)?;
     let mut headers = Vec::new();
     for (k, vals) in resp.headers {
         if !vals.is_empty() {
@@ -2284,6 +2425,7 @@ mod tests {
         let composite = CompositeCredentialsProvider {
             helper: Some(helper),
             google: Some(google),
+            userinfo: None,
             netrc: Some(netrc.clone()),
         };
 
@@ -2322,6 +2464,7 @@ mod tests {
                 Duration::from_secs(60),
             )),
             google: None,
+            userinfo: None,
             netrc: Some(netrc),
         };
         assert_eq!(
@@ -2423,5 +2566,168 @@ mod tests {
             vec![("authorization".to_string(), "Bearer BUSY_OK".to_string())]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn normalize_credential_uri_converts_grpc_schemes_and_strips_userinfo() {
+        assert_eq!(
+            normalize_credential_uri("grpcs://remote.buildbuddy.io"),
+            "https://remote.buildbuddy.io"
+        );
+        assert_eq!(
+            normalize_credential_uri("GRPCS://api-key@remote.buildbuddy.io:443"),
+            "https://remote.buildbuddy.io:443"
+        );
+        assert_eq!(
+            normalize_credential_uri("grpc://localhost:8980"),
+            "http://localhost:8980"
+        );
+        assert_eq!(
+            normalize_credential_uri("GRPC://user:pass@127.0.0.1:8980"),
+            "http://127.0.0.1:8980"
+        );
+        assert_eq!(
+            normalize_credential_uri("https://secret-key@cache.example.com/prefix"),
+            "https://cache.example.com/prefix"
+        );
+        assert_eq!(
+            normalize_credential_uri("https://example.com:443/cas"),
+            "https://example.com:443/cas"
+        );
+        assert_eq!(
+            normalize_credential_uri("unix:/tmp/bes.sock"),
+            "unix:/tmp/bes.sock"
+        );
+    }
+
+    #[test]
+    fn credential_helper_propagates_client_env_workspace_cwd_and_normalized_uri() {
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-cred-env-cwd-{}-{}",
+            std::process::id(),
+            zel_util::uuid_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let ws = tmp.join("ws");
+        let tools = ws.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+
+        #[cfg(unix)]
+        let helper_rel = {
+            use std::os::unix::fs::PermissionsExt;
+            let script = tools.join("helper.sh");
+            std::fs::write(
+                &script,
+                concat!(
+                    "#!/bin/sh\n",
+                    "read req\n",
+                    "cwd=$(pwd -P)\n",
+                    "printf '{\"headers\":{\"Authorization\":[\"Bearer %s\"],\"X-Req\":[\"%s\"],\"X-Cwd\":[\"%s\"],\"X-Runfiles\":[\"%s\"],\"X-Daemon\":[\"%s\"]}}\\n' ",
+                    "\"$CLIENT_API_TOKEN\" \"$(printf '%s' \"$req\" | sed 's/\"/\\\\\"/g')\" \"$cwd\" \"$RUN_UNDER_RUNFILES\" \"$ZEL_DAEMON_ONLY_ENV\"\n",
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            "%workspace%/tools/helper.sh"
+        };
+
+        #[cfg(windows)]
+        let helper_rel = {
+            let script = tools.join("helper.cmd");
+            std::fs::write(
+                &script,
+                "@echo off\r\nset /p REQ=\r\necho {\"headers\":{\"Authorization\":[\"Bearer %CLIENT_API_TOKEN%\"],\"X-Cwd\":[\"%CD%\"],\"X-Runfiles\":[\"%RUN_UNDER_RUNFILES%\"]}}\r\n",
+            )
+            .unwrap();
+            "%workspace%/tools/helper.cmd"
+        };
+
+        let mut client_env = BTreeMap::new();
+        client_env.insert("CLIENT_API_TOKEN".into(), "from-client-env".into());
+        client_env.insert("RUN_UNDER_RUNFILES".into(), "1".into());
+        #[cfg(unix)]
+        if let Ok(path) = std::env::var("PATH") {
+            client_env.insert("PATH".into(), path);
+        }
+        #[cfg(windows)]
+        for k in ["PATH", "SystemRoot", "COMSPEC"] {
+            if let Ok(v) = std::env::var(k) {
+                client_env.insert(k.into(), v);
+            }
+        }
+
+        let provider = CredentialHelperProvider::from_specs_with_env(
+            &[format!("remote.buildbuddy.io={helper_rel}")],
+            Some(&ws),
+            Some(&client_env),
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
+        let hdrs = provider
+            .get_credentials("grpcs://leaked-key@remote.buildbuddy.io")
+            .unwrap();
+        let find = |k: &str| {
+            hdrs.iter()
+                .find(|(hk, _)| hk == k)
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("")
+        };
+        assert_eq!(find("authorization"), "Bearer from-client-env");
+        assert_eq!(find("x-runfiles"), "");
+        let got_cwd = std::fs::canonicalize(find("x-cwd")).unwrap();
+        let expected_cwd = std::fs::canonicalize(&ws).unwrap();
+        assert_eq!(got_cwd, expected_cwd);
+        #[cfg(unix)]
+        {
+            assert_eq!(find("x-req"), r#"{"uri":"https://remote.buildbuddy.io"}"#);
+            assert_eq!(find("x-daemon"), "");
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn adc_from_client_env_uses_client_env_instead_of_process_env() {
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-adc-client-env-{}-{}",
+            std::process::id(),
+            zel_util::uuid_v4()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cred_file = tmp.join("client_adc.json");
+        std::fs::write(&cred_file, r#"{"access_token":"tok-client-adc"}"#).unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS".into(),
+            cred_file.to_string_lossy().into_owned(),
+        );
+        let provider = GoogleAuthCallCredentialsProvider::from_adc_with_client_env(
+            vec![],
+            TlsConfig::default(),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            provider
+                .get_credentials("https://remote.example.com")
+                .unwrap(),
+            vec![(
+                "authorization".to_string(),
+                "Bearer tok-client-adc".to_string()
+            )]
+        );
+        assert!(provider.supports_refresh("https://remote.example.com"));
+
+        // Empty client_env must fail instead of falling back to process env.
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_client_env(
+            vec![],
+            TlsConfig::default(),
+            &BTreeMap::new(),
+        )
+        .is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
