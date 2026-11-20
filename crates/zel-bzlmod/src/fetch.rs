@@ -2490,6 +2490,13 @@ mod tests {
         }
     }
 
+    fn hermetic_opts(ws: &Path, base: &Path) -> ResolveOptions {
+        let mut o = ResolveOptions::new(ws);
+        o.registries = vec![file_url(&base.join("empty_registry"))];
+        o.check_direct_dependencies = CheckMode::Off;
+        o
+    }
+
     #[allow(clippy::type_complexity)]
     fn setup(name: &str, root_module: &str, mods: &[(&str, &str, &[(&str, &str)])]) -> Env {
         let base = tmpdir(name);
@@ -2669,8 +2676,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
                 integrity(&tgz)
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
         let m = res.repo_mapping(&ModuleKey::root());
         assert_eq!(m["arch"], "+http_archive+arch");
@@ -2709,8 +2715,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
                 "0".repeat(64)
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let mut opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -2764,8 +2769,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
                 file_url(&tgz)
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -2807,8 +2811,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
             "MODULE.bazel",
             "module(name='root')\nbad = use_repo_rule('//:defs.bzl', 'bad')\nbad(name='b')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -2934,8 +2937,7 @@ my_ext = _make_ext()
             "def _r(rctx):\n    module_extension(implementation = lambda m: None)\n    rctx.file('BUILD.bazel', '')\nbad_r = repository_rule(implementation = _r)\n",
         );
         write(&ws, "MODULE.bazel", "module(name='root')\nbad_r = use_repo_rule('//:bad_me.bzl', 'bad_r')\nbad_r(name='x')\n");
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -2975,8 +2977,7 @@ my_ext = _make_ext()
             "MODULE.bazel",
             "module(name='root')\nnew_local_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'new_local_repository')\nnew_local_repository(name='nlr', path='local_src', build_file_content='# v1\\n')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -3014,8 +3015,7 @@ my_ext = _make_ext()
             "MODULE.bazel",
             "module(name='root')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='lr', path='loc_pkg')\n",
         );
-        let mut o2 = ResolveOptions::new(&ws2);
-        o2.check_direct_dependencies = CheckMode::Off;
+        let o2 = hermetic_opts(&ws2, &base2);
         let res2 = Arc::new(resolve(&o2).unwrap_or_else(|e| panic!("{e}")));
         let opts2 = ExternalOptions {
             output_base: base2.join("ob"),
@@ -3045,8 +3045,7 @@ my_ext = _make_ext()
             "MODULE.bazel",
             "module(name='root')\nnew_local_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'new_local_repository')\nnew_local_repository(name='nlr', path='local_src', build_file_content='# v1\\n')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -3108,8 +3107,7 @@ my_ext = _make_ext()
                 "xcode_autoconf(name='local_config_xcode')\n",
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -3229,8 +3227,7 @@ my_ext = _make_ext()
                 arch_sri = archive_sha512,
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rcc = base.join("rcc");
         let opts = ExternalOptions {
@@ -3360,8 +3357,7 @@ ext = module_extension(implementation = _ext_impl)
             "MODULE.bazel",
             "module(name='root')\next = use_extension('//:defs.bzl', 'ext')\nuse_repo(ext, 'bar')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -3393,8 +3389,7 @@ ext = module_extension(implementation = _ext_impl)
             "MODULE.bazel",
             "module(name='root')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='local_rep', path='other')\next = use_extension('//:defs.bzl', 'ext')\noverride_repo(ext, nonexistent='local_rep')\nuse_repo(ext, 'bar')\n",
         );
-        let mut o_bad = ResolveOptions::new(&ws_bad);
-        o_bad.check_direct_dependencies = CheckMode::Off;
+        let o_bad = hermetic_opts(&ws_bad, &base);
         let res_bad = Arc::new(resolve(&o_bad).unwrap());
         let rt_bad = Rt::new(
             ExternalOptions {
@@ -3417,7 +3412,7 @@ ext = module_extension(implementation = _ext_impl)
     #[test]
     fn archive_override_applies_canonical_bazel_tools_and_root_patches_and_preserves_original_name()
     {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("bazel_tools_patch_and_orig_name");
         let tgz = make_tgz(
             &base,

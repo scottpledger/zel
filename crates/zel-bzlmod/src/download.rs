@@ -2133,6 +2133,8 @@ mod tests {
         std::thread::spawn(move || {
             for _ in 0..n {
                 let Ok((mut s, _)) = l.accept() else { return };
+                let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
                 let mut buf = Vec::new();
                 let mut tmp = [0u8; 1024];
                 loop {
