@@ -56,6 +56,7 @@ impl Default for ExternalOptions {
             nofetch: false,
             verbose: false,
             experimental_repository_ctx_execute_wasm: false,
+            experimental_sibling_repository_layout: false,
             credential_helpers: Vec::new(),
         }
     }
