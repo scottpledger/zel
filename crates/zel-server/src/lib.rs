@@ -3226,11 +3226,19 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                return if fetch_err.is_module_extension() {
+                let code = if fetch_err.is_module_extension() {
                     ExitCode::from_numeric(48)
                 } else {
                     ExitCode::BUILD_FAILURE
                 };
+                return self.finish_build_observer(
+                    &obs,
+                    debug_all_events,
+                    "run",
+                    code,
+                    stdout,
+                    stderr,
+                );
             }
             for m in self.repo_resolver.take_messages() {
                 writeln_bytes(stderr, &m);
