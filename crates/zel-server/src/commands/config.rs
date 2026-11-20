@@ -166,7 +166,19 @@ fn json_config(c: &ConfigForOutput) -> String {
 
 impl BlazeRuntime {
     fn find_configurations(&self) -> Vec<ConfigForOutput> {
-        let registered = zel_analysis::registered_configurations();
+        let mut registered = zel_analysis::registered_configurations();
+        if let Some(prev) = self
+            .last_build_options
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            if !prev.was_discarded {
+                let mut top = prev.key.clone();
+                top.keep_test = true;
+                registered.entry(top.short_hash()).or_insert(top);
+            }
+        }
         let mut out: Vec<ConfigForOutput> = Vec::new();
         for (_, k) in registered {
             if k.is_exec {

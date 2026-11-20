@@ -31,6 +31,7 @@ use zel_rules::{AnalysisConfig, TargetResolver};
 /// What the daemon remembers of the previous analysis (`SkyframeBuildView`).
 #[derive(Debug, Clone)]
 pub struct AnalysisCacheState {
+    pub key: BuildConfigurationKey,
     pub options: zel_analysis::build_options::BuildOptions,
     pub was_discarded: bool,
     /// The command line's `--platforms` (canonical labels; `[]` when unset): the cache check compares
@@ -357,6 +358,7 @@ impl BlazeRuntime {
             }
             drop(m);
             *guard = Some(AnalysisCacheState {
+                key: key.clone(),
                 options: new,
                 was_discarded: discard_now,
                 platforms: key.platforms.clone(),
