@@ -23,9 +23,22 @@ use zel_starlark::{EvalContext, StarlarkError, Value};
 /// Prefix of a command-line element that stands for the files of a tree artifact (directory):
 /// `\u{1}ZEL_TREE\u{1}<format_each>\u{1}<before_each>\u{1}<exec path of the directory>`.
 pub const TREE_MARKER: &str = "\u{1}ZEL_TREE\u{1}";
-const TREE_HEAD_MARKER: &str = "\u{1}ZEL_TREE_HEAD\u{1}";
-const TREE_TAIL_MARKER: &str = "\u{1}ZEL_TREE_TAIL\u{1}";
+pub(crate) const TREE_HEAD_MARKER: &str = "\u{1}ZEL_TREE_HEAD\u{1}";
+pub(crate) const TREE_TAIL_MARKER: &str = "\u{1}ZEL_TREE_TAIL\u{1}";
+pub(crate) const TREE_NONFLAGS_START: &str = "\u{1}ZEL_TREE_NF_S\u{1}";
+pub(crate) const TREE_NONFLAGS_GROUP_START: &str = "\u{1}ZEL_TREE_NFG_S\u{1}";
+pub(crate) const TREE_NONFLAGS_END: &str = "\u{1}ZEL_TREE_NF_E\u{1}";
 const TREE_SEP: char = '\u{1}';
+
+/// Collapses one `Args` group for `flag_per_line` (`StarlarkCustomCommandLine.GroupedPreprocessedArgs`).
+pub(crate) fn collapse_flag_per_line_group(group: Vec<String>, dst: &mut Vec<String>) {
+    match group.as_slice() {
+        [] => {}
+        [only] => dst.push(only.clone()),
+        [first, rest @ ..] if first.is_empty() => dst.push(rest.join(" ")),
+        [first, rest @ ..] => dst.push(format!("{first}={}", rest.join(" "))),
+    }
+}
 
 /// Expands the tree-artifact placeholders of `argv` (see [`TREE_MARKER`]). `list_dir` returns the
 /// exec paths of the files below a directory (recursively, sorted), as found after the actions
@@ -38,6 +51,29 @@ pub fn expand_tree_artifact_args(
     let mut i = 0;
     while i < argv.len() {
         let a = &argv[i];
+        if a == TREE_NONFLAGS_START || a == TREE_NONFLAGS_GROUP_START {
+            let grouped = a == TREE_NONFLAGS_GROUP_START;
+            let start_inner = i + 1;
+            let mut end_inner = start_inner;
+            while end_inner < argv.len() && argv[end_inner] != TREE_NONFLAGS_END {
+                end_inner += 1;
+            }
+            let expanded = expand_tree_artifact_args(&argv[start_inner..end_inner], list_dir)?;
+            let candidates = if grouped {
+                let mut collapsed = Vec::with_capacity(1);
+                collapse_flag_per_line_group(expanded, &mut collapsed);
+                collapsed
+            } else {
+                expanded
+            };
+            out.extend(candidates.into_iter().filter(|s| !s.starts_with("--")));
+            i = if end_inner < argv.len() {
+                end_inner + 1
+            } else {
+                argv.len()
+            };
+            continue;
+        }
         if let Some(head) = a.strip_prefix(TREE_HEAD_MARKER) {
             // Conditional group: HEAD, one or more TREE_MARKERs, optional TAIL.
             i += 1;
@@ -532,7 +568,6 @@ pub(crate) fn args_method(
                 return Ok(Value::None);
             }
             let start = b.args.len();
-            let has_arg_name = name.is_some();
             let has_concrete = mapped.iter().any(|m| matches!(m, MappedItem::Concrete(_)));
             let only_trees_omit = omit_if_empty && !has_concrete && !mapped.is_empty();
             if let Some(n) = name {
@@ -572,13 +607,7 @@ pub(crate) fn args_method(
             }
             let end = b.args.len();
             if end > start {
-                if has_arg_name {
-                    b.groups.push((start, end));
-                } else {
-                    for idx in start..end {
-                        b.groups.push((idx, idx + 1));
-                    }
-                }
+                b.groups.push((start, end));
             }
             Ok(Value::Host("args".into(), String::new()))
         }

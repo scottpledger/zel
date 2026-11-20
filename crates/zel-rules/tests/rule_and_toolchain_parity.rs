@@ -918,7 +918,9 @@ def _impl(ctx):
     wargs.set_param_file_format("flag_per_line")
     wargs.add_joined("--a", ["b", "c"], join_with = ",")
     wargs.add("--nod")
-    wargs.add_all(["pos1", "pos2"])
+    wargs.add("pos1")
+    wargs.add("pos2")
+    wargs.add_all(["grp1", "grp2"])
     wargs.add_all("--foo", ["bar1", "bar2"])
     wargs.add_all("", ["--raw", "x", "y"])
     wargs.add_all([tree])
@@ -970,7 +972,9 @@ my_rule = rule(implementation = _impl)
     );
     if let ActionKind::FileWrite { content, .. } = &write_act.kind {
         let body = String::from_utf8(content.render()).unwrap();
-        assert!(body.contains("--a=b,c\n--nod\npos1\npos2\n--foo=bar1 bar2\n--raw x y\n"));
+        assert!(
+            body.contains("--a=b,c\n--nod\npos1\npos2\ngrp1=grp2\n--foo=bar1 bar2\n--raw x y\n")
+        );
     } else {
         panic!("expected FileWrite");
     }

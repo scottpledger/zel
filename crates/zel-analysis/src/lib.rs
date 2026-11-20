@@ -1312,12 +1312,6 @@ impl ParamFileWriteSpec {
         {
             let mut collapsed = Vec::with_capacity(self.flag_groups.len());
             let mut cursor = 0usize;
-            let collapse_one = |group: Vec<String>, dst: &mut Vec<String>| match group.as_slice() {
-                [] => {}
-                [only] => dst.push(only.clone()),
-                [first, rest @ ..] if first.is_empty() => dst.push(rest.join(" ")),
-                [first, rest @ ..] => dst.push(format!("{first}={}", rest.join(" "))),
-            };
             for &(start, end) in &self.flag_groups {
                 if end == 0 || start >= self.args.len() || start >= end {
                     continue;
@@ -1331,7 +1325,7 @@ impl ParamFileWriteSpec {
                     cursor += 1;
                 }
                 let expanded = crate::expand_tree_artifact_args(&self.args[s..e], list_dir)?;
-                collapse_one(expanded, &mut collapsed);
+                crate::args::collapse_flag_per_line_group(expanded, &mut collapsed);
                 cursor = e;
             }
             while cursor < self.args.len() {
