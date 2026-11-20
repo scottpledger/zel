@@ -12,7 +12,7 @@ use zel_starlark::{
 };
 
 /// Command-line / environment configuration of the external repository subsystem.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ExternalOptions {
     pub output_base: PathBuf,
     pub workspace_root: PathBuf,
@@ -34,7 +34,34 @@ pub struct ExternalOptions {
     pub verbose: bool,
     pub experimental_repository_ctx_execute_wasm: bool,
     pub experimental_sibling_repository_layout: bool,
+    pub incompatible_no_implicit_watch_label: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
+}
+
+impl Default for ExternalOptions {
+    fn default() -> Self {
+        Self {
+            output_base: PathBuf::new(),
+            workspace_root: PathBuf::new(),
+            distdirs: Vec::new(),
+            repository_cache: None,
+            repo_contents_cache: None,
+            disable_download: false,
+            override_repository: BTreeMap::new(),
+            downloader_rewriter: None,
+            semantics_fingerprint: Vec::new(),
+            download_retries: 5,
+            client_env: BTreeMap::new(),
+            vendor_dir: None,
+            force: false,
+            nofetch: false,
+            verbose: false,
+            experimental_repository_ctx_execute_wasm: false,
+            experimental_sibling_repository_layout: false,
+            incompatible_no_implicit_watch_label: true,
+            credential_helpers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -50,6 +77,7 @@ pub struct AttrDef {
 pub struct RuleDef {
     pub implementation: Value,
     pub attrs: Vec<(String, AttrDef)>,
+    pub user_has_repo_mapping: bool,
     pub local: bool,
     pub environ: Vec<String>,
     pub configure: bool,
@@ -93,13 +121,22 @@ pub struct ExtensionMetadata {
     pub facts: Option<crate::json::Json>,
 }
 
+#[derive(Clone, Debug)]
+pub struct UsedLockExt {
+    pub key: String,
+    pub factors: String,
+    pub entry: crate::lockfile::LockExt,
+    pub facts: Option<crate::json::Json>,
+    pub facts_version: i64,
+}
+
 #[derive(Default)]
 pub struct LockState {
     pub mode: Option<crate::lockfile::LockfileMode>,
     pub workspace: crate::lockfile::Lockfile,
     pub hidden: crate::lockfile::Lockfile,
-    /// Entries (extension key, factors, entry) produced or reused in this session.
-    pub used: Vec<(String, String, crate::lockfile::LockExt)>,
+    /// Entries (extension key, factors, entry, facts) produced or reused in this session.
+    pub used: Vec<UsedLockExt>,
 }
 
 pub struct Rt {
@@ -123,6 +160,7 @@ pub(crate) struct DeferredRepoCall {
 pub(crate) struct RtState {
     pub rule_defs: Vec<RuleDef>,
     pub ext_defs: Vec<ExtensionDef>,
+    pub ext_metadatas: Vec<ExtensionMetadata>,
     pub tag_class_defs: Vec<Vec<(String, AttrDef)>>,
     pub bzl_cache: HashMap<String, BTreeMap<String, Value>>,
     pub loading: Vec<String>,
@@ -145,6 +183,10 @@ pub(crate) struct RtState {
     pub bzl_loads_cache: HashMap<String, Vec<String>>,
     pub rule_meta_cache: HashMap<(String, String), (bool, bool, Vec<String>)>,
     pub force_configure: bool,
+    /// `Label()` apparent-name lookups recorded while `.bzl` files load in this runtime.
+    pub load_label_mappings: Vec<(String, String, String)>,
+    /// In-flight background downloads (`block = False`) owned by this runtime.
+    pub(crate) pending_downloads: Vec<Option<crate::ctx::PendingDownload>>,
     /// Package loader used for `.bzl` files that do not define repository rules / extensions
     /// (rule definitions such as rules_cc, which need the full rule-building builtins).
     pub loader: Option<Arc<zel_packages::PackageLoader>>,
@@ -350,8 +392,8 @@ impl Rt {
             .collect()
     }
 
-    /// Non-recursively looks up the repo mapping of `canonical` if `canonical` is a known module
-    /// or already-evaluated extension repository (`None` if `canonical` no longer exists).
+    /// Looks up the repo mapping of `canonical` if `canonical` is a known module or extension
+    /// repository (`None` if `canonical` no longer exists).
     pub fn try_repo_mapping_of(&self, canonical: &str) -> Option<BTreeMap<String, String>> {
         let res = &self.resolution;
         if canonical.is_empty() || canonical == "bazel_tools" {
@@ -364,40 +406,19 @@ impl Rt {
         if let Some(k) = res.canonical_repo_names.get(&canonical.to_string()) {
             return Some(res.repo_mapping_ordered(k).into_iter().collect());
         }
-        for (id, mk, _) in &res.extension_usages {
-            let Some(unique) = res.extension_unique_names.get(id) else {
-                continue;
-            };
-            if let Some(sub) = canonical.strip_prefix(&format!("{unique}+")) {
-                let st = self.state.lock().unwrap();
-                if let Some(r) = st.ext_results.get(id) {
-                    if !r.generated.iter().any(|(n, _)| n == sub) {
-                        return None;
-                    }
-                    let host_repo = id.bzl_repo();
-                    let mut m: BTreeMap<String, String> = if host_repo.is_empty() && id.is_innate()
-                    {
-                        res.repo_mapping_ordered(mk).into_iter().collect()
-                    } else if let Some(k) = res.canonical_repo_names.get(&host_repo) {
-                        res.repo_mapping_ordered(k).into_iter().collect()
-                    } else {
-                        res.repo_mapping_ordered(&ModuleKey::root())
-                            .into_iter()
-                            .collect()
-                    };
-                    for (n, _) in &r.generated {
-                        m.insert(n.clone(), format!("{unique}+{n}"));
-                    }
-                    if let Some(ov) = res.repo_overrides.get(id) {
-                        for (exported, canon) in ov {
-                            m.insert(exported.clone(), canon.clone());
-                        }
-                    }
-                    return Some(m);
-                }
-            }
+        let (id, exported) = self.owning_extension_for_canonical(canonical)?;
+        let exists = {
+            let st = self.state.lock().unwrap();
+            st.evaluating_exts.contains(&id)
+                || st
+                    .ext_results
+                    .get(&id)
+                    .is_some_and(|r| r.generated.iter().any(|(n, _)| n == exported))
+        };
+        if !exists {
+            return None;
         }
-        None
+        Some(self.repo_mapping_of(canonical))
     }
 
     /// The repo mapping in `ImmutableMap` insertion order (module repos: extension imports, own
@@ -419,14 +440,17 @@ impl Rt {
         }
         // Repo generated by an extension: mapping of the extension's defining repo, then generated
         // repos, then root overrides (`ModuleExtensionRepoMappingEntriesFunction`).
-        for (id, mk, _) in &res.extension_usages {
-            let Some(unique) = res.extension_unique_names.get(id) else {
-                continue;
-            };
-            if canonical.strip_prefix(&format!("{unique}+")).is_some() {
+        if let Some((ref id, _)) = self.owning_extension_for_canonical(canonical) {
+            if let Some(unique) = res.extension_unique_names.get(id) {
                 let host_repo = id.bzl_repo();
                 let mut m = if host_repo.is_empty() && id.is_innate() {
-                    res.repo_mapping_ordered(mk)
+                    if let Some((_, mk, _)) =
+                        res.extension_usages.iter().find(|(eid, _, _)| eid == id)
+                    {
+                        res.repo_mapping_ordered(mk)
+                    } else {
+                        res.repo_mapping_ordered(&ModuleKey::root())
+                    }
                 } else if let Some(k) = res.canonical_repo_names.get(&host_repo) {
                     res.repo_mapping_ordered(k)
                 } else {
@@ -852,29 +876,36 @@ impl Rt {
                 (crate::hash::sha256_hex(src.as_bytes()), children),
             );
         }
-        for (n, v) in &ctx.globals {
-            if let Value::Host(kind, id) = v {
-                let idx: usize = id.parse().unwrap_or(usize::MAX);
-                match kind.as_str() {
-                    "repository_rule" => {
-                        if let Some(d) = st.rule_defs.get_mut(idx) {
-                            if d.name.is_empty() {
-                                d.name = n.clone();
-                                d.bzl_file = key.to_string();
+        for pass_private in [false, true] {
+            for (n, v) in &ctx.exported_assignments {
+                if n.starts_with('_') != pass_private {
+                    continue;
+                }
+                if let Value::Host(kind, id) = v {
+                    let idx: usize = id.parse().unwrap_or(usize::MAX);
+                    match kind.as_str() {
+                        "repository_rule" => {
+                            if let Some(d) = st.rule_defs.get_mut(idx) {
+                                if d.name.is_empty() {
+                                    d.name = n.clone();
+                                    if d.bzl_file.is_empty() {
+                                        d.bzl_file = key.to_string();
+                                    }
+                                }
                             }
                         }
-                    }
-                    "module_extension" => {
-                        if let Some(d) = st.ext_defs.get_mut(idx) {
-                            if d.name.is_empty() {
-                                d.name = n.clone();
-                            }
-                            if d.bzl_file.is_empty() {
-                                d.bzl_file = key.to_string();
+                        "module_extension" if !pass_private => {
+                            if let Some(d) = st.ext_defs.get_mut(idx) {
+                                if d.name.is_empty() {
+                                    d.name = n.clone();
+                                }
+                                if d.bzl_file.is_empty() {
+                                    d.bzl_file = key.to_string();
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -1086,38 +1117,114 @@ impl Rt {
                 Ok(Value::Host("tag_class".into(), (st.tag_class_defs.len() - 1).to_string()))
             }
             "extension_metadata" => {
-                let deps_val = kw.get("root_module_direct_deps");
-                let dev_val = kw.get("root_module_direct_dev_deps");
+                for k in kw.keys() {
+                    if !matches!(
+                        k.as_str(),
+                        "root_module_direct_deps"
+                            | "root_module_direct_dev_deps"
+                            | "reproducible"
+                            | "facts"
+                    ) {
+                        return err(format!(
+                            "extension_metadata() got unexpected keyword argument '{k}'"
+                        ));
+                    }
+                }
+                if pos.len() > 2 {
+                    return err(format!(
+                        "extension_metadata() accepts no more than 2 positional arguments but got {}",
+                        pos.len()
+                    ));
+                }
+                if !pos.is_empty() && kw.contains_key("root_module_direct_deps") {
+                    return err(
+                        "extension_metadata() got multiple values for parameter 'root_module_direct_deps'",
+                    );
+                }
+                if pos.get(1).is_some() && kw.contains_key("root_module_direct_dev_deps") {
+                    return err(
+                        "extension_metadata() got multiple values for parameter 'root_module_direct_dev_deps'",
+                    );
+                }
+                let deps_val = pos.first().or_else(|| kw.get("root_module_direct_deps"));
+                let dev_val = pos
+                    .get(1)
+                    .or_else(|| kw.get("root_module_direct_dev_deps"));
                 let deps_is_none = deps_val.is_none() || matches!(deps_val, Some(Value::None));
                 let dev_is_none = dev_val.is_none() || matches!(dev_val, Some(Value::None));
                 let is_all = |v: Option<&Value>| matches!(v, Some(Value::String(s)) if s == "all");
-                let is_empty_list = |v: Option<&Value>| matches!(v, Some(Value::List(l)) if l.lock().unwrap().elements.is_empty());
+                let is_empty_seq = |v: Option<&Value>| match v {
+                    Some(Value::List(l)) => l.lock().unwrap().elements.is_empty(),
+                    Some(Value::Tuple(t)) => t.is_empty(),
+                    _ => false,
+                };
                 let (deps_is_all, dev_is_all) = (is_all(deps_val), is_all(dev_val));
+                let extract_strict_string_seq =
+                    |label: &str, v: Option<&Value>| -> Result<Vec<String>, StarlarkError> {
+                        let Some(val) = v else {
+                            return Ok(vec![]);
+                        };
+                        let elems: Vec<Value> = match val {
+                            Value::List(l) => l.lock().unwrap().elements.clone(),
+                            Value::Tuple(t) => t.clone(),
+                            other => {
+                                return err(format!(
+                                    "in call to extension_metadata(), parameter '{label}' got value of type '{}', want 'NoneType, string, or sequence'",
+                                    other.type_name()
+                                ))
+                            }
+                        };
+                        let mut out = Vec::with_capacity(elems.len());
+                        for (idx, elem) in elems.into_iter().enumerate() {
+                            match elem {
+                                Value::String(s) => out.push(s),
+                                other => {
+                                    return err(format!(
+                                        "at index {idx} of {label}, got element of type {}, want string",
+                                        other.type_name()
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(out)
+                    };
                 // `ModuleExtensionMetadata.create` checks, in this order.
                 #[allow(clippy::nonminimal_bool)]
-                if !(deps_is_none && dev_is_none) && !(deps_is_all && is_empty_list(dev_val)) && !(dev_is_all && is_empty_list(deps_val)) {
+                if !(deps_is_none && dev_is_none)
+                    && !(deps_is_all && is_empty_seq(dev_val))
+                    && !(dev_is_all && is_empty_seq(deps_val))
+                {
                     if deps_is_all || dev_is_all {
                         return err("if one of root_module_direct_deps and root_module_direct_dev_deps is \"all\", the other must be an empty list");
                     }
-                    if matches!(deps_val, Some(Value::String(_))) || matches!(dev_val, Some(Value::String(_))) {
+                    if matches!(deps_val, Some(Value::String(_)))
+                        || matches!(dev_val, Some(Value::String(_)))
+                    {
                         return err("root_module_direct_deps and root_module_direct_dev_deps must be None, \"all\", or a list of strings");
                     }
                     if deps_is_none != dev_is_none {
                         return err("root_module_direct_deps and root_module_direct_dev_deps must both be specified or both be unspecified");
                     }
                     let mut seen: Vec<String> = vec![];
-                    for (label, v, check_overlap) in [("root_module_direct_deps", deps_val, false), ("root_module_direct_dev_deps", dev_val, true)] {
-                        let items = v.map(|v| v.to_string_list()).unwrap_or_default();
+                    for (label, v, check_overlap) in [
+                        ("root_module_direct_deps", deps_val, false),
+                        ("root_module_direct_dev_deps", dev_val, true),
+                    ] {
+                        let items = extract_strict_string_seq(label, v)?;
                         let mut own: Vec<String> = vec![];
                         for dep in items {
                             let valid = !dep.is_empty()
                                 && dep.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-                                && dep.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+                                && dep
+                                    .chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
                             if !valid {
                                 return err(format!("in {label}: invalid user-provided repo name '{dep}': valid names may contain only A-Z, a-z, 0-9, '-', '_', '.', and must start with a letter or a number"));
                             }
                             if check_overlap && seen.contains(&dep) {
-                                return err(format!("in {label}: entry '{dep}' is also in root_module_direct_deps"));
+                                return err(format!(
+                                    "in {label}: entry '{dep}' is also in root_module_direct_deps"
+                                ));
                             }
                             if own.contains(&dep) {
                                 return err(format!("in {label}: duplicate entry '{dep}'"));
@@ -1129,11 +1236,25 @@ impl Rt {
                         }
                     }
                 }
-                let list = |k: &str| -> Result<Option<Vec<String>>, StarlarkError> {
-                    match kw.get(k) {
+                let reproducible = match kw.get("reproducible") {
+                    None => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return err(format!(
+                            "in call to extension_metadata(), parameter 'reproducible' got value of type '{}', want 'bool'",
+                            other.type_name()
+                        ))
+                    }
+                };
+                let facts = match kw.get("facts") {
+                    None | Some(Value::None) => None,
+                    Some(v) => Some(crate::json::validate_and_encode_facts(v)?),
+                };
+                let list_val = |label: &str, v: Option<&Value>| -> Result<Option<Vec<String>>, StarlarkError> {
+                    match v {
                         None | Some(Value::None) => Ok(None),
                         Some(Value::String(s)) if s == "all" => Ok(None),
-                        Some(v) => Ok(Some(v.to_string_list())),
+                        Some(_) => Ok(Some(extract_strict_string_seq(label, v)?)),
                     }
                 };
                 let use_all = if deps_is_all {
@@ -1143,26 +1264,29 @@ impl Rt {
                 } else {
                     "NO"
                 };
-                let facts = kw.get("facts").map(crate::json::starlark_to_json);
                 let m = ExtensionMetadata {
                     use_all: use_all.to_string(),
                     use_all_repos: use_all != "NO",
                     // `ModuleExtensionMetadata.create(null, null, UseAllRepos.*)`: the explicit lists are dropped with "all".
-                    explicit_root_direct_deps: if use_all != "NO" { None } else { list("root_module_direct_deps")? },
-                    explicit_root_direct_dev_deps: if use_all != "NO" { None } else { list("root_module_direct_dev_deps")? },
-                    reproducible: kw.get("reproducible").map(|v| v.is_truthy()).unwrap_or(false),
+                    explicit_root_direct_deps: if use_all != "NO" {
+                        None
+                    } else {
+                        list_val("root_module_direct_deps", deps_val)?
+                    },
+                    explicit_root_direct_dev_deps: if use_all != "NO" {
+                        None
+                    } else {
+                        list_val("root_module_direct_dev_deps", dev_val)?
+                    },
+                    reproducible,
                     facts,
                 };
-                let facts_str = m.facts.as_ref().map(|f| f.to_compact()).unwrap_or_else(|| "-".into());
-                let json = format!(
-                    "{}|{}|{}|{}|{}",
-                    m.use_all,
-                    m.reproducible,
-                    m.explicit_root_direct_deps.as_ref().map(|v| v.join(",")).unwrap_or_else(|| "-".into()),
-                    m.explicit_root_direct_dev_deps.as_ref().map(|v| v.join(",")).unwrap_or_else(|| "-".into()),
-                    facts_str
-                );
-                Ok(Value::Host("extension_metadata".into(), json))
+                let mut st = self.state.lock().unwrap();
+                st.ext_metadatas.push(m);
+                Ok(Value::Host(
+                    "extension_metadata".into(),
+                    (st.ext_metadatas.len() - 1).to_string(),
+                ))
             }
             "Label" | "Label_" => {
                 let raw = match pos.first() {
@@ -1207,10 +1331,10 @@ impl Rt {
                         .collect();
                     if active.is_empty() {
                         if let Some(r) = &resolved_canon {
-                            let mut g = LOAD_LABEL_MAPPINGS.lock().unwrap();
+                            let mut st = self.state.lock().unwrap();
                             let e = (repo.clone(), apparent.to_string(), r.clone());
-                            if !g.contains(&e) {
-                                g.push(e);
+                            if !st.load_label_mappings.contains(&e) {
+                                st.load_label_mappings.push(e);
                             }
                         }
                     }
@@ -1335,6 +1459,16 @@ impl Rt {
         pos: Vec<Value>,
         kw: BTreeMap<String, Value>,
     ) -> Result<Value, StarlarkError> {
+        fn check_i32_attr_val(v: &Value, what: &str) -> Result<(), StarlarkError> {
+            if let Value::Int(i) = v {
+                if i.to_i64().and_then(|n| i32::try_from(n).ok()).is_none() {
+                    return err(format!(
+                        "for {what}, got {i}, want value in signed 32-bit range"
+                    ));
+                }
+            }
+            Ok(())
+        }
         let mut default = kw.get("default").cloned().unwrap_or(Value::None);
         if default == Value::None && !pos.is_empty() && !matches!(kind, "label" | "label_list") {
             default = pos[0].clone();
@@ -1343,6 +1477,28 @@ impl Rt {
             .get("values")
             .cloned()
             .unwrap_or_else(|| list_value(vec![]));
+        if kind == "int" {
+            check_i32_attr_val(&default, "default")?;
+            if let Value::List(l) = &values {
+                for (idx, item) in l.lock().unwrap().elements.iter().enumerate() {
+                    check_i32_attr_val(item, &format!("element {idx} of values"))?;
+                }
+            }
+        } else if kind == "int_list" {
+            match &default {
+                Value::List(l) => {
+                    for (idx, item) in l.lock().unwrap().elements.iter().enumerate() {
+                        check_i32_attr_val(item, &format!("element {idx} of default"))?;
+                    }
+                }
+                Value::Tuple(t) => {
+                    for (idx, item) in t.iter().enumerate() {
+                        check_i32_attr_val(item, &format!("element {idx} of default"))?;
+                    }
+                }
+                _ => {}
+            }
+        }
         Ok(struct_value(vec![
             ("_attr_kind", str_value(kind)),
             ("default", default),
@@ -1376,10 +1532,15 @@ impl Rt {
             return err("in call to repository_rule(), parameter 'remotable' is experimental and thus unavailable with the current flags. It may be enabled by setting --experimental_repo_remote_exec");
         }
         let mut attrs = self.attrs_from_kw(kw.get("attrs"))?;
-        if attrs.iter().any(|(n, _)| n == "name") {
-            return err("There is already a built-in attribute 'name' which cannot be overridden");
+        for (n, _) in &attrs {
+            if matches!(n.as_str(), "name" | "tags" | "deprecation" | "visibility") {
+                return err(format!(
+                    "There is already a built-in attribute '{n}' which cannot be overridden"
+                ));
+            }
         }
-        if !attrs.iter().any(|(n, _)| n == "repo_mapping") {
+        let user_has_repo_mapping = attrs.iter().any(|(n, _)| n == "repo_mapping");
+        if !user_has_repo_mapping {
             attrs.push((
                 "repo_mapping".into(),
                 AttrDef {
@@ -1391,15 +1552,36 @@ impl Rt {
                 },
             ));
         }
+        let local = match kw.get("local") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to repository_rule(), parameter 'local' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
+        let configure = match kw.get("configure") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to repository_rule(), parameter 'configure' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
         let def = RuleDef {
             implementation,
             attrs,
-            local: kw.get("local").map(|v| v.is_truthy()).unwrap_or(false),
+            user_has_repo_mapping,
+            local,
             environ: kw
                 .get("environ")
                 .map(|v| v.to_string_list())
                 .unwrap_or_default(),
-            configure: kw.get("configure").map(|v| v.is_truthy()).unwrap_or(false),
+            configure,
             bzl_file: String::new(),
             name: String::new(),
         };
@@ -1437,6 +1619,49 @@ impl Rt {
                 "module_extension() missing 1 required positional argument: implementation",
             );
         };
+        let os_dependent = match kw.get("os_dependent") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to module_extension(), parameter 'os_dependent' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
+        let arch_dependent = match kw.get("arch_dependent") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to module_extension(), parameter 'arch_dependent' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
+        let facts_version = match kw.get("facts_version") {
+            None => 0u32,
+            Some(Value::Int(i)) => {
+                let v = i
+                    .to_i64()
+                    .and_then(|x| i32::try_from(x).ok())
+                    .ok_or_else(|| {
+                        StarlarkError(format!(
+                            "in call to module_extension(), parameter 'facts_version' got {i}, want value in signed 32-bit int range"
+                        ))
+                    })?;
+                if v < 0 {
+                    return err("facts_version must be non-negative");
+                }
+                v as u32
+            }
+            Some(other) => {
+                return err(format!(
+                    "in call to module_extension(), parameter 'facts_version' got value of type '{}', want 'int'",
+                    other.type_name()
+                ))
+            }
+        };
         let mut tag_classes = vec![];
         if let Some(Value::Dict(d)) = kw.get("tag_classes") {
             for (k, v) in &d.lock().unwrap().entries {
@@ -1453,6 +1678,10 @@ impl Rt {
                 ));
             }
         }
+        let location = location
+            .strip_suffix(":0")
+            .map(String::from)
+            .unwrap_or(location);
         let def = ExtensionDef {
             implementation,
             tag_classes,
@@ -1460,18 +1689,9 @@ impl Rt {
                 .get("environ")
                 .map(|v| v.to_string_list())
                 .unwrap_or_default(),
-            os_dependent: kw
-                .get("os_dependent")
-                .map(|v| v.is_truthy())
-                .unwrap_or(false),
-            arch_dependent: kw
-                .get("arch_dependent")
-                .map(|v| v.is_truthy())
-                .unwrap_or(false),
-            facts_version: match kw.get("facts_version") {
-                Some(Value::Int(i)) => i.to_u64().unwrap_or(0) as u32,
-                _ => 0,
-            },
+            os_dependent,
+            arch_dependent,
+            facts_version,
             bzl_file,
             name: String::new(),
             location,
@@ -1523,6 +1743,13 @@ impl Rt {
                 crate::ctx::check_repo_rule_labels(self, &def.name, &def.attrs, &kw, None)?;
                 let mut attrs: BTreeMap<String, AttrVal> = BTreeMap::new();
                 for (k, v) in &kw {
+                    if matches!(
+                        k.as_str(),
+                        "name" | "tags" | "deprecation" | "visibility"
+                    ) || matches!(v, Value::None)
+                    {
+                        continue;
+                    }
                     attrs.insert(k.clone(), AttrVal::from_value(v));
                 }
                 let call = DeferredRepoCall {
@@ -1703,10 +1930,6 @@ pub fn path_value(p: &Path) -> Value {
     Value::Host("path".into(), formatted)
 }
 
-/// `Label()` apparent-name lookups made while a `.bzl` file loads (no extension running):
-/// `(source repo, apparent name, canonical name)` — the `.bzl`'s recorded repo mapping entries.
-pub static LOAD_LABEL_MAPPINGS: Mutex<Vec<(String, String, String)>> = Mutex::new(Vec::new());
-
 thread_local! {
     /// Set while the tag attributes of a module extension are built: label values resolved through a
     /// module's repo mapping are recorded (`StarlarkBazelModule`'s `staticRepoMappingRecorder`).
@@ -1731,6 +1954,19 @@ impl Rt {
     /// `BazelLockFileModule.combineModuleExtensions`.
     pub fn compute_lockfiles(&self) -> (crate::lockfile::Lockfile, crate::lockfile::Lockfile) {
         use crate::lockfile::*;
+        let same_factor_deps = |f1: &str, f2: &str| -> bool {
+            let shape = |f: &str| {
+                (
+                    f.split(',').any(|p| p.starts_with("os:")),
+                    f.split(',').any(|p| p.starts_with("arch:")),
+                )
+            };
+            shape(f1) == shape(f2)
+        };
+        let is_non_empty_facts = |j: &crate::json::Json| -> bool {
+            !matches!(j, crate::json::Json::Null)
+                && !matches!(j, crate::json::Json::Obj(o) if o.is_empty())
+        };
         let l = self.lock.lock().unwrap();
         let res = &self.resolution;
         let live: std::collections::HashSet<String> = res
@@ -1742,6 +1978,7 @@ impl Rt {
         let mut ws = Lockfile::default();
         let mut hid = Lockfile::default();
         // BazelLockFileModule drops `file:` registry hashes (commit 9d961b96f5).
+        // Hidden lockfile never records registryFileHashes or selectedYankedVersions.
         ws.registry_file_hashes = res
             .registry_file_hashes
             .iter()
@@ -1749,27 +1986,71 @@ impl Rt {
             .map(|(u, h)| (u.clone(), h.clone()))
             .collect();
         ws.selected_yanked_versions = res.selected_yanked_versions.clone();
-        ws.facts = l.workspace.facts.clone();
-        ws.facts_versions = l.workspace.facts_versions.clone();
-        hid.registry_file_hashes = ws.registry_file_hashes.clone();
+        for (id, f) in &l.workspace.facts {
+            if live.contains(id) && is_non_empty_facts(f) {
+                ws.facts.insert(id.clone(), f.clone());
+            }
+        }
+        for (id, ver) in &l.workspace.facts_versions {
+            if ws.facts.contains_key(id) && *ver != 0 {
+                ws.facts_versions.insert(id.clone(), *ver);
+            }
+        }
+        for (id, f) in &l.hidden.facts {
+            if live.contains(id) && is_non_empty_facts(f) {
+                hid.facts.insert(id.clone(), f.clone());
+            }
+        }
+        for (id, ver) in &l.hidden.facts_versions {
+            if hid.facts.contains_key(id) && *ver != 0 {
+                hid.facts_versions.insert(id.clone(), *ver);
+            }
+        }
         for (id, m) in &l.workspace.module_extensions {
             if live.contains(id) {
-                ws.module_extensions.insert(id.clone(), m.clone());
+                let kept: BTreeMap<String, LockExt> = m
+                    .iter()
+                    .filter(|(_, e)| !e.reproducible())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !kept.is_empty() {
+                    ws.module_extensions.insert(id.clone(), kept);
+                }
             }
         }
         for (id, m) in &l.hidden.module_extensions {
             if live.contains(id) {
-                hid.module_extensions.insert(id.clone(), m.clone());
+                let kept: BTreeMap<String, LockExt> = m
+                    .iter()
+                    .filter(|(_, e)| e.reproducible())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !kept.is_empty() {
+                    hid.module_extensions.insert(id.clone(), kept);
+                }
             }
         }
-        for (id, factors, e) in &l.used {
-            let (target, other) = if e.reproducible() {
+        for u in &l.used {
+            let id = &u.key;
+            if !live.contains(id) {
+                continue;
+            }
+            // Drop stale factor entries whose os/arch dependency shape no longer matches.
+            for map in [&mut ws.module_extensions, &mut hid.module_extensions] {
+                if let Some(m) = map.get_mut(id) {
+                    m.retain(|old_f, _| same_factor_deps(old_f, &u.factors));
+                    if m.is_empty() {
+                        map.remove(id);
+                    }
+                }
+            }
+            let (target, other) = if u.entry.reproducible() {
                 (&mut hid, &mut ws)
             } else {
                 (&mut ws, &mut hid)
             };
             if let Some(m) = other.module_extensions.get_mut(id) {
-                m.remove(factors);
+                m.remove(&u.factors);
                 if m.is_empty() {
                     other.module_extensions.remove(id);
                 }
@@ -1778,8 +2059,40 @@ impl Rt {
                 .module_extensions
                 .entry(id.clone())
                 .or_default()
-                .insert(factors.clone(), e.clone());
+                .insert(u.factors.clone(), u.entry.clone());
+
+            match u.facts.as_ref().filter(|f| is_non_empty_facts(f)) {
+                Some(f) => {
+                    ws.facts.insert(id.clone(), f.clone());
+                    if u.facts_version != 0 {
+                        ws.facts_versions.insert(id.clone(), u.facts_version);
+                    } else {
+                        ws.facts_versions.remove(id);
+                    }
+                    if u.entry.reproducible() {
+                        hid.facts.insert(id.clone(), f.clone());
+                        if u.facts_version != 0 {
+                            hid.facts_versions.insert(id.clone(), u.facts_version);
+                        } else {
+                            hid.facts_versions.remove(id);
+                        }
+                    } else {
+                        hid.facts.remove(id);
+                        hid.facts_versions.remove(id);
+                    }
+                }
+                None => {
+                    ws.facts.remove(id);
+                    ws.facts_versions.remove(id);
+                    hid.facts.remove(id);
+                    hid.facts_versions.remove(id);
+                }
+            }
         }
+        ws.facts_versions
+            .retain(|k, v| ws.facts.contains_key(k) && *v != 0);
+        hid.facts_versions
+            .retain(|k, v| hid.facts.contains_key(k) && *v != 0);
         (ws, hid)
     }
 }

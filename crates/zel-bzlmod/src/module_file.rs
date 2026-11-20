@@ -50,18 +50,22 @@ struct State {
     had_non_module_call: bool,
     name: String,
     version: Version,
+    compatibility_level: i64,
     repo_name: Option<String>,
     bazel_compat: Vec<String>,
     toolchains: Vec<String>,
     platforms: Vec<String>,
     deps: Vec<(String, ModuleKey)>,
+    dep_max_compat: BTreeMap<String, i64>,
     nodeps: Vec<ModuleKey>,
+    nodep_max_compat: Vec<i64>,
     flag_aliases: Vec<(String, String)>,
     usages: Vec<UsageBuilder>,
     overrides: Vec<(String, ModuleOverride)>,
     repo_name_usages: HashMap<String, (String, String)>, // name -> (how, location)
     warnings: Vec<String>,
     include_stack: Vec<String>,
+    root_dir_display: Option<String>,
     current_file: String,
     include_reader: Option<IncludeReader>,
     // Per-file bookkeeping for exports.
@@ -246,10 +250,22 @@ impl<'a> Args<'a> {
     fn opt_bool(&mut self, name: &str) -> bool {
         self.named(name).map(|v| v.is_truthy()).unwrap_or(false)
     }
-    fn opt_int(&mut self, name: &str, default: i64) -> i64 {
+    fn opt_i32(&mut self, name: &str, default: i32) -> Result<i32, StarlarkError> {
         match self.named(name) {
-            Some(Value::Int(i)) => i.to_i64().unwrap_or(default),
-            _ => default,
+            Some(Value::Int(i)) => {
+                i.to_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| {
+                        tb(
+                            self.loc,
+                            self.fname,
+                            format!(
+                            "for parameter '{name}', got {i}, want value in signed 32-bit int range"
+                        ),
+                        )
+                    })
+            }
+            _ => Ok(default),
         }
     }
     fn str_list(&mut self, name: &str, v: Option<Value>) -> Result<Vec<String>, StarlarkError> {
@@ -385,6 +401,7 @@ fn normalize_label(own_repo: &str, is_root: bool, raw: &str) -> Result<String, S
 
 pub fn eval_module_file(src: &str, opts: ModuleFileOptions) -> Result<EvalResult, String> {
     let is_root = opts.key.is_root();
+    let root_dir_display = opts.file_name.rsplit_once('/').map(|(d, _)| d.to_string());
     let st = Arc::new(Mutex::new(State {
         opts_key: opts.key.clone(),
         ignore_dev_deps: opts.ignore_dev_deps,
@@ -393,18 +410,22 @@ pub fn eval_module_file(src: &str, opts: ModuleFileOptions) -> Result<EvalResult
         had_non_module_call: false,
         name: String::new(),
         version: opts.key.version.clone(),
+        compatibility_level: 0,
         repo_name: None,
         bazel_compat: vec![],
         toolchains: vec![],
         platforms: vec![],
         deps: vec![],
+        dep_max_compat: BTreeMap::new(),
         nodeps: vec![],
+        nodep_max_compat: vec![],
         flag_aliases: vec![],
         usages: vec![],
         overrides: vec![],
         repo_name_usages: HashMap::new(),
         warnings: vec![],
         include_stack: vec![],
+        root_dir_display,
         current_file: opts.file_name.clone(),
         include_reader: opts.include_reader.clone(),
         proxy_refs: vec![],
@@ -531,13 +552,16 @@ pub fn eval_module_file(src: &str, opts: ModuleFileOptions) -> Result<EvalResult
         key: s.opts_key.clone(),
         name: s.name.clone(),
         version: s.version.clone(),
+        compatibility_level: s.compatibility_level,
         repo_name: s.repo_name.clone().unwrap_or_else(|| s.name.clone()),
         bazel_compatibility: s.bazel_compat.clone(),
         toolchains_to_register: s.toolchains.clone(),
         execution_platforms_to_register: s.platforms.clone(),
         original_deps: dep_map.clone(),
         deps: dep_map,
+        dep_max_compat: s.dep_max_compat.clone(),
         nodep_deps: s.nodeps.clone(),
+        nodep_max_compat: s.nodep_max_compat.clone(),
         registry_url: opts.registry_url.clone(),
         extension_usages: usages,
         flag_aliases: s.flag_aliases.clone(),
@@ -678,14 +702,19 @@ fn run_file(
         }
         return Err(msg.trim_end().to_string());
     }
-    // Export proxy names (`ext = use_extension(...)`).
+    // Export proxy names (`ext = use_extension(...)`): first non-`_` top-level assignment wins.
     let mut s = st.lock().unwrap();
-    for (name, v) in &ctx.globals {
+    for (name, v) in &ctx.exported_assignments {
+        if name.starts_with('_') {
+            continue;
+        }
         if let Value::Host(kind, id) = v {
             if kind == "ext_proxy" {
                 if let Some((u, p)) = parse_proxy_id(id) {
                     if let Some(proxy) = s.usages.get_mut(u).and_then(|ub| ub.proxies.get_mut(p)) {
-                        proxy.proxy_name = name.clone();
+                        if proxy.proxy_name.is_empty() {
+                            proxy.proxy_name = name.clone();
+                        }
                     }
                 }
             }
@@ -1202,13 +1231,13 @@ fn dispatch_inner(
             }
             let mname = a.opt_str("name", false, "")?;
             let version = a.opt_str("version", false, "")?;
-            let compat_level = a.opt_int("compatibility_level", -1);
+            let compat_level = a.opt_i32("compatibility_level", 0)? as i64;
             let repo_name = a.opt_str("repo_name", false, "")?;
             let bc = a.named("bazel_compatibility");
             let bazel_compat = a.str_list("bazel_compatibility", bc)?;
             a.finish()?;
-            if compat_level != -1 && s.opts_key.is_root() {
-                s.warnings.push(format!("{loc}: The attribute 'compatibility_level' in module() is a no-op and will be removed in a future Bazel release. Please remove it from your MODULE.bazel file."));
+            if compat_level < 0 {
+                return tb_err(&loc, fname, "invalid compatibility_level: must be >= 0");
             }
             if s.had_non_module_call {
                 return tb_err(
@@ -1251,6 +1280,7 @@ fn dispatch_inner(
                     .map_err(|_| tb(&loc, fname, "Invalid version in module()"))?;
             }
             s.name = mname;
+            s.compatibility_level = compat_level;
             s.repo_name = Some(rn);
             s.bazel_compat = bazel_compat;
             Ok(Value::None)
@@ -1259,15 +1289,19 @@ fn dispatch_inner(
             nonmodule(&mut s);
             let dname = a.req_str("name", false)?;
             let version = a.opt_str("version", false, "")?;
-            let max_compat = a.opt_int("max_compatibility_level", -1);
+            let max_compat = a.opt_i32("max_compatibility_level", -1)? as i64;
             let repo_arg = a.named("repo_name");
             let dev = a.opt_bool("dev_dependency");
             a.finish()?;
             validate_module_name(&dname).map_err(|e| tb(&loc, fname, e.0))?;
             let parsed = Version::parse(&version)
                 .map_err(|_| tb(&loc, fname, "Invalid version in bazel_dep()"))?;
-            if max_compat != -1 && s.opts_key.is_root() {
-                s.warnings.push(format!("{loc}: The attribute 'max_compatibility_level' in bazel_dep() is a no-op and will be removed in a future Bazel release. Please remove it from your MODULE.bazel file."));
+            if max_compat < -1 {
+                return tb_err(
+                    &loc,
+                    fname,
+                    "invalid max_compatibility_level: must be >= -1",
+                );
             }
             let repo_name: Option<String> = match repo_arg {
                 Some(Value::None) => None,
@@ -1299,8 +1333,12 @@ fn dispatch_inner(
                         } else {
                             s.deps.push((r.clone(), key));
                         }
+                        s.dep_max_compat.insert(r.clone(), max_compat);
                     }
-                    None => s.nodeps.push(ModuleKey::new(dname.clone(), parsed)),
+                    None => {
+                        s.nodeps.push(ModuleKey::new(dname.clone(), parsed));
+                        s.nodep_max_compat.push(max_compat);
+                    }
                 }
             }
             Ok(Value::None)
@@ -1366,7 +1404,9 @@ fn dispatch_inner(
             };
             a.finish()?;
             if ext_name.is_empty()
-                || !ext_name.chars().all(|c| c.is_alphanumeric() || c == '_')
+                || !ext_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
                 || ext_name.chars().next().unwrap().is_ascii_digit()
             {
                 return tb_err(
@@ -1441,7 +1481,7 @@ fn dispatch_inner(
             }
             let mname = s.name.clone();
             let mver = s.version.normalized().to_string();
-            for (k, v) in a.kw {
+            for (k, v) in drain_kw_ordered(&mut a.kw, &ctx.call_kw_order) {
                 let Value::String(v) = v else {
                     return tb_err(
                         &loc,
@@ -1498,19 +1538,13 @@ fn dispatch_inner(
                 };
                 pairs.push((arg.clone(), arg));
             }
-            for (k, v) in a.kw {
+            for (k, v) in drain_kw_ordered(&mut a.kw, &ctx.call_kw_order) {
                 let Value::String(v) = v else {
                     return tb_err(&loc, fname, format!("{name}(): kwargs must be strings"));
                 };
                 pairs.push((k, v));
             }
-            for (overridden, overriding) in pairs {
-                // override_repo(ext, extension_repo = "root_repo"); inject_repo(ext, local = "ext_name")
-                let (exported, local) = if must_exist {
-                    (overridden.clone(), overriding.clone())
-                } else {
-                    (overriding.clone(), overridden.clone())
-                };
+            for (exported, local) in pairs {
                 validate_user_repo_name(&exported).map_err(|e| tb(&loc, fname, e.0))?;
                 validate_user_repo_name(&local).map_err(|e| tb(&loc, fname, e.0))?;
                 let ub = &mut s.usages[u];
@@ -1590,12 +1624,13 @@ fn dispatch_inner(
                 }
             };
             s.include_stack.push(label.clone());
-            let inc_path = if let Some((dir, _)) = s.current_file.rsplit_once('/') {
-                let rel = label.trim_start_matches("//").replace(':', "/");
-                let rel = rel.trim_start_matches('/');
-                format!("{dir}/{rel}")
-            } else {
-                target.to_string()
+            let rel_path = {
+                let rel = label.trim_start_matches("//").replacen(':', "/", 1);
+                rel.trim_start_matches('/').to_string()
+            };
+            let inc_path = match &s.root_dir_display {
+                Some(dir) if !dir.is_empty() => format!("{dir}/{rel_path}"),
+                _ => rel_path,
             };
             let prev = std::mem::replace(&mut s.current_file, inc_path.clone());
             drop(s);
@@ -1615,7 +1650,7 @@ fn dispatch_inner(
             let patches = a.str_list("patches", pv)?;
             let pc = a.named("patch_cmds");
             let patch_cmds = a.str_list("patch_cmds", pc)?;
-            let patch_strip = a.opt_int("patch_strip", 0);
+            let patch_strip = a.opt_i32("patch_strip", 0)? as i64;
             a.finish()?;
             validate_module_name(&module_name)?;
             let parsed = Version::parse(&version).map_err(|_| {
@@ -1783,7 +1818,17 @@ fn dispatch_inner(
             let n = a.req_str("name", false)?;
             let label = a.req_str("starlark_flag", false)?;
             a.finish()?;
-            s.flag_aliases.push((n, label));
+            if s.flag_aliases.iter().any(|(existing, _)| existing == &n) {
+                return tb_err(
+                    &loc,
+                    fname,
+                    format!("flag_alias for '{n}' is already defined in this module"),
+                );
+            }
+            let own = s.repo_name.clone().unwrap_or_else(|| s.name.clone());
+            let norm_label = normalize_label(&own, s.opts_key.is_root(), &label)
+                .map_err(|e| tb(&loc, fname, e.0))?;
+            s.flag_aliases.push((n, norm_label));
             Ok(Value::None)
         }
         other => Ok(host_str(&format!("<unknown host function {other}>"))),
@@ -2320,6 +2365,89 @@ local_path_override(module_name = "devonly", path = "../x")
         assert_eq!(
             m.to_string(),
             "MultipleVersionOverride[versions=[1.0, 1.1], registry=http://x]"
+        );
+        let nr = ModuleOverride::NonRegistry(RepoSpec::new(
+            LOCAL_BZL,
+            "local_repository",
+            vec![("path".into(), AttrVal::Str("/x".into()))],
+        ));
+        assert_eq!(
+            nr.to_string(),
+            "NonRegistryOverride[repoSpec=RepoSpec[repoRuleId=@@bazel_tools//tools/build_defs/repo:local.bzl%local_repository, attributes=AttributeValues{attributes={\"path\": \"/x\"}}]]"
+        );
+    }
+
+    #[test]
+    fn subsystem2_module_file_validations_and_exports() {
+        // First top-level non-_ assignment wins; _ assignments do not export.
+        let src = r#"
+module(name = "r", compatibility_level = 2)
+_priv = use_extension("//:e.bzl", "e1")
+first = use_extension("//:e.bzl", "e3")
+second = first
+use_repo(_priv, "a")
+use_repo(first, z = "rz", a_imp = "ra")
+override_repo(first, exported_one = "r")
+inject_repo(first, injected_one = "r")
+flag_alias(name = "my_flag", starlark_flag = ":f")
+"#;
+        let r = eval_module_file(src, opts(true)).unwrap();
+        assert_eq!(r.module.compatibility_level, 2);
+        assert_eq!(r.module.extension_usages[0].proxies[0].proxy_name, "");
+        assert_eq!(r.module.extension_usages[1].proxies[0].proxy_name, "first");
+        // Source-ordered kwargs in use_repo (`z` before `a_imp`).
+        assert_eq!(
+            r.module.extension_usages[1].proxies[0].imports,
+            vec![("z".into(), "rz".into()), ("a_imp".into(), "ra".into())]
+        );
+        // inject_repo(ext, injected_one = "r") maps exported "injected_one" -> local "r".
+        assert_eq!(r.module.extension_usages[1].repo_overrides.len(), 2);
+        let inj = r.module.extension_usages[1]
+            .repo_overrides
+            .get("injected_one")
+            .unwrap();
+        assert_eq!(inj.overriding_repo_name, "r");
+        assert!(!inj.must_exist);
+        assert_eq!(
+            r.module.flag_aliases,
+            vec![("my_flag".into(), "//:f".into())]
+        );
+
+        // Duplicate flag_alias rejected.
+        let e = err_of(
+            "flag_alias(name = 'f', starlark_flag = '//:a')\nflag_alias(name = 'f', starlark_flag = '//:b')",
+        );
+        assert!(e.contains("flag_alias for 'f' is already defined"), "{e}");
+
+        // Out-of-range i32 and negative compatibility_level / max_compatibility_level.
+        assert!(err_of("module(name = 'a', compatibility_level = -1)")
+            .contains("invalid compatibility_level: must be >= 0"));
+        assert!(
+            err_of("module(name = 'a', compatibility_level = 3000000000)")
+                .contains("signed 32-bit int range")
+        );
+        assert!(
+            err_of("module(name = 'a', compatibility_level = 999999999999999999999999)")
+                .contains("signed 32-bit int range")
+        );
+        assert!(
+            err_of("bazel_dep(name = 'a', version = '1.0', max_compatibility_level = -2)")
+                .contains("invalid max_compatibility_level: must be >= -1")
+        );
+
+        // Non-ASCII extension_name rejected.
+        assert!(err_of("use_extension('//:e.bzl', 'ext_\u{00e9}')")
+            .contains("extension name is not a valid identifier"));
+
+        // single_version_override patches normalized to @@//pkg:name and @own_repo accepted.
+        let r2 = eval_module_file(
+            "module(name = 'myroot')\nsingle_version_override(module_name = 'x', patches = ['@myroot//patches:fix.patch'])\n",
+            opts(true),
+        )
+        .unwrap();
+        assert_eq!(
+            r2.overrides[0].1.to_string(),
+            "SingleVersionOverride[version=, registry=, patches=[//patches:fix.patch], patchCmds=[], patchStrip=0]"
         );
     }
 

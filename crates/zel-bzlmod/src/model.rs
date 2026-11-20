@@ -115,13 +115,14 @@ pub enum AttrVal {
     None,
     Bool(bool),
     Int(i64),
+    BigInt(zel_starlark::BigInt),
     Float(f64),
     Str(String),
     /// A `Label` value (kept apart from strings so the lockfile can escape label-like strings).
     Label(String),
     List(Vec<AttrVal>),
     Dict(Vec<(String, AttrVal)>),
-    /// A `Label`-keyed dict (`label_keyed_string_dict`) where keys are canonical `@@...` labels.
+    /// A `Label`-keyed dict (`label_keyed_string_dict`), serialized with unescaped canonical label keys.
     LabelDict(Vec<(String, AttrVal)>),
 }
 
@@ -131,7 +132,7 @@ impl AttrVal {
         match self {
             AttrVal::None => "NoneType",
             AttrVal::Bool(_) => "bool",
-            AttrVal::Int(_) => "int",
+            AttrVal::Int(_) | AttrVal::BigInt(_) => "int",
             AttrVal::Float(_) => "float",
             AttrVal::Str(_) => "string",
             AttrVal::Label(_) => "Label",
@@ -147,7 +148,7 @@ impl AttrVal {
             Value::Int(i) => i
                 .to_i64()
                 .map(AttrVal::Int)
-                .unwrap_or_else(|| AttrVal::Str(i.to_string())),
+                .unwrap_or_else(|| AttrVal::BigInt(i.clone())),
             Value::Float(f) => AttrVal::Float(*f),
             Value::String(s) => AttrVal::Str(s.clone()),
             Value::Label(l) => AttrVal::Label(l.unambiguous_canonical_form()),
@@ -162,26 +163,32 @@ impl AttrVal {
             Value::Tuple(t) => AttrVal::List(t.iter().map(Self::from_value).collect()),
             Value::Dict(d) => {
                 let guard = d.lock().unwrap();
-                let is_label_dict = !guard.entries.is_empty()
+                let is_label_keyed = !guard.entries.is_empty()
                     && guard
                         .entries
                         .iter()
                         .all(|(k, _)| matches!(k, Value::Label(_)));
-                let entries: Vec<(String, AttrVal)> = guard
-                    .entries
-                    .iter()
-                    .map(|(k, v)| {
-                        let key = match k {
-                            Value::Label(l) => l.unambiguous_canonical_form(),
-                            other => other.to_string(),
-                        };
-                        (key, Self::from_value(v))
-                    })
-                    .collect();
-                if is_label_dict {
-                    AttrVal::LabelDict(entries)
+                if is_label_keyed {
+                    AttrVal::LabelDict(
+                        guard
+                            .entries
+                            .iter()
+                            .map(|(k, v)| match k {
+                                Value::Label(l) => {
+                                    (l.unambiguous_canonical_form(), Self::from_value(v))
+                                }
+                                _ => (k.to_string(), Self::from_value(v)),
+                            })
+                            .collect(),
+                    )
                 } else {
-                    AttrVal::Dict(entries)
+                    AttrVal::Dict(
+                        guard
+                            .entries
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), Self::from_value(v)))
+                            .collect(),
+                    )
                 }
             }
             other => AttrVal::Str(other.to_string()),
@@ -195,6 +202,7 @@ impl AttrVal {
             AttrVal::None => Value::None,
             AttrVal::Bool(b) => Value::Bool(*b),
             AttrVal::Int(i) => Value::Int(BigInt::from_i64(*i)),
+            AttrVal::BigInt(i) => Value::Int(i.clone()),
             AttrVal::Float(f) => Value::Float(*f),
             AttrVal::Str(s) => Value::String(s.clone()),
             AttrVal::Label(s) => zel_cmdline::Label::parse_canonical(s)
@@ -228,7 +236,8 @@ impl AttrVal {
             AttrVal::None => Json::Null,
             AttrVal::Bool(b) => Json::Bool(*b),
             AttrVal::Int(i) => Json::int(*i),
-            AttrVal::Float(f) => Json::Num(format!("{f:?}")),
+            AttrVal::BigInt(i) => Json::Num(i.to_string()),
+            AttrVal::Float(f) => Json::Num(crate::json::format_json_float(*f)),
             // `AttributeValuesAdapter.serializeObjToString`: labels are written as is, strings that look like a
             // label (`@@...`) or like an escaped string (`'...'`) are wrapped in one more layer of `'`.
             AttrVal::Label(s) => Json::Str(s.clone()),
@@ -249,10 +258,17 @@ impl AttrVal {
         match j {
             Json::Null => AttrVal::None,
             Json::Bool(b) => AttrVal::Bool(*b),
-            Json::Num(n) => n
-                .parse::<i64>()
-                .map(AttrVal::Int)
-                .unwrap_or_else(|_| AttrVal::Float(n.parse().unwrap_or(0.0))),
+            Json::Num(n) => {
+                if let Ok(i) = n.parse::<i64>() {
+                    AttrVal::Int(i)
+                } else if !n.contains('.') && !n.contains('e') && !n.contains('E') {
+                    zel_starlark::BigInt::from_str_radix(n, 10)
+                        .map(AttrVal::BigInt)
+                        .unwrap_or_else(|_| AttrVal::Float(n.parse().unwrap_or(0.0)))
+                } else {
+                    AttrVal::Float(n.parse().unwrap_or(0.0))
+                }
+            }
             Json::Str(s) if s.starts_with("@@") => AttrVal::Label(s.clone()),
             Json::Str(s) => AttrVal::Str(unescape_attr_string(s)),
             Json::Arr(a) => AttrVal::List(a.iter().map(Self::from_json).collect()),
@@ -299,8 +315,15 @@ impl AttrVal {
             AttrVal::Bool(true) => "True".into(),
             AttrVal::Bool(false) => "False".into(),
             AttrVal::Int(i) => i.to_string(),
+            AttrVal::BigInt(i) => i.to_string(),
             AttrVal::Float(f) => format!("{f:?}"),
-            AttrVal::Label(s) => AttrVal::Str(s.clone()).repr(),
+            AttrVal::Label(s) => {
+                let shown = s
+                    .strip_prefix("@@")
+                    .filter(|r| r.starts_with("//"))
+                    .unwrap_or(s);
+                format!("Label({})", AttrVal::Str(shown.to_string()).repr())
+            }
             AttrVal::Str(s) => {
                 let mut o = String::from("\"");
                 for c in s.chars() {
@@ -330,11 +353,7 @@ impl AttrVal {
             AttrVal::LabelDict(d) => format!(
                 "{{{}}}",
                 d.iter()
-                    .map(|(k, v)| format!(
-                        "Label({}): {}",
-                        AttrVal::Str(k.clone()).repr(),
-                        v.repr()
-                    ))
+                    .map(|(k, v)| format!("{}: {}", AttrVal::Label(k.clone()).repr(), v.repr()))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -376,6 +395,8 @@ impl RepoSpec {
             self.bzl_file.clone()
         } else if let Some(r) = self.bzl_file.strip_prefix('@') {
             format!("@@{r}")
+        } else if self.bzl_file.starts_with("//") {
+            format!("@@{}", self.bzl_file)
         } else {
             self.bzl_file.clone()
         };
@@ -397,7 +418,7 @@ impl RepoSpec {
     }
     pub fn from_json(j: &Json) -> Option<RepoSpec> {
         let id = j.get("repoRuleId")?.as_str()?;
-        let (bzl, name) = id.rsplit_once('%')?;
+        let (bzl, name) = id.split_once('%')?;
         let attrs = match j.get("attributes")? {
             Json::Obj(o) => o
                 .iter()
@@ -471,7 +492,15 @@ impl std::fmt::Display for ModuleOverride {
                         _ => (k.clone(), v.clone()),
                     })
                     .collect();
-                let bzl = spec.bzl_file.strip_prefix('@').map(|r| format!("@@{r}")).unwrap_or_else(|| spec.bzl_file.clone());
+                let bzl = if spec.bzl_file.starts_with("@@") {
+                    spec.bzl_file.clone()
+                } else if let Some(r) = spec.bzl_file.strip_prefix('@') {
+                    format!("@@{r}")
+                } else if spec.bzl_file.starts_with("//") {
+                    format!("@@{}", spec.bzl_file)
+                } else {
+                    spec.bzl_file.clone()
+                };
                 write!(
                     f,
                     "NonRegistryOverride[repoSpec=RepoSpec[repoRuleId={bzl}%{}, attributes=AttributeValues{{attributes={}}}]]",
@@ -545,13 +574,16 @@ pub struct InterimModule {
     pub key: ModuleKey,
     pub name: String,
     pub version: Version,
+    pub compatibility_level: i64,
     pub repo_name: String,
     pub bazel_compatibility: Vec<String>,
     pub toolchains_to_register: Vec<String>,
     pub execution_platforms_to_register: Vec<String>,
     pub deps: Vec<(String, ModuleKey)>,
+    pub dep_max_compat: BTreeMap<String, i64>,
     pub original_deps: Vec<(String, ModuleKey)>,
     pub nodep_deps: Vec<ModuleKey>,
+    pub nodep_max_compat: Vec<i64>,
     pub registry_url: Option<String>,
     pub extension_usages: Vec<ExtensionUsage>,
     pub flag_aliases: Vec<(String, String)>,
@@ -609,14 +641,41 @@ mod tests {
             AttrVal::Str("plain".into()).to_json(),
             Json::Str("plain".into())
         );
-        // Round trip, including dict keys.
+        // Round trip, including dict keys, BigInt, LabelDict, float `.0`, and RepoSpec rule_id.
+        let big =
+            zel_starlark::BigInt::from_str_radix("99999999999999999999999999999", 10).unwrap();
         for v in [
             AttrVal::Str("@@//:x".into()),
             AttrVal::Str("'q'".into()),
             AttrVal::Label("@@r+//p:t".into()),
+            AttrVal::BigInt(big.clone()),
+            AttrVal::Float(1.0),
             AttrVal::Dict(vec![("@@k".into(), AttrVal::Str("@@v".into()))]),
+            AttrVal::LabelDict(vec![("@@//:lbl".into(), AttrVal::Str("val".into()))]),
         ] {
             assert_eq!(AttrVal::from_json(&v.to_json()), v);
         }
+        assert_eq!(AttrVal::Float(2.0).to_json(), Json::Num("2.0".into()));
+        let main_lbl = zel_cmdline::Label::parse_canonical("@@//pkg:target").unwrap();
+        let av = AttrVal::from_value(&Value::Label(main_lbl.clone()));
+        assert_eq!(av, AttrVal::Label("@@//pkg:target".into()));
+        assert_eq!(av.to_value(), Value::Label(main_lbl));
+        assert_eq!(av.repr(), "Label(\"//pkg:target\")");
+        assert_eq!(
+            AttrVal::Label("@@ext+//pkg:target".into()).repr(),
+            "Label(\"@@ext+//pkg:target\")"
+        );
+        let spec = RepoSpec::new("//pkg:f%ile.bzl", "my_rule", vec![]);
+        assert_eq!(spec.rule_id(), "@@//pkg:f%ile.bzl%my_rule");
+        let parsed = RepoSpec::from_json(&Json::Obj(vec![
+            (
+                "repoRuleId".into(),
+                Json::Str("@@//pkg:defs.bzl%rule%with%pct".into()),
+            ),
+            ("attributes".into(), Json::Obj(vec![])),
+        ]))
+        .unwrap();
+        assert_eq!(parsed.bzl_file, "@@//pkg:defs.bzl");
+        assert_eq!(parsed.rule_name, "rule%with%pct");
     }
 }

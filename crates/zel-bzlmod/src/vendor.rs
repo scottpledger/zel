@@ -234,12 +234,39 @@ pub fn replant_symlinks(
         };
 
         if let Some(_new_target) = new_target {
+            #[cfg(windows)]
+            let orig_is_dir = fs::metadata(&symlink_path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
             let _ = fs::remove_file(&symlink_path);
             #[cfg(unix)]
             {
-                std::os::unix::fs::symlink(&_new_target, &symlink_path).map_err(|e| {
-                    format!("Failed to replant symlink {}: {e}", symlink_path.display())
-                })?;
+                if let Err(e) = std::os::unix::fs::symlink(&_new_target, &symlink_path) {
+                    let _ = std::os::unix::fs::symlink(&target, &symlink_path);
+                    return Err(format!(
+                        "Failed to replant symlink {}: {e}",
+                        symlink_path.display()
+                    ));
+                }
+            }
+            #[cfg(windows)]
+            {
+                let res = if orig_is_dir {
+                    std::os::windows::fs::symlink_dir(&_new_target, &symlink_path)
+                } else {
+                    std::os::windows::fs::symlink_file(&_new_target, &symlink_path)
+                };
+                if let Err(e) = res {
+                    let _ = if orig_is_dir {
+                        std::os::windows::fs::symlink_dir(&target, &symlink_path)
+                    } else {
+                        std::os::windows::fs::symlink_file(&target, &symlink_path)
+                    };
+                    return Err(format!(
+                        "Failed to replant symlink {}: {e}",
+                        symlink_path.display()
+                    ));
+                }
             }
         }
     }
@@ -288,6 +315,16 @@ pub(crate) fn ensure_symlink(target: &Path, link: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(target, link).map_err(|e| {
+            format!(
+                "Failed to create symlink {} -> {}: {e}",
+                link.display(),
+                target.display()
+            )
+        })?;
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(target, link).map_err(|e| {
             format!(
                 "Failed to create symlink {} -> {}: {e}",
                 link.display(),

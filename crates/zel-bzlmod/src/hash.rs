@@ -109,6 +109,7 @@ pub enum Algorithm {
     Sha256,
     Sha384,
     Sha512,
+    Blake3,
 }
 
 impl Algorithm {
@@ -119,6 +120,7 @@ impl Algorithm {
             Algorithm::Sha256 => "sha256",
             Algorithm::Sha384 => "sha384",
             Algorithm::Sha512 => "sha512",
+            Algorithm::Blake3 => "blake3",
         }
     }
     pub fn digest_len(self) -> usize {
@@ -128,6 +130,7 @@ impl Algorithm {
             Algorithm::Sha256 => 32,
             Algorithm::Sha384 => 48,
             Algorithm::Sha512 => 64,
+            Algorithm::Blake3 => 32,
         }
     }
     pub fn from_name(s: &str) -> Option<Algorithm> {
@@ -137,6 +140,7 @@ impl Algorithm {
             "sha256" | "sha-256" => Some(Algorithm::Sha256),
             "sha384" | "sha-384" => Some(Algorithm::Sha384),
             "sha512" | "sha-512" => Some(Algorithm::Sha512),
+            "blake3" | "blake-3" => Some(Algorithm::Blake3),
             _ => None,
         }
     }
@@ -147,6 +151,7 @@ impl Algorithm {
             Algorithm::Sha256 => sha256(data).to_vec(),
             Algorithm::Sha384 => sha384(data).to_vec(),
             Algorithm::Sha512 => sha512(data).to_vec(),
+            Algorithm::Blake3 => blake3(data).to_vec(),
         }
     }
 }
@@ -497,6 +502,174 @@ pub fn sha384(data: &[u8]) -> [u8; 48] {
     out
 }
 
+pub fn blake3(data: &[u8]) -> [u8; 32] {
+    const IV: [u32; 8] = [
+        0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB,
+        0x5BE0CD19,
+    ];
+    const MSG_PERMUTATION: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+    const CHUNK_START: u32 = 1;
+    const CHUNK_END: u32 = 2;
+    const PARENT: u32 = 4;
+    const ROOT: u32 = 8;
+
+    fn g(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, mx: u32, my: u32) {
+        state[a] = state[a].wrapping_add(state[b]).wrapping_add(mx);
+        state[d] = (state[d] ^ state[a]).rotate_right(16);
+        state[c] = state[c].wrapping_add(state[d]);
+        state[b] = (state[b] ^ state[c]).rotate_right(12);
+        state[a] = state[a].wrapping_add(state[b]).wrapping_add(my);
+        state[d] = (state[d] ^ state[a]).rotate_right(8);
+        state[c] = state[c].wrapping_add(state[d]);
+        state[b] = (state[b] ^ state[c]).rotate_right(7);
+    }
+
+    fn round(state: &mut [u32; 16], m: &[u32; 16]) {
+        g(state, 0, 4, 8, 12, m[0], m[1]);
+        g(state, 1, 5, 9, 13, m[2], m[3]);
+        g(state, 2, 6, 10, 14, m[4], m[5]);
+        g(state, 3, 7, 11, 15, m[6], m[7]);
+        g(state, 0, 5, 10, 15, m[8], m[9]);
+        g(state, 1, 6, 11, 12, m[10], m[11]);
+        g(state, 2, 7, 8, 13, m[12], m[13]);
+        g(state, 3, 4, 9, 14, m[14], m[15]);
+    }
+
+    fn compress(
+        cv: &[u32; 8],
+        block_words: &[u32; 16],
+        counter: u64,
+        block_len: u32,
+        flags: u32,
+    ) -> [u32; 16] {
+        let mut state = [
+            cv[0],
+            cv[1],
+            cv[2],
+            cv[3],
+            cv[4],
+            cv[5],
+            cv[6],
+            cv[7],
+            IV[0],
+            IV[1],
+            IV[2],
+            IV[3],
+            counter as u32,
+            (counter >> 32) as u32,
+            block_len,
+            flags,
+        ];
+        let mut m = *block_words;
+        for r in 0..7 {
+            round(&mut state, &m);
+            if r < 6 {
+                let mut next = [0u32; 16];
+                for i in 0..16 {
+                    next[i] = m[MSG_PERMUTATION[i]];
+                }
+                m = next;
+            }
+        }
+        for i in 0..8 {
+            state[i] ^= state[i + 8];
+            state[i + 8] ^= cv[i];
+        }
+        state
+    }
+
+    fn first_8(out: [u32; 16]) -> [u32; 8] {
+        [
+            out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7],
+        ]
+    }
+
+    fn words_from_bytes_64(bytes: &[u8]) -> [u32; 16] {
+        let mut buf = [0u8; 64];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        let mut words = [0u32; 16];
+        for (i, chunk) in buf.chunks_exact(4).enumerate() {
+            words[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        words
+    }
+
+    fn parent_words(left: &[u32; 8], right: &[u32; 8]) -> [u32; 16] {
+        let mut w = [0u32; 16];
+        w[..8].copy_from_slice(left);
+        w[8..].copy_from_slice(right);
+        w
+    }
+
+    fn chunk_last_node(chunk: &[u8], chunk_counter: u64) -> ([u32; 8], [u32; 16], u64, u32, u32) {
+        if chunk.is_empty() {
+            return (IV, [0u32; 16], chunk_counter, 0, CHUNK_START | CHUNK_END);
+        }
+        let mut cv = IV;
+        let blocks: Vec<&[u8]> = chunk.chunks(64).collect();
+        let last_idx = blocks.len() - 1;
+        for (i, blk) in blocks[..last_idx].iter().enumerate() {
+            let flags = if i == 0 { CHUNK_START } else { 0 };
+            let w = words_from_bytes_64(blk);
+            cv = first_8(compress(&cv, &w, chunk_counter, 64, flags));
+        }
+        let last_blk = blocks[last_idx];
+        let mut flags = CHUNK_END;
+        if last_idx == 0 {
+            flags |= CHUNK_START;
+        }
+        (
+            cv,
+            words_from_bytes_64(last_blk),
+            chunk_counter,
+            last_blk.len() as u32,
+            flags,
+        )
+    }
+
+    let root_words = if data.len() <= 1024 {
+        let (cv, w, counter, block_len, flags) = chunk_last_node(data, 0);
+        first_8(compress(&cv, &w, counter, block_len, flags | ROOT))
+    } else {
+        let mut cv_stack: Vec<[u32; 8]> = Vec::new();
+        let chunks: Vec<&[u8]> = data.chunks(1024).collect();
+        let last_chunk_idx = chunks.len() - 1;
+        for (chunk_idx, chunk) in chunks[..last_chunk_idx].iter().enumerate() {
+            let (cv, w, counter, block_len, flags) = chunk_last_node(chunk, chunk_idx as u64);
+            let mut new_cv = first_8(compress(&cv, &w, counter, block_len, flags));
+            let mut total_chunks = (chunk_idx + 1) as u64;
+            while total_chunks & 1 == 0 {
+                let left = cv_stack.pop().unwrap();
+                let pw = parent_words(&left, &new_cv);
+                new_cv = first_8(compress(&IV, &pw, 0, 64, PARENT));
+                total_chunks >>= 1;
+            }
+            cv_stack.push(new_cv);
+        }
+        let (cv, w, counter, block_len, flags) =
+            chunk_last_node(chunks[last_chunk_idx], last_chunk_idx as u64);
+        let mut right_cv = first_8(compress(&cv, &w, counter, block_len, flags));
+        while cv_stack.len() > 1 {
+            let left = cv_stack.pop().unwrap();
+            let pw = parent_words(&left, &right_cv);
+            right_cv = first_8(compress(&IV, &pw, 0, 64, PARENT));
+        }
+        let left = cv_stack.pop().unwrap();
+        let pw = parent_words(&left, &right_cv);
+        first_8(compress(&IV, &pw, 0, 64, PARENT | ROOT))
+    };
+
+    let mut out = [0u8; 32];
+    for (i, word) in root_words.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
+pub fn blake3_hex(data: &[u8]) -> String {
+    to_hex(&blake3(data))
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     to_hex(&sha256(data))
 }
@@ -519,22 +692,26 @@ pub struct Checksum {
 }
 
 impl Checksum {
-    /// Parse a Subresource Integrity string (`sha256-<base64>`, also sha1/sha384/sha512).
-    /// Only the first token is considered if several are space separated.
+    /// Parse a Subresource Integrity string (`sha256-<base64>`, also sha1/sha384/sha512/blake3).
     pub fn parse_integrity(s: &str) -> Result<Checksum, String> {
-        let s = s.trim();
-        let tok = s.split_whitespace().next().unwrap_or("");
         let unsupported = || {
-            format!("Unsupported checksum algorithm: '{}' (expected SHA-1, SHA-256, SHA-384, or SHA-512)", s)
+            format!(
+                "Unsupported checksum algorithm: '{}' (expected SHA-1, SHA-256, SHA-384, SHA-512, or BLAKE3)",
+                s
+            )
         };
-        let (algo, b64) = tok.split_once('-').ok_or_else(unsupported)?;
+        let (algo, b64) = s.split_once('-').ok_or_else(unsupported)?;
         let (algorithm, key_name) = match algo {
             "sha1" => (Algorithm::Sha1, "SHA-1"),
             "sha256" => (Algorithm::Sha256, "SHA-256"),
             "sha384" => (Algorithm::Sha384, "SHA-384"),
             "sha512" => (Algorithm::Sha512, "SHA-512"),
+            "blake3" => (Algorithm::Blake3, "BLAKE3"),
             _ => return Err(unsupported()),
         };
+        if b64.is_empty() || b64.chars().any(char::is_whitespace) {
+            return Err(format!("Invalid {} SRI checksum '{}'", key_name, s));
+        }
         let digest = base64_decode(b64).map_err(|_| format!("Invalid base64 '{}'", b64))?;
         if digest.len() != algorithm.digest_len() {
             return Err(format!("Invalid {} SRI checksum '{}'", key_name, s));
@@ -739,6 +916,7 @@ mod tests {
             Algorithm::Sha256,
             Algorithm::Sha384,
             Algorithm::Sha512,
+            Algorithm::Blake3,
         ] {
             let s = format!("{}-{}", a.name(), base64_encode(&a.digest(b"hello")));
             let c = Checksum::parse_integrity(&s).unwrap();
@@ -746,6 +924,45 @@ mod tests {
             assert!(!c.matches(b"hellO"));
             assert_eq!(Checksum::parse(&s).unwrap(), c);
         }
+    }
+
+    #[test]
+    fn blake3_official_vectors_and_multi_token_sri_rejection() {
+        assert_eq!(
+            blake3_hex(b""),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+        assert_eq!(
+            blake3_hex(b"abc"),
+            "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+        );
+        let vec_input = |len: usize| -> Vec<u8> { (0..len).map(|i| (i % 251) as u8).collect() };
+        assert_eq!(
+            blake3_hex(&vec_input(1024)),
+            "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7"
+        );
+        assert_eq!(
+            blake3_hex(&vec_input(1025)),
+            "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"
+        );
+        assert_eq!(
+            blake3_hex(&vec_input(2048)),
+            "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a"
+        );
+        // Verify multi-chunk Merkle parent reduction consistency across 3 and 4 chunks.
+        assert_eq!(blake3(&vec_input(2049)).len(), 32);
+        assert_ne!(blake3(&vec_input(2049)), blake3(&vec_input(2048)));
+        assert_ne!(blake3(&vec_input(4096)), blake3(&vec_input(3072)));
+
+        let b3_abc = format!("blake3-{}", base64_encode(&blake3(b"abc")));
+        let c = Checksum::parse_integrity(&b3_abc).unwrap();
+        assert_eq!(c.algorithm, Algorithm::Blake3);
+        assert!(c.verify(b"abc").is_ok());
+
+        // Multi-token or whitespace-containing SRI strings must be rejected.
+        let sha_abc = format!("sha256-{}", base64_encode(&sha256(b"abc")));
+        assert!(Checksum::parse_integrity(&format!("{sha_abc} {b3_abc}")).is_err());
+        assert!(Checksum::parse_integrity(&format!("{sha_abc}?opt=1")).is_err());
     }
 
     #[test]

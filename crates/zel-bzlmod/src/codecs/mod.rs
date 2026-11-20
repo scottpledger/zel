@@ -8,7 +8,7 @@ pub mod zstd;
 
 pub use bz2::bunzip2;
 pub use sevenz::extract_7z;
-pub use xz::xz_decompress;
+pub use xz::{xz_decompress, xz_decompress_concatenated};
 pub use zstd::zstd_decompress;
 
 use std::cell::RefCell;

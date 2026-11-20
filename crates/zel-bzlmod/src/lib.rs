@@ -74,3 +74,18 @@ pub(crate) fn canonical_no_unc(p: &std::path::Path) -> std::io::Result<std::path
     }
     Ok(c)
 }
+
+/// Spawns `cmd`, retrying on Unix `ETXTBSY` (`ExecutableFileBusy` / `errno 26`) when another
+/// thread concurrently called `fork()` before `execve()` while an executable's write fd was open.
+pub(crate) fn spawn_retry_etxtbsy(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Child> {
+    crate::netrc::retry_etxtbsy(|| cmd.spawn())
+}
+
+/// Runs `cmd.output()`, retrying on Unix `ETXTBSY` (`ExecutableFileBusy` / `errno 26`).
+pub(crate) fn output_retry_etxtbsy(
+    cmd: &mut std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    crate::netrc::retry_etxtbsy(|| cmd.output())
+}

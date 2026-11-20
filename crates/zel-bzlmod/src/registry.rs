@@ -34,6 +34,31 @@ pub struct Registry {
     pub timeout_secs: u64,
     /// Repository cache consulted (by lockfile hash) before touching the network, and fed after downloads.
     repo_cache: Option<crate::download::RepositoryCache>,
+    vendor_dir: Option<PathBuf>,
+    rewriter: Option<crate::download::UrlRewriter>,
+}
+
+/// Computes `<vendor_dir>/_registries/<lowercase-host>/<decoded-path>` for an http(s) registry URL,
+/// matching Bazel's `IndexRegistry.getVendoredPath` / `VendorManager.vendorRegistryFiles` while
+/// confining decoded paths beneath `<vendor_dir>/_registries/<lowercase-host>`.
+pub fn vendored_registry_path(vendor_dir: &std::path::Path, url: &str) -> Option<PathBuf> {
+    if url.starts_with("file:") || !url.contains("://") {
+        return None;
+    }
+    let rel = crate::session::registry_vendor_rel_path(url)?;
+    if rel.is_absolute()
+        || !rel
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let registries_dir = vendor_dir.join("_registries");
+    let full = registries_dir.join(&rel);
+    if !full.starts_with(&registries_dir) {
+        return None;
+    }
+    Some(full)
 }
 
 pub fn sha256_hex_to_sri(h: &str) -> String {
@@ -160,9 +185,17 @@ pub fn take_recorded_fetches() -> Vec<(String, bool)> {
 
 /// Fetches raw bytes from `url`; `Ok(None)` means "not found".
 pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String> {
+    fetch_url_ext(url, timeout_secs, true)
+}
+
+fn fetch_url_ext(url: &str, timeout_secs: u64, cacheable: bool) -> Result<Option<Vec<u8>>, String> {
+    // Local file:// registries are never cached so edits on disk take effect immediately.
+    if url.starts_with("file://") {
+        return fetch_url_uncached(url, timeout_secs, &RegistryAuthCtx::default());
+    }
     let is_http = url.starts_with("http://") || url.starts_with("https://");
+    let ctx = REGISTRY_AUTH.with(|c| c.borrow().clone());
     let auth_hdrs = if is_http {
-        let ctx = REGISTRY_AUTH.with(|c| c.borrow().clone());
         crate::netrc::resolve_auth_headers(url, &ctx.helpers, &ctx.client_env)?
     } else {
         Vec::new()
@@ -172,21 +205,21 @@ pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String
     } else {
         format!("{url}\0{auth_hdrs:?}")
     };
-    {
+    if cacheable {
         let mut guard = URL_CACHE.lock().unwrap();
         let cache = guard.get_or_insert_with(std::collections::HashMap::new);
         if let Some(res) = cache.get(&cache_key) {
             return res.clone();
         }
     }
-    let res = fetch_url_uncached(url, timeout_secs, &auth_hdrs);
+    let res = fetch_url_uncached(url, timeout_secs, &ctx);
     if is_http {
         RECORDED_FETCHES
             .lock()
             .unwrap()
             .push((url.to_string(), matches!(res, Ok(Some(_)))));
     }
-    if res.is_ok() {
+    if cacheable && res.is_ok() {
         let mut guard = URL_CACHE.lock().unwrap();
         let cache = guard.get_or_insert_with(std::collections::HashMap::new);
         cache.insert(cache_key, res.clone());
@@ -197,7 +230,7 @@ pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String
 fn fetch_url_uncached(
     url: &str,
     timeout_secs: u64,
-    auth_hdrs: &[(String, String)],
+    ctx: &RegistryAuthCtx,
 ) -> Result<Option<Vec<u8>>, String> {
     if let Some(rest) = url.strip_prefix("file://") {
         {
@@ -219,7 +252,7 @@ fn fetch_url_uncached(
         };
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return fetch_http_with_retries(url, timeout_secs, auth_hdrs);
+        return fetch_http_with_retries(url, timeout_secs, ctx);
     }
     Err(format!("Unsupported registry URL scheme: {url}"))
 }
@@ -236,71 +269,125 @@ pub fn set_http_connector_attempts(n: u32) {
     );
 }
 
-/// One HTTP GET through `curl` (no TLS stack without external crates). `Err((retryable, msg))`.
+const REGISTRY_MAX_REDIRECTS: usize = 40;
+
+/// Hop-by-hop HTTP GET through single-hop `curl` invocations, re-evaluating `ProxyHelper`
+/// (`curl_proxy_args`) and per-URI credentials on every redirect hop (`HttpConnector.connect`).
 fn curl_once(
-    url: &str,
+    start_url: &str,
     connect_timeout_ms: u64,
     max_time: u64,
-    auth_hdrs: &[(String, String)],
+    ctx: &RegistryAuthCtx,
 ) -> Result<Option<Vec<u8>>, (bool, String)> {
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args([
-        "-sS",
-        "-L",
-        "--max-redirs",
-        "40",
-        "--connect-timeout",
-        &format!("{:.3}", connect_timeout_ms as f64 / 1000.0),
-        "--max-time",
-        &max_time.to_string(),
-        "-w",
-        "\n%{http_code}",
-    ]);
-    for (k, v) in auth_hdrs {
-        cmd.arg("-H").arg(format!("{k}: {v}"));
-    }
-    cmd.arg(url);
-    let out = cmd.output().map_err(|e| (false, e.to_string()))?;
-    if !out.status.success() {
-        // Mirror the Java connector: unknown host and certificate problems are permanent, everything else
-        // (refused, reset, timeout, ...) is an IOException that is retried.
-        return Err(match out.status.code() {
-            Some(7) => (true, "Connection refused".to_string()),
-            Some(6) => {
-                let host = url
-                    .split("://")
-                    .nth(1)
-                    .and_then(|r| r.split('/').next())
-                    .unwrap_or("");
-                (false, format!("Unknown host: {host}"))
+    let mut current = crate::download::Url::parse(start_url).map_err(|e| (false, e))?;
+    let mut current_url_str = start_url.to_string();
+    let mut visited = vec![current.to_url_string()];
+    for _ in 0..=REGISTRY_MAX_REDIRECTS {
+        let helper_hdrs = crate::netrc::resolve_credential_helper_headers(
+            &current_url_str,
+            &ctx.helpers,
+            &ctx.client_env,
+        )
+        .map_err(|e| (false, e))?;
+        let auth_hdrs = if let Some(hdrs) = helper_hdrs {
+            hdrs
+        } else if let Some(ui_hdr) = current.basic_auth_header_for_userinfo() {
+            vec![ui_hdr]
+        } else {
+            crate::netrc::resolve_netrc_headers(&current_url_str, &ctx.client_env)
+        };
+        let clean_url = current.to_url_string_without_userinfo();
+        let (hdr_tmp, body_tmp) = crate::download::next_curl_temp_pair();
+        let mut cmd = std::process::Command::new("curl");
+        for k in crate::download::AMBIENT_PROXY_ENV_VARS {
+            cmd.env_remove(k);
+        }
+        cmd.args([
+            "-sS",
+            "--connect-timeout",
+            &format!("{:.3}", connect_timeout_ms as f64 / 1000.0),
+            "--max-time",
+            &max_time.to_string(),
+            "-A",
+            "bazel/9.3.2",
+        ]);
+        cmd.args(crate::download::curl_proxy_args(
+            &clean_url,
+            &ctx.client_env,
+        ));
+        cmd.arg("-D").arg(&hdr_tmp.0);
+        cmd.arg("-o").arg(&body_tmp.0);
+        for (k, v) in &auth_hdrs {
+            cmd.arg("-H").arg(format!("{k}: {v}"));
+        }
+        cmd.arg(&clean_url);
+        let out = crate::output_retry_etxtbsy(&mut cmd).map_err(|e| (false, e.to_string()))?;
+        let raw_hdrs = std::fs::read(&hdr_tmp.0).unwrap_or_default();
+        let mut blocks = crate::download::parse_curl_header_blocks(&raw_hdrs);
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(match out.status.code() {
+                Some(7) => (true, "Connection refused".to_string()),
+                Some(6) => (false, format!("Unknown host: {}", current.host)),
+                Some(5) => (false, format!("Unknown host: {stderr}")),
+                Some(28) => (true, "connect timed out".to_string()),
+                Some(51 | 58 | 60 | 77) => (false, format!("TLS error: {stderr}")),
+                Some(35) if stderr.to_ascii_lowercase().contains("certificate") => {
+                    (false, format!("TLS error: {stderr}"))
+                }
+                _ => {
+                    if let Some(last) = blocks.last() {
+                        if last.code >= 400 {
+                            let c = last.code;
+                            let retryable = c == 403
+                                || c == 408
+                                || c == 429
+                                || ((500..600).contains(&c) && c != 501 && c != 505);
+                            return Err((retryable, format!("HTTP status {c}")));
+                        }
+                    }
+                    (true, stderr)
+                }
+            });
+        }
+        let body = std::fs::read(&body_tmp.0).map_err(|e| (false, e.to_string()))?;
+        let Some(blk) = blocks.pop() else {
+            return Ok(Some(body));
+        };
+        let code = u32::from(blk.code);
+        if matches!(blk.code, 301 | 302 | 303 | 307 | 308) {
+            let loc = blk
+                .headers
+                .iter()
+                .rev()
+                .find(|(k, _)| k == "location")
+                .map(|(_, v)| v.clone())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| (false, format!("Redirect {code} without Location header")))?;
+            let next = current.join(&loc).map_err(|e| (false, e))?;
+            if !matches!(next.scheme.as_str(), "http" | "https") {
+                return Err((false, format!("Bad Location: {loc}")));
             }
-            Some(28) => (true, "connect timed out".to_string()),
-            Some(35) | Some(51) | Some(58) | Some(60) | Some(77) => (
-                false,
-                format!("TLS error: {}", String::from_utf8_lossy(&out.stderr).trim()),
-            ),
-            _ => (
-                true,
-                String::from_utf8_lossy(&out.stderr).trim().to_string(),
-            ),
-        });
+            let next_str = next.to_url_string();
+            if visited.contains(&next_str) {
+                return Err((false, "Redirect loop detected".to_string()));
+            }
+            visited.push(next_str.clone());
+            current_url_str = next_str;
+            current = next;
+            continue;
+        }
+        return match code {
+            200 | 206 => Ok(Some(body)),
+            404 => Ok(None),
+            401 => Err((false, "GET returned 401 Unauthorized".to_string())),
+            // HttpConnector: 403, 408, 429 and 5xx other than 501/505 are retried; other 4xx (including 410) are permanent.
+            403 | 408 | 429 => Err((true, format!("HTTP status {code}"))),
+            c if c < 500 || c == 501 || c == 505 => Err((false, format!("HTTP status {c}"))),
+            c => Err((true, format!("HTTP status {c}"))),
+        };
     }
-    let body = out.stdout;
-    let nl = body.iter().rposition(|b| *b == b'\n').unwrap_or(0);
-    let code = String::from_utf8_lossy(&body[nl + 1..])
-        .trim()
-        .parse::<u32>()
-        .unwrap_or(0);
-    let content = body[..nl].to_vec();
-    match code {
-        200 | 206 => Ok(Some(content)),
-        404 | 410 => Ok(None),
-        401 => Err((false, "GET returned 401 Unauthorized".to_string())),
-        // HttpConnector: 403, 408, 429 and 5xx other than 501/505 are retried; other 4xx are permanent.
-        403 | 408 | 429 => Err((true, format!("HTTP status {code}"))),
-        c if c < 500 || c == 501 || c == 505 => Err((false, format!("HTTP status {c}"))),
-        c => Err((true, format!("HTTP status {c}"))),
-    }
+    Err((false, "Redirect loop detected".to_string()))
 }
 
 /// Port of `HttpConnector.connect`'s retry loop: up to `HTTP_ATTEMPTS` attempts, exponential backoff
@@ -309,13 +396,13 @@ fn curl_once(
 fn fetch_http_with_retries(
     url: &str,
     max_time: u64,
-    auth_hdrs: &[(String, String)],
+    ctx: &RegistryAuthCtx,
 ) -> Result<Option<Vec<u8>>, String> {
     let attempts = HTTP_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
     let mut connect_ms: u64 = 1000;
     let mut retries: u32 = 0;
     loop {
-        match curl_once(url, connect_ms, max_time.max(20), auth_hdrs) {
+        match curl_once(url, connect_ms, max_time.max(20), ctx) {
             Ok(r) => return Ok(r),
             Err((retryable, msg)) => {
                 let base_url = if let Some(idx) = url.find("/modules/") {
@@ -501,6 +588,8 @@ impl Registry {
             registry_json: Mutex::new(None),
             timeout_secs: 3,
             repo_cache: None,
+            vendor_dir: None,
+            rewriter: None,
         })
     }
 
@@ -524,6 +613,16 @@ impl Registry {
         self
     }
 
+    pub fn with_vendor_dir(mut self, vendor_dir: Option<PathBuf>) -> Self {
+        self.vendor_dir = vendor_dir;
+        self
+    }
+
+    pub fn with_rewriter(mut self, rewriter: Option<crate::download::UrlRewriter>) -> Self {
+        self.rewriter = rewriter;
+        self
+    }
+
     pub fn with_mirrors(mut self, m: Vec<String>) -> Self {
         self.mirrors = m;
         self
@@ -533,15 +632,37 @@ impl Registry {
         &self.url
     }
 
-    /// `fetch_url` with the registry prefix of access errors restored to the configured URL.
-    fn fetch(&self, url: &str) -> Result<Option<Vec<u8>>, String> {
-        fetch_url(url, self.timeout_secs).map_err(|e| {
-            let generic = format!("Error accessing registry {}/:", self.url);
-            match e.strip_prefix(&generic) {
-                Some(rest) => format!("Error accessing registry {}:{rest}", self.orig_url),
-                None => e,
+    /// `fetch_url` with URL rewriter support and registry prefix restored to the configured URL.
+    fn fetch_ex(&self, url: &str, cacheable: bool) -> Result<Option<Vec<u8>>, String> {
+        let candidates = if (url.starts_with("http://") || url.starts_with("https://"))
+            && self.rewriter.is_some()
+        {
+            let amended = self.rewriter.as_ref().unwrap().amend(&[url.to_string()]);
+            if amended.is_empty() {
+                return Err(format!(
+                    "Error accessing registry {}: URL {url} blocked by downloader config",
+                    self.orig_url
+                ));
             }
-        })
+            amended
+        } else {
+            vec![url.to_string()]
+        };
+        let mut last_err = None;
+        for cand in &candidates {
+            match fetch_url_ext(cand, self.timeout_secs, cacheable) {
+                Ok(res) => return Ok(res),
+                Err(e) => {
+                    let generic = format!("Error accessing registry {}/:", self.url);
+                    let mapped = match e.strip_prefix(&generic) {
+                        Some(rest) => format!("Error accessing registry {}:{rest}", self.orig_url),
+                        None => e,
+                    };
+                    last_err = Some(mapped);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| format!("Failed to fetch registry file {url}")))
     }
 
     pub fn module_file_url(&self, key: &ModuleKey) -> String {
@@ -565,7 +686,7 @@ impl Registry {
     ) -> Result<Option<Vec<u8>>, String> {
         let is_file = self.is_file_registry() || url.starts_with("file://");
         if is_file || self.mode == KnownHashesMode::Ignore {
-            let content = self.fetch(url)?;
+            let content = self.fetch_ex(url, false)?;
             if use_checksum {
                 match &content {
                     Some(c) => {
@@ -595,6 +716,17 @@ impl Registry {
                 }
                 Some(Some(h)) => {
                     expected = Some(h.clone());
+                    // Vendored registry files take precedence when their checksum matches.
+                    if let Some(vd) = &self.vendor_dir {
+                        if let Some(vp) = vendored_registry_path(vd, url) {
+                            if let Ok(c) = std::fs::read(&vp) {
+                                if sha256_hex(&c) == *h {
+                                    hashes.insert(url.to_string(), Some(h.clone()));
+                                    return Ok(Some(c));
+                                }
+                            }
+                        }
+                    }
                     // Lockfile-first: a file whose hash the lockfile records is served from the
                     // repository cache without any registry access (Bazel's DownloadManager).
                     if let (Some(rc), Ok(ck)) =
@@ -602,15 +734,19 @@ impl Registry {
                     {
                         if let Ok(Some(f)) = rc.get(&ck, "") {
                             if let Ok(c) = std::fs::read(&f) {
-                                hashes.insert(url.to_string(), Some(h.clone()));
-                                return Ok(Some(c));
+                                let actual = sha256_hex(&c);
+                                if actual == *h {
+                                    hashes.insert(url.to_string(), Some(h.clone()));
+                                    return Ok(Some(c));
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        let content = self.fetch(url)?;
+        let cacheable = use_checksum && self.mode != KnownHashesMode::Ignore;
+        let content = self.fetch_ex(url, cacheable)?;
         if use_checksum {
             match &content {
                 Some(c) => {
@@ -856,6 +992,39 @@ impl Registry {
                             && b[1] == b':'
                             && matches!(b[2], b'/' | b'\\'))
                 };
+                let normalize_slash_path = |raw: &str| -> String {
+                    let unix = raw.replace('\\', "/");
+                    let (prefix, rest) = if unix.len() >= 3
+                        && unix.as_bytes()[0].is_ascii_alphabetic()
+                        && unix.as_bytes()[1] == b':'
+                        && unix.as_bytes()[2] == b'/'
+                    {
+                        (&unix[..3], &unix[3..])
+                    } else if let Some(r) = unix.strip_prefix('/') {
+                        ("/", r)
+                    } else {
+                        ("", unix.as_str())
+                    };
+                    let mut segs: Vec<&str> = Vec::new();
+                    for s in rest.split('/') {
+                        if s.is_empty() || s == "." {
+                            continue;
+                        } else if s == ".." {
+                            if segs.last().is_some_and(|last| *last != "..") {
+                                segs.pop();
+                            } else if prefix.is_empty() {
+                                segs.push("..");
+                            }
+                        } else {
+                            segs.push(s);
+                        }
+                    }
+                    if prefix.is_empty() && segs.is_empty() {
+                        ".".to_string()
+                    } else {
+                        format!("{prefix}{}", segs.join("/"))
+                    }
+                };
                 let path = s("path").unwrap_or_default();
                 let mut p = path.clone();
                 if !is_abs(&path) {
@@ -876,6 +1045,7 @@ impl Registry {
                         }
                     }
                 }
+                let p = normalize_slash_path(&p);
                 Ok(RepoSpec::new(
                     LOCAL_BZL,
                     "local_repository",
@@ -883,48 +1053,23 @@ impl Registry {
                 ))
             }
             "git_repository" => {
-                let remote = s("remote").ok_or_else(|| {
-                    format!("Missing remote in git_repository source for module {key}")
-                })?;
-                const SCHEMES: &[&str] = &["http://", "https://", "file://", "ssh://", "git://"];
-                if !SCHEMES.iter().any(|p| remote.starts_with(p)) {
-                    return Err(format!(
-                        "Invalid remote URL scheme: \"{remote}\" for module {key}. Only {} are allowed.",
-                        SCHEMES.join(", ")
-                    ));
-                }
-                if let Some(c) = s("commit") {
-                    let ok =
-                        (7..=64).contains(&c.len()) && c.chars().all(|x| x.is_ascii_hexdigit());
-                    if !ok {
-                        return Err(format!("Invalid commit: \"{c}\" for module {key}. Must be a valid commit hash."));
-                    }
-                }
-                if let Some(t) = s("tag") {
-                    if t.starts_with('-') {
-                        return Err(format!(
-                            "Invalid tag: \"{t}\" for module {key}. Cannot start with '-'."
-                        ));
-                    }
-                }
-                let mut attrs: Vec<(String, AttrVal)> =
-                    vec![("remote".into(), AttrVal::Str(remote))];
-                for k in [
-                    "commit",
-                    "shallow_since",
-                    "tag",
-                    "strip_prefix",
-                    "add_prefix",
-                ] {
-                    if let Some(v) = s(k) {
+                let mut attrs: Vec<(String, AttrVal)> = Vec::new();
+                for k in ["remote", "commit", "shallow_since", "tag", "strip_prefix"] {
+                    if let Some(v) = s(k).filter(|v| !v.is_empty()) {
                         attrs.push((k.into(), AttrVal::Str(v)));
                     }
                 }
-                for k in ["init_submodules", "verbose"] {
-                    if let Some(b) = sj.get(k).and_then(|v| v.as_bool()) {
-                        attrs.push((k.into(), AttrVal::Bool(b)));
-                    }
-                }
+                let init_submodules = sj
+                    .get("init_submodules")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let verbose = sj.get("verbose").and_then(|v| v.as_bool()).unwrap_or(false);
+                attrs.push(("init_submodules".into(), AttrVal::Bool(init_submodules)));
+                attrs.push((
+                    "recursive_init_submodules".into(),
+                    AttrVal::Bool(init_submodules),
+                ));
+                attrs.push(("verbose".into(), AttrVal::Bool(verbose)));
                 attrs.push((
                     "remote_module_file_urls".into(),
                     AttrVal::List(vec![AttrVal::Str(module_file_url)]),
@@ -1001,7 +1146,24 @@ impl Registry {
                         return Ok(None);
                     }
                 };
-                out.insert(ver, v.as_str().unwrap_or("").to_string());
+                let Some(reason) = v.as_str() else {
+                    REGISTRY_WARNINGS.with(|w| {
+                        w.borrow_mut().push(format!(
+                            "WARNING: Could not read metadata file for module {module} from registry {}: Unable to parse json at url {url}: Expected a string yank reason for version {k}",
+                            self.orig_url
+                        ))
+                    });
+                    return Ok(None);
+                };
+                if out.insert(ver, reason.to_string()).is_some() {
+                    REGISTRY_WARNINGS.with(|w| {
+                        w.borrow_mut().push(format!(
+                            "WARNING: Could not read metadata file for module {module} from registry {}: Unable to parse json at url {url}: duplicate key: {k}",
+                            self.orig_url
+                        ))
+                    });
+                    return Ok(None);
+                }
             }
         }
         Ok(Some(out))

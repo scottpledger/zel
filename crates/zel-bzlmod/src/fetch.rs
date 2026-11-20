@@ -18,6 +18,7 @@ fn marker_attribute_json(value: &AttrVal) -> crate::json::Json {
     use crate::json::Json;
     match value {
         AttrVal::Int(i) => Json::Obj(vec![("v".to_string(), Json::int(*i))]),
+        AttrVal::BigInt(i) => Json::Obj(vec![("v".to_string(), Json::Num(i.to_string()))]),
         AttrVal::List(values) => Json::Arr(values.iter().map(marker_attribute_json).collect()),
         AttrVal::Dict(entries) => Json::Obj(
             entries
@@ -45,6 +46,34 @@ fn parse_bzl_label(label: &str) -> (String, String, String) {
     let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
     let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
     (repo.to_string(), pkg.to_string(), name.to_string())
+}
+
+#[allow(clippy::type_complexity)]
+struct RecordTagMappingsGuard {
+    prev: Option<Option<Vec<(String, String, String)>>>,
+}
+
+impl RecordTagMappingsGuard {
+    fn enter() -> Self {
+        let prev = crate::rt::RECORD_TAG_MAPPINGS
+            .with(|g| std::mem::replace(&mut *g.borrow_mut(), Some(vec![])));
+        Self { prev: Some(prev) }
+    }
+
+    fn finish(mut self) -> Vec<(String, String, String)> {
+        let prev = self.prev.take().unwrap_or(None);
+        crate::rt::RECORD_TAG_MAPPINGS
+            .with(|g| std::mem::replace(&mut *g.borrow_mut(), prev))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for RecordTagMappingsGuard {
+    fn drop(&mut self) {
+        if let Some(prev) = self.prev.take() {
+            crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = prev);
+        }
+    }
 }
 
 /// Java `os.name` lower-cased and `os.arch` lower-cased (`DigestWriter.computePredeclaredInputHash`).
@@ -229,40 +258,107 @@ impl Rt {
         self.external_dir().join(format!("@{canonical}.marker"))
     }
 
-    pub(crate) fn override_for(&self, canonical: &str) -> Option<PathBuf> {
-        let root_map = self.resolution.repo_mapping(&ModuleKey::root());
-        for (name, path) in &self.opts.override_repository {
-            if name == canonical || root_map.get(name).is_some_and(|c| c == canonical) {
-                return Some(path.clone());
-            }
+    /// Resolves CLI `--override_repository` following `RepoDefinitionFunction`:
+    /// 1. Canonical `--override_repository=<canonical>=<path>`.
+    /// 2. `@bazel_tools` ignores apparent overrides.
+    /// 3. Non-registry module overrides only accept an apparent override when the module is a
+    ///    direct root `bazel_dep` under that exact apparent name.
+    /// 4. Apparent-name overrides via the root module's repo mapping (rejecting multiple apparent
+    ///    names overriding the same canonical repository).
+    pub fn repo_override_for(&self, canonical: &str) -> Result<Option<PathBuf>, String> {
+        if let Some(p) = self.opts.override_repository.get(canonical) {
+            return Ok(Some(p.clone()));
         }
-        None
-    }
-
-    /// Finds the spec for `canonical`: module repo, extension-generated repo, or innate repo.
-    pub fn repo_spec_for(self: &Arc<Self>, canonical: &str) -> Result<Option<RepoSpec>, String> {
-        let res = &self.resolution;
-        if canonical.is_empty() {
+        if canonical == "bazel_tools" {
             return Ok(None);
         }
-        if let Some(k) = res.canonical_repo_names.get(&canonical.to_string()) {
-            let m = res.dep_graph.get(k).unwrap();
-            return Ok(m.repo_spec.clone());
-        }
-        // Extension-generated.
-        for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else {
-                continue;
-            };
-            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else {
-                continue;
-            };
-            let result = self.eval_extension(&id)?;
-            if let Some((_, spec)) = result.generated.iter().find(|(n, _)| n == exported) {
-                return Ok(Some(spec.clone()));
+        let res = &self.resolution;
+        if let Some(mk) = res.canonical_repo_names.get(&canonical.to_string()) {
+            if matches!(
+                res.overrides.get(&mk.name),
+                Some(ModuleOverride::NonRegistry(_))
+            ) {
+                if let Some(rm) = res.dep_graph.get(&ModuleKey::root()) {
+                    for (dep_apparent, dep_key) in &rm.deps {
+                        if dep_key == mk {
+                            if let Some(p) = self.opts.override_repository.get(dep_apparent) {
+                                return Ok(Some(p.clone()));
+                            }
+                        }
+                    }
+                }
+                return Ok(None);
             }
         }
-        Err(format!("Repository '@@{canonical}' is not defined"))
+        let root_map = res.repo_mapping(&ModuleKey::root());
+        let mut apparent_hits: Vec<(&String, &PathBuf)> = Vec::new();
+        for (name, path) in &self.opts.override_repository {
+            if name != canonical && root_map.get(name).is_some_and(|c| c == canonical) {
+                apparent_hits.push((name, path));
+            }
+        }
+        if apparent_hits.len() > 1 {
+            let names: Vec<String> = apparent_hits
+                .iter()
+                .map(|(n, _)| format!("'@{n}'"))
+                .collect();
+            return Err(format!(
+                "Repository '@@{canonical}' is overridden by multiple apparent names ({}) via --override_repository",
+                names.join(", ")
+            ));
+        }
+        Ok(apparent_hits.into_iter().next().map(|(_, p)| p.clone()))
+    }
+
+    /// Resolves the extension that actually generated `canonical` by checking `<unique>+`
+    /// candidates from longest prefix to shortest against evaluated extension results.
+    ///
+    /// Any candidate whose evaluation completed without generating `exported` is eliminated and
+    /// never used as fallback; fallback applies only to the longest candidate whose ownership
+    /// could not yet be ruled out (for example, while that extension is mid-evaluation).
+    pub(crate) fn owning_extension_for_canonical<'a>(
+        &self,
+        canonical: &'a str,
+    ) -> Option<(ExtensionId, &'a str)> {
+        let candidates = self
+            .resolution
+            .extension_candidates_for_canonical(canonical);
+        let mut first_unevaluated: Option<(ExtensionId, &'a str)> = None;
+        for (id, exported) in candidates {
+            let (cached_owns, evaluating, me) = {
+                let st = self.state.lock().unwrap();
+                (
+                    st.ext_results
+                        .get(&id)
+                        .map(|r| r.generated.iter().any(|(n, _)| n == exported)),
+                    st.evaluating_exts.contains(&id),
+                    st.me.upgrade(),
+                )
+            };
+            match cached_owns {
+                Some(true) => return Some((id, exported)),
+                Some(false) => continue,
+                None if evaluating => {
+                    if first_unevaluated.is_none() {
+                        first_unevaluated = Some((id, exported));
+                    }
+                }
+                None => {
+                    if let Some(rt) = me {
+                        if let Ok(r) = rt.eval_extension(&id) {
+                            if r.generated.iter().any(|(n, _)| n == exported) {
+                                return Some((id, exported));
+                            }
+                            continue;
+                        }
+                    }
+                    if first_unevaluated.is_none() {
+                        first_unevaluated = Some((id, exported));
+                    }
+                }
+            }
+        }
+        first_unevaluated
     }
 
     /// Computes `repository_ctx.original_name` matching Bazel's `RepoDefinitionFunction`
@@ -275,7 +371,7 @@ impl Rt {
     ///   both keyed in `extension_unique_names`, e.g. `+<rule_name>+<name>`) pass
     ///   `originalName = internalRepo`, so `getOriginalName()` returns the unprefixed `name`
     ///   passed to the repo rule.
-    fn original_name_for(&self, canonical: &str, given_name: &str) -> String {
+    pub(crate) fn original_name_for(&self, canonical: &str, spec: &RepoSpec) -> String {
         let res = &self.resolution;
         if res
             .canonical_repo_names
@@ -283,12 +379,38 @@ impl Rt {
         {
             return canonical.to_string();
         }
-        for unique in res.extension_unique_names.values() {
-            if let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) {
+        if let Some((_, exported)) = self.owning_extension_for_canonical(canonical) {
+            if !exported.is_empty() {
                 return exported.to_string();
             }
         }
-        given_name.to_string()
+        spec.attrs
+            .iter()
+            .find(|(k, _)| k == "name")
+            .and_then(|(_, v)| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(canonical)
+            .to_string()
+    }
+
+    /// Finds the spec for `canonical`: module repo, extension-generated repo, or innate repo.
+    pub fn repo_spec_for(self: &Arc<Self>, canonical: &str) -> Result<Option<RepoSpec>, String> {
+        let res = &self.resolution;
+        if canonical.is_empty() {
+            return Ok(None);
+        }
+        if let Some(k) = res.canonical_repo_names.get(&canonical.to_string()) {
+            let m = res.dep_graph.get(k).unwrap();
+            return Ok(m.repo_spec.clone());
+        }
+        // Extension-generated: check matching `{unique}+` prefixes longest-first for actual ownership.
+        for (id, exported) in res.extension_candidates_for_canonical(canonical) {
+            let result = self.eval_extension(&id)?;
+            if let Some((_, spec)) = result.generated.iter().find(|(n, _)| n == exported) {
+                return Ok(Some(spec.clone()));
+            }
+        }
+        Err(format!("Repository '@@{canonical}' is not defined"))
     }
 
     /// The repo in whose context label-valued attributes of `canonical`'s rule are resolved:
@@ -301,13 +423,7 @@ impl Rt {
         {
             return canonical.to_string();
         }
-        for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else {
-                continue;
-            };
-            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else {
-                continue;
-            };
+        if let Some((id, exported)) = self.owning_extension_for_canonical(canonical) {
             if id.is_innate() {
                 for (mk, u) in res.usages_of(&id) {
                     let declares = u.tags.iter().any(|t| {
@@ -375,7 +491,7 @@ impl Rt {
         let _ = std::fs::create_dir_all(self.external_dir());
         let marker = self.marker_path(canonical);
         let spec: Option<RepoSpec>;
-        if let Some(p) = self.override_for(canonical) {
+        if let Some(p) = self.repo_override_for(canonical)? {
             // `RepositoryFetchFunction.symlinkRepoRoot`: the override target must be a directory.
             if !p.is_dir() {
                 return Err(format!(
@@ -445,6 +561,61 @@ impl Rt {
                 Some(&lookup),
             )
         };
+        // Vendor mode runs BEFORE the external marker and repo contents cache (excluding local/configure rules).
+        if let Some(v) = &self.opts.vendor_dir {
+            if !is_local && !is_configure {
+                let vf = crate::vendor::VendorFile::load(v)?;
+                if !vf.ignored_repos.contains(canonical) {
+                    let vdir = v.join(canonical);
+                    if vf.pinned_repos.contains(canonical) {
+                        if vdir.is_dir() {
+                            let _ = remove_any(dir);
+                            let _ = std::fs::remove_file(&marker);
+                            #[cfg(unix)]
+                            {
+                                std::os::unix::fs::symlink(&vdir, dir)
+                                    .map_err(|e| format!("java.io.IOException: {e}"))?;
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                copy_tree(&vdir, dir)?;
+                            }
+                            return Ok(());
+                        }
+                        return Err(format!(
+                            "Vendored repository '{canonical}' is pinned, but not found under the vendor directory"
+                        ));
+                    } else if vdir.is_dir() && !self.opts.force && !force_configure {
+                        let vmarker = v.join(format!("@{canonical}.marker"));
+                        let marker_content = std::fs::read_to_string(&vmarker).ok();
+                        let up_to_date = marker_content.as_deref().is_some_and(marker_ok);
+                        if up_to_date || self.opts.disable_download || self.opts.nofetch {
+                            if !up_to_date && self.opts.nofetch {
+                                self.info(format!(
+                                    "WARNING: Vendored repository '{canonical}' is out-of-date and fetching is disabled."
+                                ));
+                            }
+                            let _ = remove_any(dir);
+                            #[cfg(unix)]
+                            {
+                                std::os::unix::fs::symlink(&vdir, dir)
+                                    .map_err(|e| format!("java.io.IOException: {e}"))?;
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                copy_tree(&vdir, dir)?;
+                            }
+                            if let Some(mc) = marker_content {
+                                let _ = std::fs::write(&marker, mc);
+                            } else {
+                                let _ = std::fs::write(&marker, format!("{fp}\n"));
+                            }
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
         if can_use_cached && dir.exists() {
             if let Ok(m) = std::fs::read_to_string(&marker) {
                 if marker_ok(&m) {
@@ -463,62 +634,24 @@ impl Rt {
                             let _ = remove_any(dir);
                             #[cfg(unix)]
                             {
-                                let _ = std::os::unix::fs::symlink(&cand.contents_dir, dir);
+                                std::os::unix::fs::symlink(&cand.contents_dir, dir)
+                                    .map_err(|e| format!("java.io.IOException: {e}"))?;
                             }
                             #[cfg(not(unix))]
                             {
                                 copy_tree(&cand.contents_dir, dir)?;
                             }
                             cand.touch();
-                            let _ = std::fs::write(&marker, format!("{fp}\n"));
+                            let _ = std::fs::write(&marker, &m);
                             return Ok(());
                         }
                     }
                 }
             }
         }
-        // Vendored copy?
-        if let Some(v) = &self.opts.vendor_dir {
-            let vf = crate::vendor::VendorFile::load(v).unwrap_or_default();
-            if !vf.ignored_repos.contains(canonical) {
-                let vdir = v.join(canonical);
-                if vf.pinned_repos.contains(canonical) {
-                    if vdir.is_dir() {
-                        let _ = remove_any(dir);
-                        #[cfg(unix)]
-                        {
-                            let _ = std::os::unix::fs::symlink(&vdir, dir);
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            copy_tree(&vdir, dir)?;
-                        }
-                        return Ok(());
-                    }
-                } else if vdir.is_dir() && can_use_cached && !is_local && !is_configure {
-                    let vmarker = v.join(format!("@{canonical}.marker"));
-                    let up_to_date = std::fs::read_to_string(&vmarker)
-                        .map(|m| marker_ok(&m))
-                        .unwrap_or(false);
-                    if up_to_date || self.opts.disable_download {
-                        let _ = remove_any(dir);
-                        #[cfg(unix)]
-                        {
-                            let _ = std::os::unix::fs::symlink(&vdir, dir);
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            copy_tree(&vdir, dir)?;
-                        }
-                        let _ = std::fs::write(&marker, format!("{fp}\n"));
-                        return Ok(());
-                    }
-                }
-            }
-        }
         if self.opts.nofetch {
             // `RepositoryFetchFunction` with `FETCH_DISABLED`: use whatever is on disk (with a warning), or fail.
-            if dir.symlink_metadata().is_ok() {
+            if dir.exists() {
                 self.info(format!(
                     "WARNING: External repository '@@{canonical}' is not up-to-date and fetching is disabled. To update, run the build without the '--nofetch' command line option."
                 ));
@@ -565,11 +698,19 @@ impl Rt {
                 ));
             }
         }
-        // If repo_contents_cache is enabled, cache reproducible non-local repos.
+        // If repo_contents_cache is enabled, cache reproducible non-local repos when symlinks are self-contained.
         if is_reproducible && !is_local {
             if let Some(rcc_dir) = &self.opts.repo_contents_cache {
-                let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
-                let _ = cache.move_to_cache(dir, &marker, &fp);
+                if is_safe_for_repo_contents_cache(dir, &self.opts.workspace_root) {
+                    let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
+                    cache
+                        .move_to_cache(dir, &marker, &fp)
+                        .map_err(|e| {
+                            format!(
+                                "java.io.IOException: error moving repo {canonical} into the repo contents cache: {e}"
+                            )
+                        })?;
+                }
             }
         }
         Ok(())
@@ -646,7 +787,12 @@ impl Rt {
                 dir.display()
             ));
         }
-        let _ = std::fs::File::create(dir.join("REPO.bazel"));
+        if let Err(e) = std::fs::File::create(dir.join("REPO.bazel")) {
+            return Some(format!(
+                "Failed to create REPO.bazel in {}: {e}",
+                dir.display()
+            ));
+        }
         None
     }
 
@@ -727,14 +873,7 @@ impl Rt {
                 ))
             }
         };
-        let given_name = spec
-            .attrs
-            .iter()
-            .find(|(k, _)| k == "name")
-            .and_then(|(_, v)| v.as_str())
-            .unwrap_or(canonical)
-            .to_string();
-        let original_name = self.original_name_for(canonical, &given_name);
+        let original_name = self.original_name_for(canonical, spec);
         let mut attrs = spec.attrs.clone();
         attrs.retain(|(k, _)| k != "name");
         let mut defs = def.attrs.clone();
@@ -754,11 +893,13 @@ impl Rt {
         let mut given = attrs.clone();
         given.push(("name".into(), AttrVal::Str(canonical.to_string())));
         let attr_struct = build_attr_struct(self, &defs, &given, ctx_repo, "", (&repo, &pkg))?;
-        // `repo_mapping` is not visible through `repository_ctx.attr`.
+        // Synthetic `repo_mapping` is not visible through `repository_ctx.attr`.
         let attr_struct = match &attr_struct {
             Value::Struct(sv) => {
                 let mut fields = sv.fields.clone();
-                fields.remove("repo_mapping");
+                if !def.user_has_repo_mapping {
+                    fields.remove("repo_mapping");
+                }
                 Value::Struct(Arc::new(zel_starlark::StructValue::new_attr(fields)))
             }
             _ => attr_struct,
@@ -851,7 +992,15 @@ impl Rt {
                 self.format_rule_error(&e, canonical, &mut c)
             ));
         }
+        let rep = match &r {
+            Ok(Value::Struct(sv)) => sv
+                .fields
+                .get("reproducible")
+                .is_some_and(|v| matches!(v, Value::Bool(true))),
+            _ => false,
+        };
         if let Ok(ret) = &r {
+            crate::ctx::CTX_CACHE_HITS.with(|h| h.borrow_mut().clear());
             self.report_reproducible_form(
                 canonical,
                 &def.name,
@@ -859,7 +1008,7 @@ impl Rt {
                 &defs,
                 &attr_struct,
                 ret,
-                &reproducible_flag,
+                rep,
                 ctx_repo,
                 (&repo, &pkg),
             );
@@ -867,7 +1016,6 @@ impl Rt {
         if !dir.exists() {
             return Err(format!("fetching {canonical}: java.io.IOException: {canonical} must create a directory\nERROR: {canonical} must create a directory"));
         }
-        let rep = *reproducible_flag.lock().unwrap();
         let mut recorded = std::mem::take(&mut *rec.lock().unwrap());
         recorded.sort_by(|a, b| a.0.cmp(&b.0));
         recorded.dedup_by(|a, b| a.0 == b.0);
@@ -892,34 +1040,63 @@ impl Rt {
         id: &ExtensionId,
         verify_imports: bool,
     ) -> Result<ExtensionResult, String> {
-        if let Some(r) = self.state.lock().unwrap().ext_results.get(id) {
-            return Ok(r.clone());
-        }
         let res = self.resolution.clone();
         let usages = res.usages_of(id);
-        self.state.lock().unwrap().evaluating_exts.push(id.clone());
-        let r = if id.is_innate() {
-            self.eval_innate(id, &usages)
+        let cached = self.state.lock().unwrap().ext_results.get(id).cloned();
+        let result = if let Some(r) = cached {
+            r
         } else {
-            self.eval_regular(id, &usages)
+            self.state.lock().unwrap().evaluating_exts.push(id.clone());
+            let r = if id.is_innate() {
+                self.eval_innate(id, &usages)
+            } else {
+                self.eval_regular(id, &usages)
+            };
+            self.state
+                .lock()
+                .unwrap()
+                .evaluating_exts
+                .retain(|x| x != id);
+            let computed = r?;
+            self.state
+                .lock()
+                .unwrap()
+                .ext_results
+                .insert(id.clone(), computed.clone());
+            computed
         };
-        self.state
-            .lock()
-            .unwrap()
-            .evaluating_exts
-            .retain(|x| x != id);
-        let result = r?;
-        // Verify imports exist if requested.
+        // Verify override_repo / inject_repo and imports when requested (even if cached from raw eval).
         if verify_imports {
+            let names: Vec<&str> = result.generated.iter().map(|(n, _)| n.as_str()).collect();
+            let (r, p, f) = parse_bzl_label(&id.bzl_file);
+            let ext_id = format!("@@{r}//{p}:{f}%{}", id.name);
+            let overrides_for_ext = res.repo_overrides.get(id);
             for (mk, u) in &usages {
+                if mk.is_root() {
+                    for (exported, ov) in &u.repo_overrides {
+                        let exists = result.generated.iter().any(|(n, _)| n == exported);
+                        if ov.must_exist && !exists {
+                            return Err(format!(
+                                "ERROR: module extension {ext_id} does not generate repository \"{exported}\", yet it is overridden via override_repo() at {}. Use inject_repo() instead to inject a new repository.{}",
+                                ov.location,
+                                crate::ctxargs::did_you_mean(exported, &names)
+                            ));
+                        }
+                        if !ov.must_exist && exists {
+                            return Err(format!(
+                                "ERROR: module extension {ext_id} generates repository \"{exported}\", so it cannot be injected as \"{}\" in the usage at {} (use override_repo() instead)",
+                                ov.overriding_repo_name,
+                                ov.location
+                            ));
+                        }
+                    }
+                }
                 for (local, exported) in u.imports() {
-                    if !result.generated.iter().any(|(n, _)| *n == exported) {
-                        let (_, _, file) = parse_bzl_label(&id.bzl_file);
-                        let _ = file;
-                        let names: Vec<&str> =
-                            result.generated.iter().map(|(n, _)| n.as_str()).collect();
-                        let (r, p, f) = parse_bzl_label(&id.bzl_file);
-                        let ext_id = format!("@@{r}//{p}:{f}%{}", id.name);
+                    let is_overridden_or_injected =
+                        overrides_for_ext.is_some_and(|m| m.contains_key(&exported));
+                    if !is_overridden_or_injected
+                        && !result.generated.iter().any(|(n, _)| *n == exported)
+                    {
                         return Err(format!(
                             "ERROR: module extension {ext_id} does not generate repository \"{exported}\", yet it is imported as \"{local}\" in the usage at {}{}",
                             u.proxies.first().map(|p| p.location.clone()).unwrap_or_else(|| mk.to_string()),
@@ -927,28 +1104,8 @@ impl Rt {
                         ));
                     }
                 }
-                if mk.is_root() {
-                    for (exported, ov) in &u.repo_overrides {
-                        if ov.must_exist && !result.generated.iter().any(|(n, _)| n == exported) {
-                            let names: Vec<&str> =
-                                result.generated.iter().map(|(n, _)| n.as_str()).collect();
-                            let (r, p, f) = parse_bzl_label(&id.bzl_file);
-                            let ext_id = format!("@@{r}//{p}:{f}%{}", id.name);
-                            return Err(format!(
-                                "ERROR: module extension {ext_id} does not generate repository \"{exported}\", yet it is overridden via override_repo() at {}. Use inject_repo() instead to inject a new repository.{}",
-                                ov.location,
-                                crate::ctxargs::did_you_mean(exported, &names)
-                            ));
-                        }
-                    }
-                }
             }
         }
-        self.state
-            .lock()
-            .unwrap()
-            .ext_results
-            .insert(id.clone(), result.clone());
         Ok(result)
     }
 
@@ -958,155 +1115,157 @@ impl Rt {
         usages: &[(&ModuleKey, &ExtensionUsage)],
     ) -> Result<ExtensionResult, String> {
         let mut out = ExtensionResult::default();
-        let (bzl, rule) = id.name.split_once(' ').ok_or("bad innate extension name")?;
+        let (bzl, rule) = id
+            .name
+            .rsplit_once(' ')
+            .ok_or("bad innate extension name")?;
+        let mut seen_names: BTreeMap<String, String> = BTreeMap::new();
         for (mk, u) in usages {
             let owner = self
                 .resolution
                 .canonical_name_of(mk)
                 .cloned()
                 .unwrap_or_default();
+            let loc = u
+                .tags
+                .first()
+                .map(|t| t.location.clone())
+                .unwrap_or_default();
             let (r, p, n) = self.resolve_label(bzl, &owner, "")?;
-            let spec_bzl = if r == "bazel_tools" || bzl.starts_with("@bazel_tools") {
-                format!("@bazel_tools//{p}:{n}")
-            } else {
-                format!("@@{r}//{p}:{n}")
-            };
+            if p == "external" || p.starts_with("external/") {
+                return Err(format!(
+                    "bad repo rule .bzl file label at {loc}: //external package is not supported"
+                ));
+            }
+            let default_spec_bzl =
+                if r == "bazel_tools" || bzl == "@bazel_tools" || bzl.starts_with("@bazel_tools//")
+                {
+                    format!("@bazel_tools//{p}:{n}")
+                } else {
+                    format!("@@{r}//{p}:{n}")
+                };
             let key = format!("@@{r}//{p}:{n}");
             if !(n.ends_with(".bzl") || n.ends_with(".scl")) {
                 return Err(format!(
-                    "bad repo rule .bzl file label at {}: The label must reference a file with extension \".bzl\" or \".scl\"",
-                    u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
+                    "bad repo rule .bzl file label at {loc}: The label must reference a file with extension \".bzl\" or \".scl\""
                 ));
             }
-            let rule_def = if let Err(e) = self.eval_bzl_fresh(&key, &r, &p, &n) {
-                if let Some(body) = e.strip_prefix(crate::rt::NESTED_STATIC_FAILURE_MARK) {
-                    if let Some((msgs, trailer)) =
-                        body.split_once(crate::rt::NESTED_STATIC_TRAILER_MARK)
-                    {
-                        let shown = if r.is_empty() {
-                            format!("//{p}:{n}")
-                        } else {
-                            key.clone()
-                        };
-                        return Err(format!(
-                            "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {}: {trailer}",
-                            u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
-                        ));
-                    }
-                }
-                if let Some(msgs) = e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
-                    let shown = if r.is_empty() {
-                        format!("//{p}:{n}")
-                    } else {
-                        key.clone()
-                    };
-                    return Err(format!(
-                        "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {}: compilation of module '{n}' failed",
-                        u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
-                    ));
-                }
-                if e.contains("no such file") {
-                    let shown = if r.is_empty() {
-                        format!("//{p}:{n}")
-                    } else {
-                        key.clone()
-                    };
-                    let detail = split_location_prefix(&e)
-                        .map(|(at, msg)| format!("at {at}: {msg}"))
-                        .unwrap_or_else(|| format!("cannot load '{shown}': no such file"));
-                    return Err(format!(
-                        "error loading '{shown}' for repo rules, requested by {}: {detail}",
-                        u.tags
-                            .first()
-                            .map(|t| t.location.clone())
-                            .unwrap_or_default(),
-                    ));
-                }
-                if let Some((at, msg)) = split_location_prefix(&e) {
-                    if msg.starts_with("There is already a built-in attribute") {
-                        let src = std::fs::read_to_string(&at.file)
-                            .ok()
-                            .and_then(|t| {
-                                t.lines()
-                                    .nth(at.line.saturating_sub(1))
-                                    .map(|l| l.trim().to_string())
-                            })
-                            .unwrap_or_default();
-                        let shown = if r.is_empty() {
-                            format!("//{p}:{n}")
-                        } else {
-                            key.clone()
-                        };
-                        return Err(format!(
-                            "ERROR: Traceback (most recent call last):\n\tFile \"{}\", line {}, column {}, in <toplevel>\n\t\t{src}\nError in repository_rule: {msg}\nERROR: error loading '{shown}' for repo rules, requested by {}: initialization of module '{n}' failed",
-                            at.file, at.line, at.column,
-                            u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
-                        ));
-                    }
-                    let body = msg.strip_prefix("ERROR: ").unwrap_or(&msg);
-                    let body = if body.starts_with("Traceback (most recent call last)") {
-                        format!("ERROR: {body}")
-                    } else {
-                        format!("ERROR: {at}: {body}")
-                    };
-                    let shown = if r.is_empty() {
-                        format!("//{p}:{n}")
-                    } else {
-                        key.clone()
-                    };
-                    return Err(format!(
-                        "{body}\nERROR: error loading '{shown}' for repo rules, requested by {}: initialization of module '{n}' failed",
-                        u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
-                    ));
-                }
-                None
-            } else if let Ok(c) = self.eval_bzl_fresh(&key, &r, &p, &n) {
-                match c.globals.get(rule) {
-                    Some(Value::Host(k, id_str)) if k == "repository_rule" => self
-                        .state
-                        .lock()
-                        .unwrap()
-                        .rule_defs
-                        .get(id_str.parse::<usize>().unwrap_or(usize::MAX))
-                        .cloned(),
+            let shown = if r.is_empty() {
+                format!("//{p}:{n}")
+            } else {
+                key.clone()
+            };
+            let opt_def = match self.eval_bzl_fresh(&key, &r, &p, &n) {
+                Ok(c) => match c.globals.get(rule) {
+                    Some(Value::Host(k, id_str)) if k == "repository_rule" => Some(
+                        self.state
+                            .lock()
+                            .unwrap()
+                            .rule_defs
+                            .get(id_str.parse::<usize>().unwrap_or(usize::MAX))
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!(
+                                    "ERROR: {shown} does not export a repository_rule called {rule}, yet its use is requested at {loc}"
+                                )
+                            })?,
+                    ),
                     _ => {
-                        // `InnateRunnableExtension`: the .bzl must export the repository rule.
-                        let shown = if r.is_empty() {
-                            format!("//{p}:{n}")
-                        } else {
-                            key.clone()
-                        };
                         let mut exported: Vec<&str> = c
                             .globals
                             .iter()
-                            .filter(
-                                |(_, v)| matches!(v, Value::Host(k, _) if k == "repository_rule"),
-                            )
+                            .filter(|(_, v)| {
+                                matches!(v, Value::Host(k, _) if k == "repository_rule")
+                            })
                             .map(|(n, _)| n.as_str())
                             .collect();
                         exported.sort();
                         return Err(format!(
-                            "ERROR: {shown} does not export a repository_rule called {rule}, yet its use is requested at {}{}",
-                            u.tags.first().map(|t| t.location.clone()).unwrap_or_default(),
+                            "ERROR: {shown} does not export a repository_rule called {rule}, yet its use is requested at {loc}{}",
                             crate::ctxargs::did_you_mean(rule, &exported)
                         ));
                     }
+                },
+                Err(e) if owner == "bazel_tools" && e.contains("[unknown repo '") => None,
+                Err(e) => {
+                    if let Some(body) = e.strip_prefix(crate::rt::NESTED_STATIC_FAILURE_MARK) {
+                        if let Some((msgs, trailer)) =
+                            body.split_once(crate::rt::NESTED_STATIC_TRAILER_MARK)
+                        {
+                            return Err(format!(
+                                "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {loc}: {trailer}"
+                            ));
+                        }
+                    }
+                    if let Some(msgs) = e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
+                        return Err(format!(
+                            "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {loc}: compilation of module '{n}' failed"
+                        ));
+                    }
+                    if e.contains("no such file") {
+                        let detail = split_location_prefix(&e)
+                            .map(|(at, msg)| format!("at {at}: {msg}"))
+                            .unwrap_or_else(|| format!("cannot load '{shown}': no such file"));
+                        return Err(format!(
+                            "error loading '{shown}' for repo rules, requested by {loc}: {detail}"
+                        ));
+                    }
+                    if let Some((at, msg)) = split_location_prefix(&e) {
+                        if msg.starts_with("There is already a built-in attribute") {
+                            let src = std::fs::read_to_string(&at.file)
+                                .ok()
+                                .and_then(|t| {
+                                    t.lines()
+                                        .nth(at.line.saturating_sub(1))
+                                        .map(|l| l.trim().to_string())
+                                })
+                                .unwrap_or_default();
+                            return Err(format!(
+                                "ERROR: Traceback (most recent call last):\n\tFile \"{}\", line {}, column {}, in <toplevel>\n\t\t{src}\nError in repository_rule: {msg}\nERROR: error loading '{shown}' for repo rules, requested by {loc}: initialization of module '{n}' failed",
+                                at.file, at.line, at.column
+                            ));
+                        }
+                        let body = msg.strip_prefix("ERROR: ").unwrap_or(&msg);
+                        let body = if body.starts_with("Traceback (most recent call last)") {
+                            format!("ERROR: {body}")
+                        } else {
+                            format!("ERROR: {at}: {body}")
+                        };
+                        return Err(format!(
+                            "{body}\nERROR: error loading '{shown}' for repo rules, requested by {loc}: initialization of module '{n}' failed"
+                        ));
+                    }
+                    return Err(format!(
+                        "ERROR: {e}\nERROR: error loading '{shown}' for repo rules, requested by {loc}: initialization of module '{n}' failed"
+                    ));
                 }
-            } else {
-                None
+            };
+            let effective_bzl = match &opt_def {
+                Some(def) if !def.bzl_file.is_empty() => {
+                    if let Some(rest) = def.bzl_file.strip_prefix("@@bazel_tools//") {
+                        format!("@bazel_tools//{rest}")
+                    } else {
+                        def.bzl_file.clone()
+                    }
+                }
+                _ => default_spec_bzl,
+            };
+            let effective_rule = match &opt_def {
+                Some(def) if !def.name.is_empty() => def.name.clone(),
+                _ => rule.to_string(),
             };
             for t in &u.tags {
                 if t.tag_name != "repo" {
                     continue;
                 }
-                if let Some(def) = &rule_def {
+                if let Some(def) = &opt_def {
                     let kw: BTreeMap<String, Value> = t
                         .attrs
                         .iter()
                         .map(|(k, v)| (k.clone(), v.to_value()))
                         .collect();
                     if let Err(e) = crate::ctx::validate_repo_rule_call(
-                        &def.name,
+                        &effective_rule,
                         &def.attrs,
                         &kw,
                         &t.attrs.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
@@ -1114,7 +1273,7 @@ impl Rt {
                     .and_then(|_| {
                         crate::ctx::check_repo_rule_labels(
                             self,
-                            &def.name,
+                            &effective_rule,
                             &def.attrs,
                             &kw,
                             Some(&owner),
@@ -1146,12 +1305,26 @@ impl Rt {
                     .and_then(|(_, v)| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                if let Some(prev_loc) = seen_names.insert(name.clone(), t.location.clone()) {
+                    return Err(format!(
+                        "ERROR: A repo named {name} is already generated by this module extension at {prev_loc}"
+                    ));
+                }
+                let spec_attrs = t
+                    .attrs
+                    .iter()
+                    .filter(|(k, v)| {
+                        !matches!(k.as_str(), "name" | "tags" | "deprecation" | "visibility")
+                            && !matches!(v, AttrVal::None)
+                    })
+                    .cloned()
+                    .collect();
                 out.generated.push((
                     name,
                     RepoSpec {
-                        bzl_file: spec_bzl.clone(),
-                        rule_name: rule.to_string(),
-                        attrs: t.attrs.clone(),
+                        bzl_file: effective_bzl.clone(),
+                        rule_name: effective_rule.clone(),
+                        attrs: spec_attrs,
                     },
                 ));
             }
@@ -1238,7 +1411,7 @@ impl Rt {
             }
         };
         // Build the `modules` list.
-        crate::rt::RECORD_TAG_MAPPINGS.with(|g| *g.borrow_mut() = Some(vec![]));
+        let tag_mappings_guard = RecordTagMappingsGuard::enter();
         let mut modules = vec![];
         let mut root_has_non_dev = false;
         let mut ordered: Vec<(&ModuleKey, &ExtensionUsage)> = usages.to_vec();
@@ -1250,7 +1423,14 @@ impl Rt {
                 .position(|m| m == *k)
                 .unwrap_or(usize::MAX)
         });
-        for (module_idx, (mk, u)) in ordered.iter().enumerate() {
+        for (mk, u) in &ordered {
+            let graph_idx = self
+                .resolution
+                .dep_graph
+                .keys
+                .iter()
+                .position(|k| k == *mk)
+                .unwrap_or(0);
             let m = self.resolution.dep_graph.get(mk).ok_or("module missing")?;
             let owner = self
                 .resolution
@@ -1266,7 +1446,6 @@ impl Rt {
                 else {
                     let names: Vec<&str> =
                         def.tag_classes.iter().map(|(n, _)| n.as_str()).collect();
-                    let _ = mk;
                     return Err(format!(
                         "The module extension defined at {} does not have a tag class named {}, but its use is attempted at {}{}",
                         def.location, t.tag_name, t.location, crate::ctxargs::did_you_mean(&t.tag_name, &names)
@@ -1278,17 +1457,12 @@ impl Rt {
                     .map(|(k, v)| (k.clone(), v.to_value()))
                     .collect();
                 let order: Vec<String> = t.attrs.iter().map(|(k, _)| k.clone()).collect();
-                if let Err(e) = crate::ctx::validate_repo_rule_call(&t.tag_name, cdefs, &kw, &order)
+                if let Err(e) = crate::ctx::validate_tag_call(&t.tag_name, cdefs, &kw, &order)
+                    .and_then(|_| {
+                        crate::ctx::check_tag_labels(self, &t.tag_name, cdefs, &kw, &owner)
+                    })
                 {
-                    // `TagClass` attribute errors read "in 't' tag, ..." and carry a location-less traceback.
-                    let msg = {
-                        // `TagClass` errors never mention the repo rule name (tags may carry a `name` attribute).
-                        let pre = format!("in call to '{}' repo rule with name '", t.tag_name);
-                        match e.0.strip_prefix(&pre).and_then(|r| r.split_once("', ")) {
-                            Some((_, rest)) => format!("in '{}' tag, {rest}", t.tag_name),
-                            None => e.0.clone(),
-                        }
-                    };
+                    let msg = e.0;
                     let (file, rest) = t.location.split_once(':').unwrap_or((&t.location, "1:1"));
                     let (line, col) = rest.split_once(':').unwrap_or((rest, "1"));
                     let src = line
@@ -1313,7 +1487,7 @@ impl Rt {
                 fields.insert(
                     "_sort_key".into(),
                     Value::Tuple(vec![
-                        Value::Int((module_idx as i64).into()),
+                        Value::Int((graph_idx as i64).into()),
                         Value::Int((tag_idx as i64).into()),
                     ]),
                 );
@@ -1346,6 +1520,7 @@ impl Rt {
                 "com.google.devtools.build.lib.bazel.bzlmod.StarlarkBazelModule",
             ));
         }
+        let recorded_tag_mappings = tag_mappings_guard.finish();
         // Lockfile lookup.
         let lock_key = crate::lockfile::extension_key(id);
         let ext_display = crate::lockfile::extension_display(id);
@@ -1402,6 +1577,13 @@ impl Rt {
             .unwrap()
             .mode
             .unwrap_or(crate::lockfile::LockfileMode::Off);
+        let normalize_facts = |f: Option<&crate::json::Json>| -> Option<crate::json::Json> {
+            f.filter(|j| {
+                !matches!(j, crate::json::Json::Null)
+                    && !matches!(j, crate::json::Json::Obj(o) if o.is_empty())
+            })
+            .cloned()
+        };
         if mode != crate::lockfile::LockfileMode::Off {
             let existing = {
                 let l = self.lock.lock().unwrap();
@@ -1410,15 +1592,17 @@ impl Rt {
                     .get(&lock_key)
                     .and_then(|m| m.get(&factors))
                     .cloned()
+                    .map(|le| (le, false))
                     .or_else(|| {
                         l.hidden
                             .module_extensions
                             .get(&lock_key)
                             .and_then(|m| m.get(&factors))
                             .cloned()
+                            .map(|le| (le, true))
                     })
             };
-            if let Some(le) = existing {
+            if let Some((le, from_hidden)) = existing {
                 let mut diffs: Vec<String> = vec![];
                 if le.bzl_transitive_digest != bzl_digest {
                     diffs.push(format!("the implementation of the extension '{ext_display}' or one of its transitive .bzl files has changed"));
@@ -1440,12 +1624,44 @@ impl Rt {
                         "an input to the extension '{ext_display}' changed: {r}"
                     ));
                 }
+                if from_hidden || le.reproducible() {
+                    let l = self.lock.lock().unwrap();
+                    let ws_facts = normalize_facts(l.workspace.facts.get(&lock_key));
+                    let hid_facts = normalize_facts(l.hidden.facts.get(&lock_key));
+                    if from_hidden && ws_facts != hid_facts {
+                        diffs.push(format!(
+                            "the facts of the extension '{ext_display}' have changed"
+                        ));
+                    }
+                }
                 if diffs.is_empty() {
-                    self.lock.lock().unwrap().used.push((
-                        lock_key.clone(),
-                        factors.clone(),
-                        le.clone(),
-                    ));
+                    if matches!(
+                        mode,
+                        crate::lockfile::LockfileMode::Update
+                            | crate::lockfile::LockfileMode::Refresh
+                    ) {
+                        let mut l = self.lock.lock().unwrap();
+                        let reused_facts = normalize_facts(
+                            l.workspace
+                                .facts
+                                .get(&lock_key)
+                                .or_else(|| l.hidden.facts.get(&lock_key)),
+                        );
+                        let reused_ver = l
+                            .workspace
+                            .facts_versions
+                            .get(&lock_key)
+                            .or_else(|| l.hidden.facts_versions.get(&lock_key))
+                            .copied()
+                            .unwrap_or(def.facts_version as i64);
+                        l.used.push(crate::rt::UsedLockExt {
+                            key: lock_key.clone(),
+                            factors: factors.clone(),
+                            entry: le.clone(),
+                            facts: reused_facts,
+                            facts_version: reused_ver,
+                        });
+                    }
                     return Ok(crate::lockfile::result_from_lock(&le));
                 }
                 if mode == crate::lockfile::LockfileMode::Error && !le.reproducible() {
@@ -1465,14 +1681,21 @@ impl Rt {
         let dir = self.opts.output_base.join("modextwd").join(&unique);
         let facts_value = {
             let l = self.lock.lock().unwrap();
-            let stored_ver = l
-                .workspace
-                .facts_versions
-                .get(&lock_key)
-                .copied()
-                .unwrap_or(0);
-            if stored_ver == def.facts_version as i64 {
-                if let Some(f) = l.workspace.facts.get(&lock_key) {
+            if let Some(f) = l.workspace.facts.get(&lock_key) {
+                let stored_ver = l
+                    .workspace
+                    .facts_versions
+                    .get(&lock_key)
+                    .copied()
+                    .unwrap_or(0);
+                if stored_ver == def.facts_version as i64 {
+                    crate::ctx::facts_value(f)
+                } else {
+                    crate::ctx::facts_value(&crate::json::Json::Obj(vec![]))
+                }
+            } else if let Some(f) = l.hidden.facts.get(&lock_key) {
+                let stored_ver = l.hidden.facts_versions.get(&lock_key).copied().unwrap_or(0);
+                if stored_ver == def.facts_version as i64 {
                     crate::ctx::facts_value(f)
                 } else {
                     crate::ctx::facts_value(&crate::json::Json::Obj(vec![]))
@@ -1522,15 +1745,13 @@ impl Rt {
         // The repo mapping entries used while loading the extension's .bzl files.
         let mut static_mappings = self.recorded_repo_mapping_entries(&key);
         // Labels in tag attributes resolved through the using module's repo mapping.
-        for e in crate::rt::RECORD_TAG_MAPPINGS
-            .with(|g| g.borrow_mut().take())
-            .unwrap_or_default()
-        {
+        for e in recorded_tag_mappings {
             if !static_mappings.contains(&e) {
                 static_mappings.push(e);
             }
         }
-        for e in crate::rt::LOAD_LABEL_MAPPINGS.lock().unwrap().iter() {
+        let recorded_load_mappings = self.state.lock().unwrap().load_label_mappings.clone();
+        for e in &recorded_load_mappings {
             if e.0 == repo && !static_mappings.contains(e) {
                 static_mappings.push(e.clone());
             }
@@ -1664,19 +1885,24 @@ impl Rt {
                     (
                         "label_keyed_string_dict",
                         AttrVal::Dict(entries) | AttrVal::LabelDict(entries),
-                    ) => AttrVal::LabelDict(
-                        entries
-                            .into_iter()
-                            .map(|(ek, ev)| {
-                                let nk = if ek.starts_with("@@") {
-                                    ek
-                                } else {
-                                    conv_label(&ek)?
-                                };
-                                Ok((nk, ev))
-                            })
-                            .collect::<Result<Vec<_>, String>>()?,
-                    ),
+                    ) => {
+                        let mut out_entries = Vec::with_capacity(entries.len());
+                        let mut seen_keys = std::collections::HashSet::new();
+                        for (ek, ev) in entries {
+                            let nk = if ek.starts_with("@@") {
+                                ek
+                            } else {
+                                conv_label(&ek)?
+                            };
+                            if !seen_keys.insert(nk.clone()) {
+                                return Err(format!(
+                                    "Label key '{nk}' appears more than once in dict"
+                                ));
+                            }
+                            out_entries.push((nk, ev));
+                        }
+                        AttrVal::LabelDict(out_entries)
+                    }
                     ("label_list_dict", AttrVal::Dict(entries)) => AttrVal::Dict(
                         entries
                             .into_iter()
@@ -1714,37 +1940,9 @@ impl Rt {
         };
         if let Value::Host(k, s) = ret {
             if k == "extension_metadata" {
-                let parts: Vec<&str> = s.split('|').collect();
-                let parse_list = |p: &str| {
-                    if p == "-" {
-                        None
-                    } else {
-                        Some(
-                            p.split(',')
-                                .filter(|x| !x.is_empty())
-                                .map(String::from)
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                };
-                let ua = parts.first().copied().unwrap_or("NO").to_string();
-                let facts_json = parts.get(4).and_then(|p| {
-                    if *p == "-" {
-                        None
-                    } else {
-                        crate::json::Json::parse(p).ok()
-                    }
-                });
-                let explicit_deps = parts.get(2).and_then(|p| parse_list(p));
-                let explicit_dev_deps = parts.get(3).and_then(|p| parse_list(p));
-                out.metadata = Some(ExtensionMetadata {
-                    use_all_repos: ua != "NO",
-                    use_all: ua,
-                    reproducible: parts.get(1) == Some(&"true"),
-                    explicit_root_direct_deps: explicit_deps,
-                    explicit_root_direct_dev_deps: explicit_dev_deps,
-                    facts: facts_json,
-                });
+                if let Ok(idx) = s.parse::<usize>() {
+                    out.metadata = self.state.lock().unwrap().ext_metadatas.get(idx).cloned();
+                }
             }
         }
         if let Some(meta) = &out.metadata {
@@ -1795,17 +1993,32 @@ impl Rt {
         }
         out.recorded_file_inputs = file_inputs.lock().unwrap().clone();
         let reproducible = out.metadata.as_ref().is_some_and(|m| m.reproducible);
-        if mode == crate::lockfile::LockfileMode::Error && !reproducible {
-            return Err(format!(
-                "The module extension '{ext_display}'{} does not exist in the lockfile",
-                if factors == "general" {
-                    String::new()
-                } else {
-                    format!(" for platform {factors}")
-                }
-            ));
+        let new_facts = normalize_facts(out.metadata.as_ref().and_then(|m| m.facts.as_ref()));
+        if mode == crate::lockfile::LockfileMode::Error {
+            if !reproducible {
+                return Err(format!(
+                    "The module extension '{ext_display}'{} does not exist in the lockfile",
+                    if factors == "general" {
+                        String::new()
+                    } else {
+                        format!(" for platform {factors}")
+                    }
+                ));
+            }
+            let existing_ws_facts = {
+                let l = self.lock.lock().unwrap();
+                normalize_facts(l.workspace.facts.get(&lock_key))
+            };
+            if new_facts != existing_ws_facts {
+                return Err(format!(
+                    "MODULE.bazel.lock is no longer up-to-date because the facts of the extension '{ext_display}' have changed. Please run `bazel mod deps --lockfile_mode=update` to update your lockfile."
+                ));
+            }
         }
-        if mode != crate::lockfile::LockfileMode::Off {
+        if matches!(
+            mode,
+            crate::lockfile::LockfileMode::Update | crate::lockfile::LockfileMode::Refresh
+        ) {
             let inputs: Vec<String> = rec
                 .lock()
                 .unwrap()
@@ -1840,28 +2053,13 @@ impl Rt {
                     .as_ref()
                     .and_then(crate::lockfile::metadata_to_lock),
             };
-            self.lock
-                .lock()
-                .unwrap()
-                .used
-                .push((lock_key.clone(), factors, le));
-            if def.facts_version > 0
-                || out
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.facts.as_ref())
-                    .is_some()
-            {
-                let mut l = self.lock.lock().unwrap();
-                if let Some(facts) = out.metadata.as_ref().and_then(|m| m.facts.clone()) {
-                    l.workspace.facts.insert(lock_key.clone(), facts);
-                }
-                if def.facts_version > 0 {
-                    l.workspace
-                        .facts_versions
-                        .insert(lock_key, def.facts_version as i64);
-                }
-            }
+            self.lock.lock().unwrap().used.push(crate::rt::UsedLockExt {
+                key: lock_key,
+                factors,
+                entry: le,
+                facts: new_facts,
+                facts_version: def.facts_version as i64,
+            });
         }
         Ok(out)
     }
@@ -1901,6 +2099,10 @@ fn eval_factors(def: &ExtensionDef) -> String {
                 "osx"
             } else if cfg!(target_os = "windows") {
                 "windows"
+            } else if cfg!(target_os = "freebsd") {
+                "freebsd"
+            } else if cfg!(target_os = "openbsd") {
+                "openbsd"
             } else {
                 "linux"
             }
@@ -1915,6 +2117,52 @@ fn eval_factors(def: &ExtensionDef) -> String {
     } else {
         parts.join(",")
     }
+}
+
+/// Returns `true` only when `repo_dir` contains no symlinks pointing into `workspace` or escaping
+/// outside `repo_dir` (so moving `repo_dir` into the shared `RepoContentsCache` is safe).
+fn is_safe_for_repo_contents_cache(repo_dir: &Path, workspace: &Path) -> bool {
+    fn walk(cur: &Path, root: &Path, ws: &Path) -> bool {
+        let Ok(rd) = std::fs::read_dir(cur) else {
+            return true;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else {
+                continue;
+            };
+            if ft.is_symlink() {
+                let Ok(target) = std::fs::read_link(&p) else {
+                    return false;
+                };
+                if target.starts_with(ws) {
+                    return false;
+                }
+                let resolved = if target.is_absolute() {
+                    crate::ctx::normalize(&target)
+                } else {
+                    crate::ctx::normalize(&p.parent().unwrap_or(cur).join(&target))
+                };
+                if resolved.starts_with(ws) || !resolved.starts_with(root) {
+                    return false;
+                }
+            } else if ft.is_dir() && !walk(&p, root, ws) {
+                return false;
+            }
+        }
+        true
+    }
+    let canon_root = match (
+        repo_dir
+            .parent()
+            .and_then(|p| crate::canonical_no_unc(p).ok()),
+        repo_dir.file_name(),
+    ) {
+        (Some(p), Some(n)) => p.join(n),
+        _ => repo_dir.to_path_buf(),
+    };
+    let canon_ws = crate::canonical_no_unc(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    walk(&canon_root, &canon_root, &canon_ws)
 }
 
 pub fn remove_any(p: &Path) -> std::io::Result<()> {
@@ -2079,7 +2327,7 @@ impl Rt {
         defs: &[(String, AttrDef)],
         attr_struct: &Value,
         ret: &Value,
-        reproducible: &Arc<Mutex<bool>>,
+        reproducible: bool,
         ctx_repo: &str,
         def_ctx: (&str, &str),
     ) {
@@ -2092,8 +2340,7 @@ impl Rt {
                 .map(|(k, v)| (k.to_string(), v.clone()))
                 .collect(),
             Value::Struct(sv)
-                if sv.fields.contains_key("attrs_for_reproducibility")
-                    && !*reproducible.lock().unwrap() =>
+                if sv.fields.contains_key("attrs_for_reproducibility") && !reproducible =>
             {
                 match sv.fields.get("attrs_for_reproducibility") {
                     Some(Value::Dict(d)) => d
@@ -2293,6 +2540,13 @@ mod tests {
         }
     }
 
+    fn hermetic_opts(ws: &Path, base: &Path) -> ResolveOptions {
+        let mut o = ResolveOptions::new(ws);
+        o.registries = vec![file_url(&base.join("empty_registry"))];
+        o.check_direct_dependencies = CheckMode::Off;
+        o
+    }
+
     #[allow(clippy::type_complexity)]
     fn setup(name: &str, root_module: &str, mods: &[(&str, &str, &[(&str, &str)])]) -> Env {
         let base = tmpdir(name);
@@ -2472,8 +2726,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
                 integrity(&tgz)
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
         let m = res.repo_mapping(&ModuleKey::root());
         assert_eq!(m["arch"], "+http_archive+arch");
@@ -2512,8 +2765,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
                 "0".repeat(64)
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let mut opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -2567,8 +2819,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
                 file_url(&tgz)
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -2610,8 +2861,7 @@ my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg
             "MODULE.bazel",
             "module(name='root')\nbad = use_repo_rule('//:defs.bzl', 'bad')\nbad(name='b')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -2737,8 +2987,7 @@ my_ext = _make_ext()
             "def _r(rctx):\n    module_extension(implementation = lambda m: None)\n    rctx.file('BUILD.bazel', '')\nbad_r = repository_rule(implementation = _r)\n",
         );
         write(&ws, "MODULE.bazel", "module(name='root')\nbad_r = use_repo_rule('//:bad_me.bzl', 'bad_r')\nbad_r(name='x')\n");
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -2778,8 +3027,7 @@ my_ext = _make_ext()
             "MODULE.bazel",
             "module(name='root')\nnew_local_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'new_local_repository')\nnew_local_repository(name='nlr', path='local_src', build_file_content='# v1\\n')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -2817,8 +3065,7 @@ my_ext = _make_ext()
             "MODULE.bazel",
             "module(name='root')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='lr', path='loc_pkg')\n",
         );
-        let mut o2 = ResolveOptions::new(&ws2);
-        o2.check_direct_dependencies = CheckMode::Off;
+        let o2 = hermetic_opts(&ws2, &base2);
         let res2 = Arc::new(resolve(&o2).unwrap_or_else(|e| panic!("{e}")));
         let opts2 = ExternalOptions {
             output_base: base2.join("ob"),
@@ -2848,8 +3095,7 @@ my_ext = _make_ext()
             "MODULE.bazel",
             "module(name='root')\nnew_local_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'new_local_repository')\nnew_local_repository(name='nlr', path='local_src', build_file_content='# v1\\n')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -2911,8 +3157,7 @@ my_ext = _make_ext()
                 "xcode_autoconf(name='local_config_xcode')\n",
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let opts = ExternalOptions {
             output_base: base.join("ob"),
@@ -3032,8 +3277,7 @@ my_ext = _make_ext()
                 arch_sri = archive_sha512,
             ),
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rcc = base.join("rcc");
         let opts = ExternalOptions {
@@ -3163,8 +3407,7 @@ ext = module_extension(implementation = _ext_impl)
             "MODULE.bazel",
             "module(name='root')\next = use_extension('//:defs.bzl', 'ext')\nuse_repo(ext, 'bar')\n",
         );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
+        let o = hermetic_opts(&ws, &base);
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rt = Rt::new(
             ExternalOptions {
@@ -3196,8 +3439,7 @@ ext = module_extension(implementation = _ext_impl)
             "MODULE.bazel",
             "module(name='root')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='local_rep', path='other')\next = use_extension('//:defs.bzl', 'ext')\noverride_repo(ext, nonexistent='local_rep')\nuse_repo(ext, 'bar')\n",
         );
-        let mut o_bad = ResolveOptions::new(&ws_bad);
-        o_bad.check_direct_dependencies = CheckMode::Off;
+        let o_bad = hermetic_opts(&ws_bad, &base);
         let res_bad = Arc::new(resolve(&o_bad).unwrap());
         let rt_bad = Rt::new(
             ExternalOptions {
@@ -3220,7 +3462,7 @@ ext = module_extension(implementation = _ext_impl)
     #[test]
     fn archive_override_applies_canonical_bazel_tools_and_root_patches_and_preserves_original_name()
     {
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
         let base = tmpdir("bazel_tools_patch_and_orig_name");
         let tgz = make_tgz(
             &base,
@@ -3328,8 +3570,1107 @@ inspect_repo(name = "via_use_repo_rule")
                 &[("MODULE.bazel", "module(name='dep', version='1.0')\n")],
             )],
         );
-        assert_eq!(e.rt.original_name_for("dep+", "dep_alias"), "dep+");
+        let dummy_spec = RepoSpec::new(
+            "",
+            "",
+            vec![("name".into(), AttrVal::Str("dep_alias".into()))],
+        );
+        assert_eq!(e.rt.original_name_for("dep+", &dummy_spec), "dep+");
         let _ = std::fs::remove_dir_all(e.ws.parent().unwrap());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn rctx_original_name_dirtree_watch_wasm_gate_and_discarded_repo_metadata() {
+        let base = tmpdir("rctx_orig_dirtree_wasm");
+        let ws = base.join("ws");
+        write(&ws, "tree/sub/leaf.txt", "v1");
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    # Create but discard repo_metadata(reproducible = True).\n",
+                "    _unused = rctx.repo_metadata(reproducible = True)\n",
+                "    has_wasm = hasattr(rctx, 'load_wasm') or hasattr(rctx, 'execute_wasm')\n",
+                "    rctx.watch_tree(rctx.workspace_root.get_child('tree'))\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('info.txt', rctx.name + '|' + rctx.original_name + '|' + str(has_wasm))\n",
+                "    return None\n",
+                "\n",
+                "_private_alias = repository_rule(implementation = _impl)\n",
+                "my_rule = _private_alias\n",
+                "\n",
+                "def _ext(mctx):\n",
+                "    my_rule(name = 'short_name')\n",
+                "\n",
+                "ext = module_extension(implementation = _ext)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nwrite_dummy = None\next = use_extension('//:defs.bzl', 'ext')\nuse_repo(ext, 'short_name')\n",
+        );
+        write(&ws, "BUILD.bazel", "");
+
+        let reg = base.join("reg");
+        std::fs::create_dir_all(&reg).unwrap();
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![crate::file_url_for_path(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rcc = base.join("rcc");
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            repo_contents_cache: Some(rcc.clone()),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let rt1 = Rt::new(opts.clone(), res.clone());
+        let dir1 = rt1.fetch_repo("+ext+short_name").unwrap();
+        let info = std::fs::read_to_string(dir1.join("info.txt")).unwrap();
+        assert_eq!(info, "+ext+short_name|short_name|False");
+
+        // Discarded `repo_metadata(reproducible = True)` must NOT populate repo_contents_cache.
+        assert!(
+            !dir1.symlink_metadata().unwrap().file_type().is_symlink(),
+            "non-reproducible repo must not be moved to repo_contents_cache"
+        );
+        assert!(
+            !rcc.exists() || std::fs::read_dir(&rcc).unwrap().count() == 0,
+            "repo_contents_cache must remain empty when repo_metadata is discarded"
+        );
+
+        // Marker must contain `DIRTREE:` watch; modifying a nested file must trigger refetch.
+        let marker =
+            std::fs::read_to_string(base.join("ob/external/@+ext+short_name.marker")).unwrap();
+        assert!(
+            marker.contains("DIRTREE:"),
+            "watch_tree must record DIRTREE input in marker: {marker}"
+        );
+        std::fs::write(dir1.join(".sentinel"), "1").unwrap();
+        write(&ws, "tree/sub/leaf.txt", "v2");
+        let rt2 = Rt::new(opts, res);
+        let dir2 = rt2.fetch_repo("+ext+short_name").unwrap();
+        assert!(
+            !dir2.join(".sentinel").exists(),
+            "modifying nested file under watch_tree must invalidate marker and refetch"
+        );
+    }
+
+    #[test]
+    fn tag_validation_override_inject_repo_and_cli_override_rules() {
+        let base = tmpdir("tag_ov_inject");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "ext.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _ext(mctx):\n",
+                "    r(name = 'made')\n",
+                "cfg = tag_class(attrs = {'lbl': attr.label()})\n",
+                "ext = module_extension(implementation = _ext, tag_classes = {'cfg': cfg})\n",
+            ),
+        );
+
+        // 1. Undeclared `name` attribute on tag is rejected.
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\next = use_extension('//:ext.bzl', 'ext')\next.cfg(name = 'bad')\n",
+        );
+        let foo_src = base.join("foo_src");
+        write(&foo_src, "MODULE.bazel", "module(name = 'foo', version = '1.0')\next = use_extension('//:ext.bzl', 'ext')\nuse_repo(ext, 'extra')\n");
+        write(&foo_src, "BUILD.bazel", "");
+        write(
+            &foo_src,
+            "ext.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _ext(mctx):\n",
+                "    r(name = 'made')\n",
+                "ext = module_extension(implementation = _ext)\n",
+            ),
+        );
+        let reg = base.join("reg");
+        write(
+            &reg,
+            "modules/foo/1.0/MODULE.bazel",
+            "module(name = 'foo', version = '1.0')\next = use_extension('//:ext.bzl', 'ext')\nuse_repo(ext, 'extra')\n",
+        );
+        write(
+            &reg,
+            "modules/foo/1.0/source.json",
+            &format!(
+                "{{\"type\": \"local_path\", \"path\": \"{}\"}}\n",
+                foo_src.to_string_lossy().replace('\\', "/")
+            ),
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![crate::file_url_for_path(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        o.isolated_extension_usages = true;
+        let res = Arc::new(resolve(&o).unwrap());
+        let opts = ExternalOptions {
+            output_base: base.join("ob1"),
+            workspace_root: ws.clone(),
+            ..Default::default()
+        };
+        let rt = Rt::new(opts, res.clone());
+        let ext_id = res.extension_ids()[0].clone();
+        let err = rt.eval_extension(&ext_id).unwrap_err();
+        assert!(
+            err.contains("unknown attribute 'name'"),
+            "undeclared tag name attr must fail: {err}"
+        );
+
+        // 2. Invisible `@ghost` label on tag is rejected before extension runs.
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\next = use_extension('//:ext.bzl', 'ext')\next.cfg(lbl = '@ghost//:t')\n",
+        );
+        let res = Arc::new(resolve(&o).unwrap());
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob2"),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        let err = rt.eval_extension(&res.extension_ids()[0]).unwrap_err();
+        assert!(
+            err.contains("no repository visible as '@ghost'"),
+            "invisible tag label repo must fail: {err}"
+        );
+
+        // 3. `override_repo` fails when repo is NOT generated; `inject_repo` fails when repo IS generated;
+        //    valid `inject_repo` satisfies `use_repo` import!
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\next = use_extension('//:ext.bzl', 'ext')\noverride_repo(ext, missing = 'root')\n",
+        );
+        let res = Arc::new(resolve(&o).unwrap());
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob3"),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        let err = rt.eval_extension(&res.extension_ids()[0]).unwrap_err();
+        assert!(
+            err.contains("does not generate repository \"missing\""),
+            "override_repo on missing repo must fail: {err}"
+        );
+
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\next = use_extension('//:ext.bzl', 'ext')\ninject_repo(ext, made = 'root')\n",
+        );
+        let res = Arc::new(resolve(&o).unwrap());
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob4"),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        let err = rt.eval_extension(&res.extension_ids()[0]).unwrap_err();
+        assert!(
+            err.contains("generates repository \"made\", so it cannot be injected"),
+            "inject_repo on existing repo must fail: {err}"
+        );
+
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name = 'foo', version = '1.0')\nfext = use_extension('@foo//:ext.bzl', 'ext')\ninject_repo(fext, extra = 'foo')\nuse_repo(fext, 'made')\nfext2 = use_extension('@@foo+//:ext.bzl', 'ext')\nuse_repo(fext2, alias_made = 'made')\n",
+        );
+        let res = Arc::new(resolve(&o).unwrap());
+        let ov_dir = base.join("ov");
+        write(&ov_dir, "REPO.bazel", "");
+        let mut ov_map = BTreeMap::new();
+        ov_map.insert("made".to_string(), ov_dir.clone());
+        ov_map.insert("alias_made".to_string(), ov_dir);
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob5"),
+                workspace_root: ws.clone(),
+                override_repository: ov_map,
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        for eid in res.extension_ids() {
+            rt.eval_extension(&eid).unwrap();
+        }
+        // Both `@made` and `@alias_made` map to `foo++ext+made` in the root module's repo mapping!
+        let conflict = rt.repo_override_for("foo++ext+made").unwrap_err();
+        assert!(
+            conflict.contains("overridden by multiple apparent names"),
+            "expected conflict error, got: {conflict}"
+        );
+        // `@bazel_tools` ignores apparent overrides.
+        assert_eq!(rt.repo_override_for("bazel_tools").unwrap(), None);
+    }
+
+    #[test]
+    fn overlapping_extension_unique_name_prefix_resolves_isolated_and_proxy_repos() {
+        let base = tmpdir("ext_unique_prefix");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('orig.txt', rctx.original_name)\n",
+                "_tool = repository_rule(implementation = _r)\n",
+                "def _tool_ext(mctx):\n",
+                "    _tool(name = 'artifact')\n",
+                "tool = module_extension(implementation = _tool_ext)\n",
+                "def _maven_ext(mctx):\n",
+                "    _tool(name = 'core')\n",
+                "maven = module_extension(implementation = _maven_ext)\n",
+                "def _maven_install_ext(mctx):\n",
+                "    _tool(name = 'jar')\n",
+                "maven_install = module_extension(implementation = _maven_install_ext)\n",
+            ),
+        );
+        // `use_repo_rule('//:defs.bzl', '_tool')` receives unique name `+_tool` (prefix `+_tool+`),
+        // which is a prefix of isolated `use_extension('//:defs.bzl', 'tool', isolate = True)`
+        // whose unique name in the root module is `+_tool+++iso_ext` (prefix `+_tool+++iso_ext+`).
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "proxy = use_repo_rule('//:defs.bzl', '_tool')\n",
+                "proxy(name = 'direct_repo')\n",
+                "iso_ext = use_extension('//:defs.bzl', 'tool', isolate = True)\n",
+                "use_repo(iso_ext, 'artifact')\n",
+                "m1 = use_extension('//:defs.bzl', 'maven')\n",
+                "use_repo(m1, 'core')\n",
+                "m2 = use_extension('//:defs.bzl', 'maven_install')\n",
+                "use_repo(m2, 'jar')\n",
+            ),
+        );
+        let reg = base.join("reg");
+        std::fs::create_dir_all(&reg).unwrap();
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![crate::file_url_for_path(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        o.isolated_extension_usages = true;
+        let res = Arc::new(resolve(&o).unwrap());
+
+        let root_map: BTreeMap<String, String> = res
+            .repo_mapping_ordered(&crate::model::ModuleKey::root())
+            .into_iter()
+            .collect();
+        assert_eq!(root_map.get("direct_repo").unwrap(), "+_tool+direct_repo");
+        assert_eq!(
+            root_map.get("artifact").unwrap(),
+            "+_tool+++iso_ext+artifact"
+        );
+
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res,
+        );
+        let direct_dir = rt.fetch_repo("+_tool+direct_repo").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(direct_dir.join("orig.txt")).unwrap(),
+            "direct_repo"
+        );
+        let iso_dir = rt.fetch_repo("+_tool+++iso_ext+artifact").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(iso_dir.join("orig.txt")).unwrap(),
+            "artifact"
+        );
+        let mi_dir = rt.fetch_repo("+maven_install+jar").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mi_dir.join("orig.txt")).unwrap(),
+            "jar"
+        );
+
+        let reg_arg = format!("--registry={}", crate::file_url_for_path(&reg));
+        let out = crate::commands::run_bzlmod_command(
+            "mod",
+            &[
+                "show_repo".to_string(),
+                "--experimental_isolated_extension_usages".to_string(),
+                "--check_direct_dependencies=off".to_string(),
+                "--lockfile_mode=off".to_string(),
+                reg_arg,
+                "@@+_tool+++iso_ext+artifact".to_string(),
+            ],
+            &ws,
+            &base.join("ob_mod"),
+        );
+        assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+        assert!(
+            out.stdout.contains("original_name = \"artifact\""),
+            "stdout: {}",
+            out.stdout
+        );
+    }
+
+    #[test]
+    fn nested_extension_eval_preserves_outer_recorded_tag_repo_mappings() {
+        // 1. Direct re-entrancy check on `RecordTagMappingsGuard`: both `finish()` and early `Drop`
+        //    restore any outer in-progress `RECORD_TAG_MAPPINGS` vector rather than clobbering it.
+        {
+            let outer = RecordTagMappingsGuard::enter();
+            crate::rt::RECORD_TAG_MAPPINGS.with(|g| {
+                g.borrow_mut().as_mut().unwrap().push((
+                    String::new(),
+                    "my_dep".to_string(),
+                    "dep_a+".to_string(),
+                ));
+            });
+            {
+                let inner_finished = RecordTagMappingsGuard::enter();
+                crate::rt::RECORD_TAG_MAPPINGS.with(|g| {
+                    g.borrow_mut().as_mut().unwrap().push((
+                        String::new(),
+                        "inner_only".to_string(),
+                        "inner+".to_string(),
+                    ));
+                });
+                let inner_entries = inner_finished.finish();
+                assert_eq!(
+                    inner_entries,
+                    vec![(
+                        String::new(),
+                        "inner_only".to_string(),
+                        "inner+".to_string()
+                    )]
+                );
+            }
+            {
+                let _inner_dropped_early = RecordTagMappingsGuard::enter();
+                crate::rt::RECORD_TAG_MAPPINGS.with(|g| {
+                    g.borrow_mut().as_mut().unwrap().push((
+                        String::new(),
+                        "discarded".to_string(),
+                        "discarded+".to_string(),
+                    ));
+                });
+            }
+            let outer_entries = outer.finish();
+            assert_eq!(
+                outer_entries,
+                vec![(String::new(), "my_dep".to_string(), "dep_a+".to_string())]
+            );
+            assert!(crate::rt::RECORD_TAG_MAPPINGS.with(|g| g.borrow().is_none()));
+        }
+
+        // 2. End-to-end nested extension evaluation during lockfile staleness checks:
+        //    Run 1 records `REPO_MAPPING:+inner+inner_repo,my_dep` on `outer` (because `outer.bzl`
+        //    loads `@inner_repo//:helper.bzl`) alongside `outer`'s tag mapping `("", "my_dep")`.
+        //    In Run 2 (after removing that `load` from `outer.bzl`), a fresh session evaluates
+        //    `outer` first; `recorded_inputs_outdated_with_mappings` inspects `+inner+inner_repo`
+        //    and triggers nested `eval_extension(inner)` before `outer` finishes recording inputs.
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
+        let base = tmpdir("nested_tag_mappings");
+        let ws = base.join("ws");
+        let dep_dir = base.join("dep_a");
+        write(
+            &dep_dir,
+            "MODULE.bazel",
+            "module(name = 'dep_a', version = '1.0')\n",
+        );
+        write(&dep_dir, "BUILD.bazel", "filegroup(name = 't')\n");
+        write(&dep_dir, "defs.bzl", "D = 'ok'\n");
+
+        let reg = base.join("reg");
+        add_module(
+            &reg,
+            "dep_a",
+            "1.0",
+            "module(name = 'dep_a', version = '1.0')\n",
+            &format!(
+                r#"{{"type":"local_path","path":"{}"}}"#,
+                dep_dir.display().to_string().replace('\\', "/")
+            ),
+        );
+
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "inner.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('helper.bzl', 'load(\"@my_dep//:defs.bzl\", \"D\")\\nH = D\\n')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _inner(mctx):\n",
+                "    r(name = 'inner_repo')\n",
+                "inner = module_extension(implementation = _inner)\n",
+            ),
+        );
+        write(
+            &ws,
+            "outer.bzl",
+            concat!(
+                "load('@inner_repo//:helper.bzl', 'H')\n",
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('info.txt', rctx.attr.val)\n",
+                "r = repository_rule(implementation = _r, attrs = {'val': attr.string()})\n",
+                "cfg = tag_class(attrs = {'lbl': attr.label()})\n",
+                "def _outer(mctx):\n",
+                "    lbls = [str(t.lbl) for m in mctx.modules for t in m.tags.cfg]\n",
+                "    r(name = 'outer_repo', val = H + ':' + ','.join(lbls))\n",
+                "outer = module_extension(implementation = _outer, tag_classes = {'cfg': cfg})\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "bazel_dep(name = 'dep_a', version = '1.0', repo_name = 'my_dep')\n",
+                "inner = use_extension('//:inner.bzl', 'inner')\n",
+                "use_repo(inner, 'inner_repo')\n",
+                "outer = use_extension('//:outer.bzl', 'outer')\n",
+                "outer.cfg(lbl = '@my_dep//:t')\n",
+                "use_repo(outer, 'outer_repo')\n",
+            ),
+        );
+
+        let reg_flag = format!("--registry={}", crate::file_url_for_path(&reg));
+        let args = vec![
+            reg_flag.clone(),
+            "--check_direct_dependencies=off".to_string(),
+            "--lockfile_mode=update".to_string(),
+            "--repo=@outer_repo".to_string(),
+        ];
+        let out1 = crate::commands::run_bzlmod_command("fetch", &args, &ws, &base.join("ob1"));
+        assert_eq!(out1.exit_code, 0, "stderr: {}", out1.stderr);
+
+        let lock1 = crate::lockfile::Lockfile::read(
+            &ws.join("MODULE.bazel.lock"),
+            crate::lockfile::LockfileMode::Error,
+        )
+        .unwrap();
+        let outer_entry1 = &lock1.module_extensions["//:outer.bzl%outer"]["general"];
+        assert!(
+            outer_entry1
+                .recorded_inputs
+                .iter()
+                .any(|s| s == "REPO_MAPPING:+inner+inner_repo,my_dep dep_a+"),
+            "expected inner_repo load mapping in lock1: {:?}",
+            outer_entry1.recorded_inputs
+        );
+        assert!(
+            outer_entry1
+                .recorded_inputs
+                .iter()
+                .any(|s| s == "REPO_MAPPING:,my_dep dep_a+"),
+            "expected outer tag mapping in lock1: {:?}",
+            outer_entry1.recorded_inputs
+        );
+
+        // Drop the `@inner_repo` load from `outer.bzl` so `outer` is evaluated BEFORE `inner`
+        // in a fresh session, causing `recorded_inputs_outdated_with_mappings` to evaluate `inner`
+        // mid-flight while checking `REPO_MAPPING:+inner+inner_repo,my_dep`.
+        write(
+            &ws,
+            "outer.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('info.txt', rctx.attr.val)\n",
+                "r = repository_rule(implementation = _r, attrs = {'val': attr.string()})\n",
+                "cfg = tag_class(attrs = {'lbl': attr.label()})\n",
+                "def _outer(mctx):\n",
+                "    lbls = [str(t.lbl) for m in mctx.modules for t in m.tags.cfg]\n",
+                "    r(name = 'outer_repo', val = ','.join(lbls))\n",
+                "outer = module_extension(implementation = _outer, tag_classes = {'cfg': cfg})\n",
+            ),
+        );
+
+        let out2 = crate::commands::run_bzlmod_command("fetch", &args, &ws, &base.join("ob2"));
+        assert_eq!(out2.exit_code, 0, "stderr: {}", out2.stderr);
+
+        let lock2 = crate::lockfile::Lockfile::read(
+            &ws.join("MODULE.bazel.lock"),
+            crate::lockfile::LockfileMode::Error,
+        )
+        .unwrap();
+        let outer_entry2 = &lock2.module_extensions["//:outer.bzl%outer"]["general"];
+        assert!(
+            outer_entry2
+                .recorded_inputs
+                .iter()
+                .any(|s| s == "REPO_MAPPING:,my_dep dep_a+"),
+            "outer tag REPO_MAPPING must survive nested inner extension eval: {:?}",
+            outer_entry2.recorded_inputs
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watch_tree_on_symlink_to_directory_invalidates_marker_on_edits_and_retarget() {
+        let base = tmpdir("watch_tree_symlink_root");
+        let ws = base.join("ws");
+        let target_a = base.join("external_tree_a");
+        let target_b = base.join("external_tree_b");
+        write(&target_a, "nested/data.txt", "alpha");
+        write(&target_b, "nested/data.txt", "bravo");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::os::unix::fs::symlink(&target_a, ws.join("linked_tree")).unwrap();
+
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    tree_dir = rctx.workspace_root.get_child('linked_tree')\n",
+                "    rctx.watch_tree(tree_dir)\n",
+                "    val = rctx.read(tree_dir.get_child('nested').get_child('data.txt'), watch = 'no')\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('captured.txt', val)\n",
+                "tree_repo = repository_rule(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "tree_repo = use_repo_rule('//:defs.bzl', 'tree_repo')\n",
+                "tree_repo(name = 'watched')\n",
+            ),
+        );
+
+        let reg = base.join("reg");
+        std::fs::create_dir_all(&reg).unwrap();
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![crate::file_url_for_path(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap());
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let canon = "+tree_repo+watched";
+
+        let rt1 = Rt::new(opts.clone(), res.clone());
+        let dir1 = rt1.fetch_repo(canon).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir1.join("captured.txt")).unwrap(),
+            "alpha"
+        );
+        let marker =
+            std::fs::read_to_string(base.join("ob/external/@+tree_repo+watched.marker")).unwrap();
+        assert!(
+            marker.contains("DIRTREE:@@//linked_tree ") && !marker.contains("NOT_DIR"),
+            "symlink-to-directory watch_tree must record tree digest, not NOT_DIR: {marker}"
+        );
+
+        // Unchanged symlink target reuses cached repo directory without refetching.
+        std::fs::write(dir1.join(".cached_sentinel"), "1").unwrap();
+        let rt_same = Rt::new(opts.clone(), res.clone());
+        let dir_same = rt_same.fetch_repo(canon).unwrap();
+        assert!(
+            dir_same.join(".cached_sentinel").exists(),
+            "unchanged symlinked watch_tree must hit repository marker"
+        );
+
+        // 1. Modifying a file inside `target_a` invalidates the marker and refetches.
+        write(&target_a, "nested/data.txt", "alpha-updated");
+        let rt_mod = Rt::new(opts.clone(), res.clone());
+        let dir_mod = rt_mod.fetch_repo(canon).unwrap();
+        assert!(!dir_mod.join(".cached_sentinel").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir_mod.join("captured.txt")).unwrap(),
+            "alpha-updated"
+        );
+
+        // 2. Adding and then deleting an unrelated file inside `target_a` both invalidate the marker.
+        std::fs::write(dir_mod.join(".cached_sentinel"), "1").unwrap();
+        write(&target_a, "nested/extra.txt", "added");
+        let rt_add = Rt::new(opts.clone(), res.clone());
+        let dir_add = rt_add.fetch_repo(canon).unwrap();
+        assert!(
+            !dir_add.join(".cached_sentinel").exists(),
+            "adding a file under symlinked watch_tree must invalidate marker"
+        );
+
+        std::fs::write(dir_add.join(".cached_sentinel"), "1").unwrap();
+        std::fs::remove_file(target_a.join("nested/extra.txt")).unwrap();
+        let rt_del = Rt::new(opts.clone(), res.clone());
+        let dir_del = rt_del.fetch_repo(canon).unwrap();
+        assert!(
+            !dir_del.join(".cached_sentinel").exists(),
+            "deleting a file under symlinked watch_tree must invalidate marker"
+        );
+
+        // 3. Retargeting `ws/linked_tree` to `target_b` invalidates the marker and refetches.
+        std::fs::write(dir_del.join(".cached_sentinel"), "1").unwrap();
+        std::fs::remove_file(ws.join("linked_tree")).unwrap();
+        std::os::unix::fs::symlink(&target_b, ws.join("linked_tree")).unwrap();
+        let rt_retarget = Rt::new(opts, res);
+        let dir_retarget = rt_retarget.fetch_repo(canon).unwrap();
+        assert!(!dir_retarget.join(".cached_sentinel").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir_retarget.join("captured.txt")).unwrap(),
+            "bravo"
+        );
+    }
+
+    #[test]
+    fn end_to_end_int_attrs_reject_out_of_i32_range_in_repo_rules_tags_and_defaults() {
+        let base = tmpdir("int32_bounds_e2e");
+
+        // 1. `attr.int(default = 1 << 40)` fails at `.bzl` load time.
+        {
+            let ws = base.join("ws_default");
+            write(&ws, "BUILD.bazel", "");
+            write(
+                &ws,
+                "defs.bzl",
+                concat!(
+                    "def _impl(rctx):\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "bad_repo = repository_rule(implementation = _impl, attrs = {'n': attr.int(default = 1 << 40)})\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                concat!(
+                    "module(name = 'root')\n",
+                    "bad_repo = use_repo_rule('//:defs.bzl', 'bad_repo')\n",
+                    "bad_repo(name = 'x')\n",
+                ),
+            );
+            let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_default"),
+                    workspace_root: ws,
+                    ..Default::default()
+                },
+                res,
+            );
+            let err = rt.fetch_repo("+bad_repo+x").unwrap_err();
+            assert!(
+                err.contains("for default, got 1099511627776, want value in signed 32-bit range"),
+                "err: {err}"
+            );
+        }
+
+        // 2. Oversized `BigInt` (`1 << 80`) passed to `use_repo_rule` is rejected.
+        {
+            let ws = base.join("ws_repo_rule");
+            write(&ws, "BUILD.bazel", "");
+            write(
+                &ws,
+                "defs.bzl",
+                concat!(
+                    "def _impl(rctx):\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "num_repo = repository_rule(implementation = _impl, attrs = {'n': attr.int()})\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                concat!(
+                    "module(name = 'root')\n",
+                    "num_repo = use_repo_rule('//:defs.bzl', 'num_repo')\n",
+                    "num_repo(name = 'x', n = 1 << 80)\n",
+                ),
+            );
+            let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_repo_rule"),
+                    workspace_root: ws,
+                    ..Default::default()
+                },
+                res,
+            );
+            let err = rt.fetch_repo("+num_repo+x").unwrap_err();
+            assert!(
+                err.contains("for attribute 'n'")
+                    && err.contains("want value in signed 32-bit range"),
+                "err: {err}"
+            );
+        }
+
+        // 3. Oversized element in `attr.int_list()` on a module extension tag is rejected.
+        {
+            let ws = base.join("ws_ext_tag");
+            write(&ws, "BUILD.bazel", "");
+            write(
+                &ws,
+                "ext.bzl",
+                concat!(
+                    "def _r_impl(rctx):\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "r = repository_rule(implementation = _r_impl)\n",
+                    "def _ext_impl(mctx):\n",
+                    "    r(name = 'gen')\n",
+                    "ext = module_extension(\n",
+                    "    implementation = _ext_impl,\n",
+                    "    tag_classes = {'item': tag_class(attrs = {'counts': attr.int_list()})},\n",
+                    ")\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                concat!(
+                    "module(name = 'root')\n",
+                    "ext = use_extension('//:ext.bzl', 'ext')\n",
+                    "ext.item(counts = [42, -(1 << 40)])\n",
+                    "use_repo(ext, 'gen')\n",
+                ),
+            );
+            let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_ext_tag"),
+                    workspace_root: ws,
+                    ..Default::default()
+                },
+                res,
+            );
+            let err = rt.fetch_repo("+ext+gen").unwrap_err();
+            assert!(
+                err.contains(
+                    "in 'item' tag, for element 1 of attribute 'counts', got -1099511627776, want value in signed 32-bit range"
+                ),
+                "err: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn owning_extension_never_falls_back_to_evaluated_non_owning_longer_prefix() {
+        let base = tmpdir("owning_ext_fallback");
+
+        // 1. Direct state test: longer `{unique}+` prefix is already evaluated without generating
+        //    `canonical`, while shorter `{unique}+` prefix is unevaluated (or mid-evaluation).
+        //    `owning_extension_for_canonical`, `original_name_for`, `repo_context`, and
+        //    `repo_mapping_of` must never fall back to the eliminated longer prefix.
+        let mut res = crate::resolve::Resolution::empty();
+        let short_id = ExtensionId {
+            bzl_file: "@@short_host+//:short.bzl".into(),
+            name: "_tool".into(),
+            isolation_key: None,
+        };
+        let long_id = ExtensionId {
+            bzl_file: "@@long_host+//:long.bzl".into(),
+            name: "_tool".into(),
+            isolation_key: Some((ModuleKey::root(), "iso_ext".into())),
+        };
+        res.extension_unique_names
+            .insert(short_id.clone(), "+_tool".into());
+        res.extension_unique_names
+            .insert(long_id.clone(), "+_tool+++iso_ext".into());
+        res.repo_overrides.insert(
+            short_id.clone(),
+            BTreeMap::from([("short_marker".into(), "short_target+".into())]),
+        );
+        res.repo_overrides.insert(
+            long_id.clone(),
+            BTreeMap::from([("long_marker".into(), "long_target+".into())]),
+        );
+
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob_state"),
+                workspace_root: base.join("ws_missing"),
+                ..Default::default()
+            },
+            Arc::new(res),
+        );
+        let dummy_spec = RepoSpec::new(
+            "@@short_host+//:short.bzl",
+            "r",
+            vec![("name".into(), AttrVal::Str("fallback_spec_name".into()))],
+        );
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.ext_results.insert(
+                long_id.clone(),
+                ExtensionResult {
+                    generated: vec![("unrelated".into(), dummy_spec.clone())],
+                    metadata: None,
+                    env_variables: BTreeMap::new(),
+                    recorded_file_inputs: BTreeMap::new(),
+                },
+            );
+            st.evaluating_exts.push(short_id.clone());
+        }
+
+        let canonical = "+_tool+++iso_ext+only_short";
+        assert_eq!(
+            rt.owning_extension_for_canonical(canonical),
+            Some((short_id.clone(), "++iso_ext+only_short"))
+        );
+        assert_eq!(
+            rt.original_name_for(canonical, &dummy_spec),
+            "++iso_ext+only_short"
+        );
+        assert_eq!(rt.repo_context(canonical), "short_host+");
+        let mapping = rt.repo_mapping_of(canonical);
+        assert_eq!(
+            mapping.get("short_marker").map(String::as_str),
+            Some("short_target+")
+        );
+        assert!(!mapping.contains_key("long_marker"));
+
+        // Same check when `short_id` is not in `evaluating_exts` and on-demand eval fails because
+        // `ws_missing` has no `.bzl` files: `long_id` is still permanently eliminated.
+        rt.state.lock().unwrap().evaluating_exts.clear();
+        assert_eq!(
+            rt.owning_extension_for_canonical(canonical),
+            Some((short_id.clone(), "++iso_ext+only_short"))
+        );
+
+        // 2. Reverse mid-evaluation case: `long_id` is mid-evaluation (`evaluating_exts`), while
+        //    `short_id` is already evaluated and confirmed to own `canonical`.
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.ext_results.remove(&long_id);
+            st.evaluating_exts.push(long_id.clone());
+            st.ext_results.insert(
+                short_id.clone(),
+                ExtensionResult {
+                    generated: vec![("++iso_ext+only_short".into(), dummy_spec.clone())],
+                    metadata: None,
+                    env_variables: BTreeMap::new(),
+                    recorded_file_inputs: BTreeMap::new(),
+                },
+            );
+        }
+        assert_eq!(
+            rt.owning_extension_for_canonical(canonical),
+            Some((short_id.clone(), "++iso_ext+only_short"))
+        );
+
+        // 3. Both candidates evaluated and neither generated `ghost`: returns `None`.
+        {
+            let mut st = rt.state.lock().unwrap();
+            st.evaluating_exts.clear();
+            st.ext_results.insert(
+                long_id,
+                ExtensionResult {
+                    generated: vec![("unrelated".into(), dummy_spec)],
+                    metadata: None,
+                    env_variables: BTreeMap::new(),
+                    recorded_file_inputs: BTreeMap::new(),
+                },
+            );
+        }
+        let ghost = "+_tool+++iso_ext+ghost";
+        assert_eq!(rt.owning_extension_for_canonical(ghost), None);
+        assert!(rt.repo_mapping_of(ghost).is_empty());
+    }
+
+    #[test]
+    fn label_path_watch_respects_incompatible_flag_and_propagates_io_errors() {
+        let base = tmpdir("label_path_watch_errors");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(&ws, "data.txt", "v1");
+        write(&ws, "unwatched.txt", "u1");
+        std::fs::create_dir_all(ws.join("subdir")).unwrap();
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    _p_data = rctx.path(Label('//:data.txt'))\n",
+                "    _p_missing = rctx.path(Label('//:missing.txt'))\n",
+                "    _p_dir = rctx.path(Label('//:subdir'))\n",
+                "    txt = rctx.read(Label('//:unwatched.txt'), watch = 'no')\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('out.txt', txt)\n",
+                "r = repository_rule(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name = 'root')\nr = use_repo_rule('//:defs.bzl', 'r')\nr(name = 'probe')\n",
+        );
+
+        let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+
+        // 1. Default `--incompatible_no_implicit_watch_label=true`: `path(Label(...))` and
+        //    `read(Label(...), watch = 'no')` do NOT implicitly record `FILE:` inputs.
+        let ob_default = base.join("ob_default");
+        let rt_default = Rt::new(
+            ExternalOptions {
+                output_base: ob_default.clone(),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        rt_default.fetch_repo("+r+probe").unwrap();
+        let marker_default =
+            std::fs::read_to_string(ob_default.join("external/@+r+probe.marker")).unwrap();
+        assert!(
+            !marker_default.contains("FILE:@@//data.txt"),
+            "default --incompatible_no_implicit_watch_label=true must not watch path(Label): {marker_default}"
+        );
+        assert!(
+            !marker_default.contains("FILE:@@//unwatched.txt"),
+            "read(Label, watch='no') must not watch label: {marker_default}"
+        );
+
+        // 2. `--noincompatible_no_implicit_watch_label` (`false`): `path(Label(...))` records
+        //    `FILE:` for regular files (digest), missing files (`ENOENT`), and directories (`DIR`).
+        let ob_legacy = base.join("ob_legacy");
+        let rt_legacy = Rt::new(
+            ExternalOptions {
+                output_base: ob_legacy.clone(),
+                workspace_root: ws.clone(),
+                incompatible_no_implicit_watch_label: false,
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        rt_legacy.fetch_repo("+r+probe").unwrap();
+        let marker_legacy =
+            std::fs::read_to_string(ob_legacy.join("external/@+r+probe.marker")).unwrap();
+        let v1_sha = crate::hash::sha256_hex(b"v1");
+        assert!(
+            marker_legacy.contains(&format!("FILE:@@//data.txt {v1_sha}")),
+            "expected FILE digest for //:data.txt in marker: {marker_legacy}"
+        );
+        assert!(
+            marker_legacy.contains("FILE:@@//missing.txt ENOENT"),
+            "expected ENOENT for //:missing.txt in marker: {marker_legacy}"
+        );
+        assert!(
+            marker_legacy.contains("FILE:@@//subdir DIR"),
+            "expected DIR for //:subdir in marker: {marker_legacy}"
+        );
+
+        // 3. Unix I/O errors during `maybe_watch` (symlink loop `ELOOP` and unreadable `0o000`
+        //    file) propagate as Starlark evaluation errors instead of being swallowed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+
+            symlink("loop_b", ws.join("loop_a")).unwrap();
+            symlink("loop_a", ws.join("loop_b")).unwrap();
+            write(
+                &ws,
+                "loop.bzl",
+                concat!(
+                    "def _impl(rctx):\n",
+                    "    rctx.path(Label('//:loop_a'))\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "loop_r = repository_rule(implementation = _impl)\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                "module(name = 'root')\nloop_r = use_repo_rule('//:loop.bzl', 'loop_r')\nloop_r(name = 'lp')\n",
+            );
+            let res_loop = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt_loop = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_loop"),
+                    workspace_root: ws.clone(),
+                    incompatible_no_implicit_watch_label: false,
+                    ..Default::default()
+                },
+                res_loop,
+            );
+            let err_loop = rt_loop.fetch_repo("+loop_r+lp").unwrap_err();
+            assert!(
+                err_loop.contains("java.io.IOException:"),
+                "expected IOException from symlink-loop Label watch, got: {err_loop}"
+            );
+
+            // `recorded_inputs_outdated` also reports stat failure instead of matching ENOENT.
+            let outdated = crate::lockfile::recorded_inputs_outdated(
+                &["FILE:@@//loop_a ENOENT".to_string()],
+                &BTreeMap::new(),
+                &ws,
+                &base.join("ob_loop/external"),
+            );
+            assert!(
+                outdated
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("failed to stat @@//loop_a:")),
+                "expected stat failure for symlink loop, got: {outdated:?}"
+            );
+
+            // Non-root unreadable existing file (`chmod 0o000`) also propagates `IOException`
+            // from `path(Label(...))` when implicit label watching is enabled, and from `watch()`.
+            let unreadable = ws.join("secret.bin");
+            std::fs::write(&unreadable, b"top-secret").unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read(&unreadable).is_err() {
+                write(
+                    &ws,
+                    "unreadable.bzl",
+                    concat!(
+                        "def _impl(rctx):\n",
+                        "    rctx.path(Label('//:secret.bin'))\n",
+                        "    rctx.file('BUILD.bazel', '')\n",
+                        "unreadable_r = repository_rule(implementation = _impl)\n",
+                    ),
+                );
+                write(
+                    &ws,
+                    "MODULE.bazel",
+                    "module(name = 'root')\nunreadable_r = use_repo_rule('//:unreadable.bzl', 'unreadable_r')\nunreadable_r(name = 'ur')\n",
+                );
+                let res_ur = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+                let rt_ur = Rt::new(
+                    ExternalOptions {
+                        output_base: base.join("ob_ur"),
+                        workspace_root: ws.clone(),
+                        incompatible_no_implicit_watch_label: false,
+                        ..Default::default()
+                    },
+                    res_ur,
+                );
+                let err_ur = rt_ur.fetch_repo("+unreadable_r+ur").unwrap_err();
+                assert!(
+                    err_ur.contains("java.io.IOException:"),
+                    "expected IOException when watching unreadable Label file, got: {err_ur}"
+                );
+            }
+            let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -75,7 +75,7 @@ impl Netrc {
                     let name = tokens[pos].clone();
                     pos += 1;
                     let machine = parse_machine_tokens(&name, &tokens, &mut pos)?;
-                    machines.insert(name, machine);
+                    machines.insert(name.to_ascii_lowercase(), machine);
                 }
                 "default" => {
                     let machine = parse_machine_tokens("default", &tokens, &mut pos)?;
@@ -93,10 +93,11 @@ impl Netrc {
         })
     }
 
-    /// Read and parse a `.netrc` file from disk.
+    /// Read and parse a `.netrc` file from disk (decoded as ISO-8859-1 like `NetrcParser`).
     pub fn from_file(path: &Path) -> Result<Self, String> {
-        let content = std::fs::read_to_string(path)
+        let bytes = std::fs::read(path)
             .map_err(|e| format!("Failed to read .netrc at {}: {e}", path.display()))?;
+        let content: String = bytes.into_iter().map(|b| b as char).collect();
         Self::parse(&content)
     }
 
@@ -168,11 +169,12 @@ impl Netrc {
     }
 
     /// Look up credential for a host or URI host (`URI.getHost()` semantics: lowercased,
-    /// percent-decoded, IPv6 brackets stripped).
+    /// percent-decoded, IPv6 brackets stripped, case-insensitive machine matching).
     pub fn get_credential(&self, host: &str) -> Option<&NetrcMachine> {
         let normalized = normalize_uri_host(host);
         self.machines
             .get(&normalized)
+            .or_else(|| self.machines.get(&host.to_ascii_lowercase()))
             .or_else(|| self.machines.get(host))
             .or(self.default_machine.as_ref())
     }
@@ -760,7 +762,27 @@ default login defuser password defpass
                 "Basic OmZvb2Jhcg==".to_string()
             )]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    #[test]
+    fn netrc_latin1_file_and_case_insensitive_machine_lookup() {
+        let dir = std::env::temp_dir().join(format!("zel-netrc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let netrc_path = dir.join(".netrc");
+        // Write raw ISO-8859-1 byte 0xe9 ('é') in password and uppercase machine host.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(b"machine Example.ORG login alice password s");
+        raw.push(0xe9);
+        raw.extend_from_slice(b"cret\n");
+        std::fs::write(&netrc_path, &raw).unwrap();
+
+        let netrc = Netrc::from_file(&netrc_path).unwrap();
+        let cred = netrc.get_credential("example.org").unwrap();
+        assert_eq!(cred.login.as_deref(), Some("alice"));
+        assert_eq!(cred.password.as_deref(), Some("sécret"));
+        assert!(netrc.get_credential("EXAMPLE.ORG").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -893,6 +915,60 @@ default login defuser password defpass
             hdrs,
             vec![("Authorization".to_string(), "Bearer RETRIED".to_string())]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_retries_transient_etxtbsy() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!(
+            "zel-netrc-etxtbsy-unit-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("helper.sh");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_writer = Arc::clone(&barrier);
+        let helper_writer = helper.clone();
+
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&helper_writer)
+                .unwrap();
+            file.write_all(
+                b"#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer RETRY_OK\"]}}'\n",
+            )
+            .unwrap();
+            std::fs::set_permissions(&helper_writer, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            barrier_writer.wait();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(file);
+        });
+
+        barrier.wait();
+        let hdrs = resolve_auth_headers(
+            "https://example.com/modules/a/1.0/MODULE.bazel",
+            &[("example.com".to_string(), helper)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert_eq!(
+            hdrs,
+            vec![("Authorization".to_string(), "Bearer RETRY_OK".to_string())]
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

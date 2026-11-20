@@ -2010,3 +2010,125 @@ fn enum_lists_are_joined_like_bazel() {
     );
     assert_eq!(super::join_english_list(&["a"]), "a");
 }
+
+#[test]
+fn show_repo_overlapping_unique_prefix_falls_back_to_shorter_owner_and_provider_spec() {
+    let mut res = mvs_resolution("overlap");
+    let short_id = ExtensionId {
+        bzl_file: "@@//:defs.bzl".into(),
+        name: "//:defs.bzl _tool".into(),
+        isolation_key: None,
+    };
+    let long_id = ExtensionId {
+        bzl_file: "@@//:ext.bzl".into(),
+        name: "_tool".into(),
+        isolation_key: Some((crate::model::ModuleKey::root(), "iso_ext".into())),
+    };
+    res.extension_unique_names
+        .insert(short_id.clone(), "+_tool".into());
+    res.extension_unique_names
+        .insert(long_id.clone(), "+_tool+++iso_ext".into());
+
+    let short_owned_canon = "+_tool+++iso_ext+from_short";
+    let mut specs = BTreeMap::new();
+    specs.insert(
+        short_owned_canon.to_string(),
+        RepoSpec::new(
+            "@@//:defs.bzl",
+            "_tool",
+            vec![("name".into(), AttrVal::Str("++iso_ext+from_short".into()))],
+        ),
+    );
+
+    // 1. Longer `{unique}+` prefix has `generated_repos = Some(...)` without this repo:
+    //    `repo_definition` must fall back to the shorter owning prefix `+_tool`.
+    let provider_both = TestProvider {
+        specs: specs.clone(),
+        repos: vec![
+            (long_id.clone(), vec!["other".into()]),
+            (short_id.clone(), vec!["++iso_ext+from_short".into()]),
+        ],
+    };
+    let out = run_mod(
+        &res,
+        "show_repo",
+        &[format!("@@{short_owned_canon}")],
+        &ModOptions::default(),
+        &provider_both,
+        &provider_both,
+    )
+    .unwrap();
+    assert!(
+        out.contains("_original_name = \"++iso_ext+from_short\""),
+        "stdout: {out}"
+    );
+
+    // 2. Longer `{unique}+` prefix has `generated_repos = None`: still falls back to `short_id`.
+    let provider_missing_long = TestProvider {
+        specs: specs.clone(),
+        repos: vec![(short_id, vec!["++iso_ext+from_short".into()])],
+    };
+    let out2 = run_mod(
+        &res,
+        "show_repo",
+        &[format!("@@{short_owned_canon}")],
+        &ModOptions::default(),
+        &provider_missing_long,
+        &provider_missing_long,
+    )
+    .unwrap();
+    assert!(
+        out2.contains("_original_name = \"++iso_ext+from_short\""),
+        "stdout: {out2}"
+    );
+
+    // 3. No extension claims ownership (`NoExtensionInfo`), but `provider.repo_spec` supplies a spec:
+    //    `repo_definition` falls back to `provider.repo_spec` with `original_name = None`.
+    let provider_spec_only = TestProvider {
+        specs,
+        repos: vec![],
+    };
+    let out3 = run_mod(
+        &res,
+        "show_repo",
+        &[format!("@@{short_owned_canon}")],
+        &ModOptions::default(),
+        &provider_spec_only,
+        &super::NoExtensionInfo,
+    )
+    .unwrap();
+    assert!(
+        out3.contains("name = \"+_tool+++iso_ext+from_short\"") && !out3.contains("_original_name"),
+        "stdout: {out3}"
+    );
+}
+
+#[test]
+fn show_repo_proto_serializes_i32_ints_and_int_lists_without_truncating_bigint() {
+    let big = zel_starlark::BigInt::from_str_radix("99999999999999999999999", 10).unwrap();
+    let def = super::RepoDefinition::Found {
+        name: "my_repo+".into(),
+        original_name: None,
+        spec: RepoSpec::new(
+            "@@//:r.bzl",
+            "r",
+            vec![
+                ("ok_min".into(), AttrVal::Int(i64::from(i32::MIN))),
+                ("ok_max".into(), AttrVal::Int(i64::from(i32::MAX))),
+                (
+                    "nums".into(),
+                    AttrVal::List(vec![AttrVal::Int(7), AttrVal::Int(-3)]),
+                ),
+                ("too_wide_i64".into(), AttrVal::Int(i64::from(i32::MAX) + 1)),
+                ("too_wide_big".into(), AttrVal::BigInt(big)),
+            ],
+        ),
+    };
+    let json = super::repo::print_streamed_jsonproto(&[("@my_repo", &def)], "/tmp/ext");
+    assert!(json.contains("\"ok_min\""), "{json}");
+    assert!(json.contains("-2147483648"), "{json}");
+    assert!(json.contains("2147483647"), "{json}");
+    assert!(json.contains("INTEGER_LIST"), "{json}");
+    assert!(!json.contains("\"too_wide_i64\""), "{json}");
+    assert!(!json.contains("\"too_wide_big\""), "{json}");
+}

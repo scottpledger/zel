@@ -489,18 +489,45 @@ fn repo_definition(
             });
         }
     }
-    // Extension-generated repo: `<unique name>+<internal name>`.
+    // Extension-generated repo: `<unique name>+<internal name>`. Check matching `<unique>+`
+    // candidates from longest prefix to shortest for actual ownership in `generated_repos`,
+    // falling back to shorter prefixes and finally `provider.repo_spec` when a longer prefix
+    // does not own `canonical`.
+    let mut candidates: Vec<(usize, ExtensionId, &str)> = Vec::new();
+    for id in res
+        .extension_ids()
+        .into_iter()
+        .chain(res.extension_unique_names.keys().cloned())
+        .chain(insp.extension_ids())
+        .chain(insp.extension_unique_names.keys().cloned())
+    {
+        if candidates.iter().any(|(_, existing, _)| existing == &id) {
+            continue;
+        }
+        let Some(unique) = res
+            .extension_unique_names
+            .get(&id)
+            .or_else(|| insp.extension_unique_names.get(&id))
+        else {
+            continue;
+        };
+        let Some(rest) = canonical
+            .strip_prefix(unique.as_str())
+            .and_then(|s| s.strip_prefix('+'))
+        else {
+            continue;
+        };
+        candidates.push((unique.len(), id, rest));
+    }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
     let mut original_name = None;
-    for (id, unique) in &insp.extension_unique_names {
-        if let Some(rest) = canonical.strip_prefix(&format!("{unique}+")) {
-            if ext_info
-                .generated_repos(id)
-                .map(|r| r.iter().any(|x| x == rest))
-                .unwrap_or(false)
-            {
-                original_name = Some(rest.to_string());
-                break;
-            }
+    for (_, id, rest) in &candidates {
+        let owns = ext_info
+            .generated_repos(id)
+            .is_some_and(|r| r.iter().any(|x| x == rest));
+        if owns {
+            original_name = Some((*rest).to_string());
+            break;
         }
     }
     let spec = provider.repo_spec(canonical)?;

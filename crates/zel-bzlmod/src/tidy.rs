@@ -55,34 +55,10 @@ pub(crate) fn fixup_for(
                         .map(|v| v.into_iter().collect()),
                 )
             } else {
-                let imports_of = |dev: bool| -> BTreeSet<String> {
-                    usage
-                        .proxies
-                        .iter()
-                        .filter(|p| p.dev_dependency == dev)
-                        .flat_map(|p| p.imports.iter().map(|(_, e)| e.clone()))
-                        .collect()
-                };
-                (
-                    Some(imports_of(false).intersection(all_repos).cloned().collect()),
-                    Some(imports_of(true).intersection(all_repos).cloned().collect()),
-                )
+                (None, None)
             }
         }
-        None => {
-            let imports_of = |dev: bool| -> BTreeSet<String> {
-                usage
-                    .proxies
-                    .iter()
-                    .filter(|p| p.dev_dependency == dev)
-                    .flat_map(|p| p.imports.iter().map(|(_, e)| e.clone()))
-                    .collect()
-            };
-            (
-                Some(imports_of(false).intersection(all_repos).cloned().collect()),
-                Some(imports_of(true).intersection(all_repos).cloned().collect()),
-            )
-        }
+        None => (None, None),
     };
     let (Some(expected), Some(expected_dev)) = (deps, dev_deps) else {
         return Ok(None);
@@ -526,7 +502,7 @@ mod tests {
     #[test]
     fn test_tidy_removes_invalid_use_repo() {
         use crate::commands::run_bzlmod_command;
-        crate::resolve::HERMETIC_BAZEL_TOOLS.with(|h| h.set(true));
+        let _hermetic = crate::resolve::scoped_hermetic_bazel_tools();
 
         let temp = std::env::temp_dir().join(format!("tidy_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);

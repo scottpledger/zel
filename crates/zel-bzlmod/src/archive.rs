@@ -1043,7 +1043,7 @@ fn extract_entries(
                 symlinks.push((out_path, final_target));
             }
             Kind::Hardlink(target) => {
-                let tdp = deprefix(target, &prefix_segs, opts.strip_components);
+                let tdp = deprefix(target, &prefix_segs, 0);
                 if tdp.segs.first().map(|s| s == "..").unwrap_or(false) {
                     return Err(format!(
                         "Tar entries cannot refer to files outside of their directory: {} has a link {} pointing to {}",
@@ -1172,6 +1172,7 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
     let mut pending_x = false;
     let mut entries = Vec::new();
     let mut pos = 0usize;
+    let mut global_pax: BTreeMap<String, String> = BTreeMap::new();
     let mut pax: BTreeMap<String, String> = BTreeMap::new();
     let mut long_name: Option<String> = None;
     let mut long_link: Option<String> = None;
@@ -1204,9 +1205,13 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
                 name = format!("{}/{}", p, name);
             }
         }
-        if let Some(s) = pax.get("size") {
-            if let Ok(v) = s.parse() {
-                size = v;
+        if !matches!(typeflag, b'x' | b'X' | b'g' | b'L' | b'K') {
+            if let Some(s) = pax.get("size").or_else(|| global_pax.get("size")) {
+                if !s.is_empty() {
+                    if let Ok(v) = s.parse() {
+                        size = v;
+                    }
+                }
             }
         }
         let mut cur = pos + 512;
@@ -1248,12 +1253,23 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
             .ok_or("Unexpected end of tar archive")?;
         pos = data_start + size.div_ceil(512) * 512;
         match typeflag {
-            b'x' => {
-                pax = parse_pax(&buf[data_start..data_end])?;
+            b'x' | b'X' => {
+                for (k, v) in parse_pax(&buf[data_start..data_end])? {
+                    pax.insert(k, v);
+                }
                 pending_x = true;
                 continue;
             }
-            b'g' => continue,
+            b'g' => {
+                for (k, v) in parse_pax(&buf[data_start..data_end])? {
+                    if v.is_empty() {
+                        global_pax.remove(&k);
+                    } else {
+                        global_pax.insert(k, v);
+                    }
+                }
+                continue;
+            }
             b'L' => {
                 long_name = Some(cstr(&buf[data_start..data_end]));
                 continue;
@@ -1274,11 +1290,21 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
         // A name from a PAX `path` record is UTF-8; USTAR/GNU names are decoded with Bazel's marked latin-1
         // charset, so commons-compress' `isDirectory()` (name ends with "/") only holds for PAX names.
         let mut name_is_pax = false;
-        if let Some(p) = pax.get("path") {
+        let effective_path = match pax.get("path") {
+            Some(p) if p.is_empty() => None,
+            Some(p) => Some(p),
+            None => global_pax.get("path").filter(|p| !p.is_empty()),
+        };
+        if let Some(p) = effective_path {
             name = p.clone();
             name_is_pax = true;
         }
-        if let Some(l) = pax.get("linkpath") {
+        let effective_link = match pax.get("linkpath") {
+            Some(l) if l.is_empty() => None,
+            Some(l) => Some(l),
+            None => global_pax.get("linkpath").filter(|l| !l.is_empty()),
+        };
+        if let Some(l) = effective_link {
             link = l.clone();
         }
         pax.clear();
@@ -1543,8 +1569,9 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
         }
         let _ = csize;
 
-        // permissions (Bazel ZipDecompressor.getPermissions)
-        let unix = (made_by >> 8) == 3;
+        // permissions (Bazel ZipDecompressor.getPermissions: high 16 bits of external attributes
+        // are interpreted as a Unix mode regardless of central-directory host OS).
+        let _ = made_by;
         let mut perm = eattr >> 16;
         let is_dir_name = name.ends_with('/');
         let mut kind = Kind::File;
@@ -1552,14 +1579,10 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
             kind = Kind::Dir;
             perm = 0o755;
         } else if perm != 0 {
-            if unix {
-                match perm & 0o170000 {
-                    0o040000 => kind = Kind::Dir,
-                    0o120000 => kind = Kind::Symlink(String::new()),
-                    _ => {}
-                }
-            } else if (perm & 0o170000) == 0o040000 {
-                kind = Kind::Dir;
+            match perm & 0o170000 {
+                0o040000 => kind = Kind::Dir,
+                0o120000 => kind = Kind::Symlink(String::new()),
+                _ => {}
             }
         } else {
             perm = 0o755;
@@ -1838,7 +1861,7 @@ pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions) -> Result<(),
             extract_single_file(data, fname, ".gz", archive, &root, opts)
         }
         ArchiveKind::TarXz => {
-            let tar = tar_stream_or_error(crate::codecs::xz_decompress(&raw))
+            let tar = tar_stream_or_error(crate::codecs::xz_decompress_concatenated(&raw))
                 .map_err(|e| format!("{}: {}", archive.display(), e))?;
             drop(raw);
             extract_tar(&tar, archive, &root, opts)
@@ -2933,6 +2956,159 @@ mod tests {
         assert_eq!(normalize("a/../b"), vec!["b"]);
         assert_eq!(normalize("../a"), vec!["..", "a"]);
         assert!(normalize("").is_empty());
+    }
+
+    #[test]
+    fn pax_global_headers_hardlink_strip_prefix_and_concatenated_tar_xz() {
+        let d = tmpdir("pax-global-concat");
+
+        let pax_rec = |k: &str, v: &str| -> Vec<u8> {
+            let body = format!("{k}={v}\n");
+            let mut len = body.len() + 3;
+            loop {
+                let s = format!("{len} {body}");
+                if s.len() == len {
+                    return s.into_bytes();
+                }
+                len = s.len();
+            }
+        };
+
+        // Global PAX header sets path="pkg/from_global.txt", then a second global PAX clears path="",
+        // and local 'X' overrides path="pkg/from_upper_x.txt"; plus hardlink & symlink under strip_prefix="pkg".
+        let mut t = Vec::new();
+        tar_add(
+            &mut t,
+            "pax_global_header",
+            b'g',
+            &pax_rec("path", "pkg/from_global.txt"),
+            0o644,
+            "",
+        );
+        tar_add(&mut t, "ignored_name", b'0', b"global-1", 0o644, "");
+        // Clear global path with empty value `path=\n`, then use Solaris/STAR 'X' local extended header.
+        tar_add(
+            &mut t,
+            "pax_global_header",
+            b'g',
+            &pax_rec("path", ""),
+            0o644,
+            "",
+        );
+        tar_add(
+            &mut t,
+            "PaxHeader",
+            b'X',
+            &pax_rec("path", "pkg/sub/target.txt"),
+            0o644,
+            "",
+        );
+        tar_add(&mut t, "placeholder", b'0', b"hard-body", 0o644, "");
+        // Hardlink linkname in tar is archive-root-relative ("pkg/sub/target.txt"), so strip_prefix="pkg"
+        // resolves it against stripped entry paths without double-stripping linkname!
+        tar_add(
+            &mut t,
+            "pkg/hardlink.txt",
+            b'1',
+            b"",
+            0o644,
+            "pkg/sub/target.txt",
+        );
+        #[cfg(unix)]
+        tar_add(&mut t, "pkg/abs_sym", b'2', b"", 0o777, "/usr/bin/env");
+        tar_end(&mut t);
+
+        fs::write(d.join("pax.tar"), &t).unwrap();
+        let opts = ExtractOptions {
+            strip_prefix: "pkg".to_string(),
+            ..Default::default()
+        };
+        extract(&d.join("pax.tar"), &d.join("out_pax"), &opts).unwrap();
+        assert_eq!(
+            fs::read(d.join("out_pax/from_global.txt")).unwrap(),
+            b"global-1"
+        );
+        assert_eq!(
+            fs::read(d.join("out_pax/hardlink.txt")).unwrap(),
+            b"hard-body"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(d.join("out_pax/abs_sym")).unwrap(),
+            d.join("out_pax/usr/bin/env"),
+            "absolute symlink target must rebase under dest without stripping components"
+        );
+
+        // Concatenated XZ streams with 4-byte zero stream padding in a .tar.xz archive.
+        if have("xz") {
+            let mut tar_bytes = Vec::new();
+            tar_add(&mut tar_bytes, "first.txt", b'0', b"part-one", 0o644, "");
+            tar_add(&mut tar_bytes, "second.txt", b'0', b"part-two", 0o644, "");
+            tar_end(&mut tar_bytes);
+            let mid = 512 + 512; // split right between first file's blocks and second file's header
+            let xz_compress_part = |chunk: &[u8], name: &str| -> Vec<u8> {
+                let p = d.join(name);
+                fs::write(&p, chunk).unwrap();
+                let out = Command::new("xz").arg("-c").arg(&p).output().unwrap();
+                assert!(out.status.success());
+                out.stdout
+            };
+            let mut concat_xz = xz_compress_part(&tar_bytes[..mid], "part_one.bin");
+            concat_xz.extend_from_slice(&[0, 0, 0, 0]); // 4-byte zero padding between streams
+            concat_xz.extend_from_slice(&xz_compress_part(&tar_bytes[mid..], "part_two.bin"));
+            fs::write(d.join("concat.tar.xz"), &concat_xz).unwrap();
+            extract(
+                &d.join("concat.tar.xz"),
+                &d.join("out_xz"),
+                &ExtractOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(fs::read(d.join("out_xz/first.txt")).unwrap(), b"part-one");
+            assert_eq!(fs::read(d.join("out_xz/second.txt")).unwrap(), b"part-two");
+        }
+
+        // Cross-OS zip symlink entry with made_by OS = 0 (FAT/Windows) but Unix S_IFLNK mode in external attributes.
+        #[cfg(unix)]
+        {
+            let target = b"real.txt";
+            let mut z = Vec::new();
+            // Local file header for "link.txt" -> "real.txt"
+            z.extend_from_slice(&[0x50, 0x4b, 3, 4, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            z.extend_from_slice(&crc32(target).to_le_bytes());
+            z.extend_from_slice(&(target.len() as u32).to_le_bytes());
+            z.extend_from_slice(&(target.len() as u32).to_le_bytes());
+            z.extend_from_slice(&(8u16).to_le_bytes());
+            z.extend_from_slice(&0u16.to_le_bytes());
+            z.extend_from_slice(b"link.txt");
+            z.extend_from_slice(target);
+            let cd_off = z.len();
+            // Central directory header with made_by = 20 (OS = 0, non-Unix!) and eattr = 0o120777 << 16
+            z.extend_from_slice(&[0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            z.extend_from_slice(&crc32(target).to_le_bytes());
+            z.extend_from_slice(&(target.len() as u32).to_le_bytes());
+            z.extend_from_slice(&(target.len() as u32).to_le_bytes());
+            z.extend_from_slice(&(8u16).to_le_bytes());
+            z.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
+            z.extend_from_slice(&(0o120777u32 << 16).to_le_bytes());
+            z.extend_from_slice(&0u32.to_le_bytes());
+            z.extend_from_slice(b"link.txt");
+            let cd_size = z.len() - cd_off;
+            z.extend_from_slice(&[0x50, 0x4b, 5, 6, 0, 0, 0, 0, 1, 0, 1, 0]);
+            z.extend_from_slice(&(cd_size as u32).to_le_bytes());
+            z.extend_from_slice(&(cd_off as u32).to_le_bytes());
+            z.extend_from_slice(&[0, 0]);
+            fs::write(d.join("sym.zip"), &z).unwrap();
+            extract(
+                &d.join("sym.zip"),
+                &d.join("out_zip"),
+                &ExtractOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                fs::read_link(d.join("out_zip/link.txt")).unwrap(),
+                PathBuf::from("real.txt")
+            );
+        }
     }
 }
 

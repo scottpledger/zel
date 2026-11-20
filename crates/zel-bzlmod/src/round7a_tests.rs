@@ -218,27 +218,36 @@ fn isolated_extension_usages_flag_gates_isolate() {
 
 #[test]
 fn default_repository_cache_follows_output_user_root() {
-    let p = crate::session::default_repository_cache(std::path::Path::new("/x/ob/hash"));
-    assert!(p.ends_with("cache/repos/v1"));
-    crate::session::set_output_user_root(std::path::Path::new("/the/user/root"));
-    assert_eq!(
-        crate::session::default_repository_cache(std::path::Path::new("/x/ob/hash")),
-        std::path::PathBuf::from("/the/user/root/cache/repos/v1")
-    );
+    {
+        let _unset = crate::session::scoped_output_user_root(None);
+        let p = crate::session::default_repository_cache(std::path::Path::new("/x/ob/hash"));
+        assert_eq!(p, std::path::PathBuf::from("/x/ob/cache/repos/v1"));
+    }
+    {
+        let _scoped =
+            crate::session::scoped_output_user_root(Some(std::path::Path::new("/the/user/root")));
+        assert_eq!(
+            crate::session::default_repository_cache(std::path::Path::new("/x/ob/hash")),
+            std::path::PathBuf::from("/the/user/root/cache/repos/v1")
+        );
+    }
+    let restored = crate::session::default_repository_cache(std::path::Path::new("/x/ob/hash"));
+    assert_eq!(restored, std::path::PathBuf::from("/x/ob/cache/repos/v1"));
 }
 
 #[test]
 fn strict_bazel_tools_closure_requires_registry_modules() {
-    use crate::resolve::{resolve, ResolveOptions, STRICT_BAZEL_TOOLS};
+    use crate::resolve::{resolve, scoped_strict_bazel_tools, ResolveOptions};
     let d = std::env::temp_dir().join(format!("zel-7a-strict-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(d.join("reg")).unwrap();
     std::fs::write(d.join("MODULE.bazel"), "module(name = \"r\")\n").unwrap();
     let mut o = ResolveOptions::new(&d);
     o.registries = vec![crate::file_url_for_path(&d.join("reg"))];
-    STRICT_BAZEL_TOOLS.with(|h| h.set(true));
-    let e = resolve(&o).expect_err("strict closure must fail on an empty registry");
-    STRICT_BAZEL_TOOLS.with(|h| h.set(false));
+    let e = {
+        let _strict = scoped_strict_bazel_tools();
+        resolve(&o).expect_err("strict closure must fail on an empty registry")
+    };
     assert!(
         e.message.contains("not found in registries"),
         "{}",

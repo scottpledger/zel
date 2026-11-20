@@ -58,30 +58,28 @@ pub struct PendingDownload {
     pub canonical: String,
 }
 
-static PENDING_DOWNLOADS: Mutex<Vec<Option<PendingDownload>>> = Mutex::new(Vec::new());
-
-fn register_pending_download(pd: PendingDownload) -> usize {
-    let mut list = PENDING_DOWNLOADS.lock().unwrap();
-    list.push(Some(pd));
-    list.len() - 1
+fn register_pending_download(rt: &Arc<Rt>, pd: PendingDownload) -> usize {
+    let mut st = rt.state.lock().unwrap();
+    st.pending_downloads.push(Some(pd));
+    st.pending_downloads.len() - 1
 }
 
-fn take_pending_download(id_str: &str) -> Result<PendingDownload, StarlarkError> {
+fn take_pending_download(rt: &Arc<Rt>, id_str: &str) -> Result<PendingDownload, StarlarkError> {
     let tok = id_str.split('|').next().unwrap_or(id_str);
     let idx: usize = tok
         .parse()
         .map_err(|_| StarlarkError("invalid pending_download id".into()))?;
-    let mut list = PENDING_DOWNLOADS.lock().unwrap();
-    if idx >= list.len() || list[idx].is_none() {
+    let mut st = rt.state.lock().unwrap();
+    if idx >= st.pending_downloads.len() || st.pending_downloads[idx].is_none() {
         return Err(StarlarkError(
             "pending_download has already completed or is invalid".into(),
         ));
     }
-    Ok(list[idx].take().unwrap())
+    Ok(st.pending_downloads[idx].take().unwrap())
 }
 
 fn wait_pending_download(rt: &Arc<Rt>, id_str: &str) -> Result<Value, StarlarkError> {
-    let mut pd = take_pending_download(id_str)?;
+    let mut pd = take_pending_download(rt, id_str)?;
     let Some(rx) = pd.receiver.take() else {
         return err("pending_download has no receiver");
     };
@@ -503,7 +501,7 @@ pub fn validate_repo_rule_call(
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_default();
     // Implicit attributes of every rule class; `repo_mapping` is not available to bzlmod repo rule calls.
-    let implicit = ["tags", "visibility"];
+    let implicit = ["tags", "visibility", "deprecation"];
     let mut kw2 = kw.clone();
     for i in implicit {
         kw2.remove(i);
@@ -548,22 +546,143 @@ pub fn validate_repo_rule_call(
         let Some((_, d)) = defs2.iter().find(|(n, _)| n == k) else {
             continue;
         };
-        if let Some((ty, what, bad)) = repo_attr_type_error(&d.kind, v) {
-            let what = if what == "attribute" {
-                format!("attribute '{k}'")
-            } else {
-                what
-            };
-            let (r, t) = match bad {
-                Some((r, t)) => (r, t),
-                None => (v.repr(), v.type_name().to_string()),
-            };
+        if let Some(msg) = repo_attr_coercion_error(k, &d.kind, v) {
             return err(format!(
-                "in call to '{rule}' repo rule with name '{rname}', expected value of type '{ty}' for {what}, but got {r} ({t})"
+                "in call to '{rule}' repo rule with name '{rname}', {msg}"
             ));
         }
     }
     validate_attrs(rule, &defs2, &kw2)
+}
+
+/// Argument validation for a module extension tag call (`TypeCheckedTag.create`):
+/// unlike `repository_rule` calls, tags have NO implicit `name`, `tags`, `visibility`,
+/// `deprecation`, or `repo_mapping` attributes unless explicitly declared in `tag_class(attrs = ...)`.
+pub fn validate_tag_call(
+    tag_name: &str,
+    defs: &[(String, crate::rt::AttrDef)],
+    kw: &BTreeMap<String, Value>,
+    order: &[String],
+) -> Result<(), StarlarkError> {
+    let keys: Vec<&String> = if !order.is_empty() {
+        let mut v: Vec<&String> = order.iter().filter(|k| kw.contains_key(*k)).collect();
+        for k in kw.keys() {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+        }
+        v
+    } else {
+        kw.keys().collect()
+    };
+    for k in keys {
+        if !defs.iter().any(|(n, _)| n == k) {
+            let names: Vec<&str> = defs.iter().map(|(n, _)| n.as_str()).collect();
+            let hint = crate::ctxargs::did_you_mean(k, &names);
+            return err(format!(
+                "in '{tag_name}' tag, unknown attribute '{k}' provided{hint}"
+            ));
+        }
+    }
+    for (k, v) in kw {
+        if matches!(v, Value::None) {
+            continue;
+        }
+        let Some((_, d)) = defs.iter().find(|(n, _)| n == k) else {
+            continue;
+        };
+        if let Some(msg) = repo_attr_coercion_error(k, &d.kind, v) {
+            return err(format!("in '{tag_name}' tag, {msg}"));
+        }
+    }
+    for (n, d) in defs {
+        match kw.get(n) {
+            None | Some(Value::None) => {
+                if d.mandatory {
+                    return err(format!(
+                        "in '{tag_name}' tag, mandatory attribute '{n}' isn't being specified"
+                    ));
+                }
+            }
+            Some(v) => check_type(tag_name, n, d, v)?,
+        }
+    }
+    Ok(())
+}
+
+/// Validates label syntax and repo visibility on a tag call (`TypeCheckedTag.create`).
+pub fn check_tag_labels(
+    rt: &Arc<Rt>,
+    tag_name: &str,
+    defs: &[(String, crate::rt::AttrDef)],
+    kw: &BTreeMap<String, Value>,
+    owner: &str,
+) -> Result<(), StarlarkError> {
+    for (k, v) in kw {
+        let Some((_, d)) = defs.iter().find(|(n, _)| n == k) else {
+            continue;
+        };
+        let a = AttrVal::from_value(v);
+        let mut raws: Vec<String> = vec![];
+        match (d.kind.as_str(), &a) {
+            ("label", AttrVal::Str(s) | AttrVal::Label(s)) => raws.push(s.clone()),
+            ("label_list", AttrVal::List(l)) => {
+                raws.extend(l.iter().filter_map(|e| e.as_str().map(String::from)))
+            }
+            ("label_keyed_string_dict", AttrVal::Dict(m) | AttrVal::LabelDict(m)) => {
+                raws.extend(m.iter().map(|(k, _)| k.clone()))
+            }
+            ("string_keyed_label_dict", AttrVal::Dict(m)) => {
+                raws.extend(m.iter().filter_map(|(_, e)| e.as_str().map(String::from)))
+            }
+            ("label_list_dict", AttrVal::Dict(m)) => {
+                for (_, e) in m {
+                    if let AttrVal::List(l) = e {
+                        raws.extend(l.iter().filter_map(|e| e.as_str().map(String::from)));
+                    }
+                }
+            }
+            _ => {}
+        }
+        for raw in raws {
+            if !raw.starts_with('@')
+                && !raw.starts_with("//")
+                && !raw.starts_with(':')
+                && raw.contains(':')
+            {
+                return err(format!(
+                    "in '{tag_name}' tag, invalid label '{raw}' in attribute '{k}': invalid target name '{raw}': target names may not contain ':'"
+                ));
+            }
+            let after_repo = match raw.find("//") {
+                Some(i) if raw.starts_with('@') || raw.starts_with("//") => &raw[i + 2..],
+                _ => raw.as_str(),
+            };
+            if let Some((_, name)) = after_repo.split_once(':') {
+                if name.contains(':') {
+                    return err(format!(
+                        "in '{tag_name}' tag, invalid label '{raw}' in attribute '{k}': invalid target name '{name}': target names may not contain ':'"
+                    ));
+                }
+            }
+            if raw.starts_with('@') && !raw.starts_with("@@") {
+                if let Ok((repo, _, _)) = rt.resolve_label(&raw, owner, "") {
+                    if repo.starts_with("[unknown repo") {
+                        let apparent = raw[1..].split("//").next().unwrap_or("");
+                        let who = if owner.is_empty() {
+                            "the root module".to_string()
+                        } else {
+                            format!("module '{owner}'")
+                        };
+                        return err(format!(
+                            "in '{tag_name}' tag, no repository visible as '@{apparent}' to {who}, but referenced by label '{raw}' in attribute '{k}'"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Label-typed attributes of a repo rule call: target-name syntax and (for calls made from a `MODULE.bazel` file of
@@ -606,6 +725,15 @@ pub fn check_repo_rule_labels(
             _ => {}
         }
         for raw in raws {
+            if !raw.starts_with('@')
+                && !raw.starts_with("//")
+                && !raw.starts_with(':')
+                && raw.contains(':')
+            {
+                return err(format!(
+                    "in call to '{rule}' repo rule with name '{rname}', invalid label '{raw}' in attribute '{k}': invalid target name '{raw}': target names may not contain ':'"
+                ));
+            }
             let after_repo = match raw.find("//") {
                 Some(i) if raw.starts_with('@') || raw.starts_with("//") => &raw[i + 2..],
                 _ => raw.as_str(),
@@ -637,12 +765,12 @@ pub fn check_repo_rule_labels(
     Ok(())
 }
 
-/// `(expected type name, context)` when `v` cannot be coerced to an attribute of `kind`.
-#[allow(clippy::type_complexity)]
-fn repo_attr_type_error(
-    kind: &str,
-    v: &Value,
-) -> Option<(String, String, Option<(String, String)>)> {
+fn attr_val_is_i32(a: &AttrVal) -> bool {
+    matches!(a, AttrVal::Int(i) if i32::try_from(*i).is_ok())
+}
+
+/// Returns Bazel's `Type.convert` error suffix when `v` cannot be coerced to `kind` (`Type.java`).
+fn repo_attr_coercion_error(attr_name: &str, kind: &str, v: &Value) -> Option<String> {
     let a = AttrVal::from_value(v);
     let (ty, elem): (&str, Option<&str>) = match kind {
         "string" | "label" | "output" => ("string", None),
@@ -658,59 +786,137 @@ fn repo_attr_type_error(
         "label_list_dict" => ("dict(string, list(label))", Some("dict")),
         _ => return None,
     };
-    let ok_scalar = |a: &AttrVal, want: &str| match want {
-        "string" => matches!(a, AttrVal::Str(_) | AttrVal::Label(_)),
-        "int" => matches!(a, AttrVal::Int(_)),
-        _ => true,
+    let type_mismatch = |want_ty: &str, what: &str, repr_val: String, got_ty: &str| {
+        format!("expected value of type '{want_ty}' for {what}, but got {repr_val} ({got_ty})")
     };
     match elem {
-        None => {
-            let good = match kind {
-                "int" => matches!(a, AttrVal::Int(_)),
-                "bool" => matches!(a, AttrVal::Bool(_) | AttrVal::Int(0) | AttrVal::Int(1)),
-                _ => matches!(a, AttrVal::Str(_) | AttrVal::Label(_)),
-            };
-            if good {
-                None
-            } else {
-                Some((ty.to_string(), "attribute".to_string(), None))
+        None => match kind {
+            "int" => {
+                if !matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)) {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                } else if !attr_val_is_i32(&a) {
+                    Some(format!(
+                        "for attribute '{attr_name}', got {}, want value in signed 32-bit range",
+                        a.repr()
+                    ))
+                } else {
+                    None
+                }
             }
-        }
+            "bool" => {
+                if matches!(a, AttrVal::Bool(_) | AttrVal::Int(0) | AttrVal::Int(1)) {
+                    None
+                } else {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                }
+            }
+            "string" => {
+                if matches!(a, AttrVal::Str(_)) {
+                    None
+                } else {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                }
+            }
+            _ => {
+                if matches!(a, AttrVal::Str(_) | AttrVal::Label(_)) {
+                    None
+                } else {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                }
+            }
+        },
         Some("dict") => match &a {
             AttrVal::Dict(entries) | AttrVal::LabelDict(entries) => {
                 for (_, val) in entries {
                     let vok = match kind {
-                        "string_list_dict" | "label_list_dict" => {
+                        "string_list_dict" => {
+                            matches!(val, AttrVal::List(l) if l.iter().all(|e| matches!(e, AttrVal::Str(_))))
+                        }
+                        "label_list_dict" => {
                             matches!(val, AttrVal::List(l) if l.iter().all(|e| matches!(e, AttrVal::Str(_) | AttrVal::Label(_))))
                         }
-                        _ => matches!(val, AttrVal::Str(_) | AttrVal::Label(_)),
+                        "string_keyed_label_dict" => {
+                            matches!(val, AttrVal::Str(_) | AttrVal::Label(_))
+                        }
+                        _ => matches!(val, AttrVal::Str(_)),
                     };
                     if !vok {
-                        return Some((
-                            "string".to_string(),
-                            "dict value element".to_string(),
-                            Some((val.repr(), val.type_name().to_string())),
+                        return Some(type_mismatch(
+                            "string",
+                            "dict value element",
+                            val.repr(),
+                            val.type_name(),
                         ));
                     }
                 }
                 None
             }
-            _ => Some((ty.to_string(), "attribute".to_string(), None)),
+            _ => Some(type_mismatch(
+                ty,
+                &format!("attribute '{attr_name}'"),
+                v.repr(),
+                v.type_name(),
+            )),
         },
         Some(el) => match &a {
             AttrVal::List(l) => {
-                for e in l {
-                    if !ok_scalar(e, el) {
-                        return Some((
-                            el.to_string(),
-                            "list element".to_string(),
-                            Some((e.repr(), e.type_name().to_string())),
-                        ));
+                for (idx, e) in l.iter().enumerate() {
+                    if kind == "int_list" {
+                        if !matches!(e, AttrVal::Int(_) | AttrVal::BigInt(_)) {
+                            return Some(type_mismatch(
+                                el,
+                                "list element",
+                                e.repr(),
+                                e.type_name(),
+                            ));
+                        }
+                        if !attr_val_is_i32(e) {
+                            return Some(format!(
+                                "for element {idx} of attribute '{attr_name}', got {}, want value in signed 32-bit range",
+                                e.repr()
+                            ));
+                        }
+                        continue;
+                    }
+                    let scalar_ok = if kind == "string_list" {
+                        matches!(e, AttrVal::Str(_))
+                    } else if el == "string" {
+                        matches!(e, AttrVal::Str(_) | AttrVal::Label(_))
+                    } else {
+                        true
+                    };
+                    if !scalar_ok {
+                        return Some(type_mismatch(el, "list element", e.repr(), e.type_name()));
                     }
                 }
                 None
             }
-            _ => Some((ty.to_string(), "attribute".to_string(), None)),
+            _ => Some(type_mismatch(
+                ty,
+                &format!("attribute '{attr_name}'"),
+                v.repr(),
+                v.type_name(),
+            )),
         },
     }
 }
@@ -725,7 +931,7 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
     };
     match d.kind.as_str() {
         "string" => {
-            if !matches!(a, AttrVal::Str(_) | AttrVal::Label(_)) {
+            if !matches!(a, AttrVal::Str(_)) {
                 return bad("string");
             }
             if !d.values.is_empty() && !d.values.contains(&a) {
@@ -738,8 +944,22 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
             }
         }
         "int" => {
-            if !matches!(a, AttrVal::Int(_)) {
+            if !matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)) {
                 return bad("int");
+            }
+            if !attr_val_is_i32(&a) {
+                return err(format!(
+                    "for attribute '{n}', got {}, want value in signed 32-bit range",
+                    a.repr()
+                ));
+            }
+            if !d.values.is_empty() && !d.values.contains(&a) {
+                return err(format!(
+                    "{rule}: expected value of type '{}' for attribute '{n}' to be one of [{}], but got {}",
+                    "int",
+                    d.values.iter().map(|x| x.repr()).collect::<Vec<_>>().join(", "),
+                    a.repr()
+                ));
             }
         }
         "bool" => {
@@ -752,9 +972,21 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
                 if !d.allow_empty && l.is_empty() {
                     return err(format!("attribute '{n}' in '{rule}' rule may not be empty"));
                 }
-                for e in l {
-                    let ok = if d.kind == "int_list" {
-                        matches!(e, AttrVal::Int(_))
+                for (idx, e) in l.iter().enumerate() {
+                    if d.kind == "int_list" {
+                        if !matches!(e, AttrVal::Int(_) | AttrVal::BigInt(_)) {
+                            return bad(&d.kind);
+                        }
+                        if !attr_val_is_i32(e) {
+                            return err(format!(
+                                "for element {idx} of attribute '{n}', got {}, want value in signed 32-bit range",
+                                e.repr()
+                            ));
+                        }
+                        continue;
+                    }
+                    let ok = if d.kind == "string_list" {
+                        matches!(e, AttrVal::Str(_))
                     } else {
                         matches!(e, AttrVal::Str(_) | AttrVal::Label(_))
                     };
@@ -765,7 +997,11 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
             }
             _ => return bad(&d.kind),
         },
-        "string_dict" | "string_list_dict" | "label_keyed_string_dict" => {
+        "string_dict"
+        | "string_list_dict"
+        | "label_keyed_string_dict"
+        | "string_keyed_label_dict"
+        | "label_list_dict" => {
             if !matches!(a, AttrVal::Dict(_) | AttrVal::LabelDict(_)) {
                 return bad(&d.kind);
             }
@@ -1007,7 +1243,14 @@ impl CtxData {
                 let dir = s_err(rt.fetch_repo(&repo))?;
                 let pkg = l.package_name();
                 let base = if pkg.is_empty() { dir } else { dir.join(pkg) };
-                Ok(base.join(l.name()))
+                let resolved = base.join(l.name());
+                let watch_mode = if rt.opts.incompatible_no_implicit_watch_label {
+                    "no"
+                } else {
+                    "auto"
+                };
+                maybe_watch(rt, self, &resolved, watch_mode)?;
+                Ok(resolved)
             }
             other => err(format!(
                 "path() got argument of type '{}', want 'string', 'Label' or 'path'",
@@ -1171,15 +1414,18 @@ pub(crate) fn facts_op(name: &str, pos: &[Value]) -> Result<Value, StarlarkError
         return err("missing receiver");
     };
     let j = crate::json::Json::parse(id).unwrap_or(crate::json::Json::Null);
-    let dict = crate::json::json_to_starlark(&j);
+    let dict = crate::json::json_to_starlark_facts(&j);
     if name.starts_with("debugprint:") {
         return Ok(str_value(format!("Facts({})", dict.repr())));
     }
+    let Some(key_val) = pos.get(1) else {
+        return err("missing key");
+    };
     let Some(Value::String(k)) = pos.get(1) else {
         return if name.starts_with("contains:") {
             Ok(Value::Bool(false))
         } else {
-            err("Facts keys must be strings")
+            err(format!("key {} not found in Facts", key_val.repr()))
         };
     };
     let Value::Dict(d) = &dict else {
@@ -1306,19 +1552,12 @@ fn dispatch_object_inner(
             if !is_method {
                 return Ok(Value::BuiltinFunction("host:method:Facts.get".into()));
             }
-            let key = pos
-                .get(1)
-                .or_else(|| kw.get("key"))
-                .cloned()
-                .unwrap_or(Value::None);
-            let default = pos
-                .get(2)
-                .or_else(|| kw.get("default"))
-                .cloned()
-                .unwrap_or(Value::None);
-            let Value::String(_) = key else {
-                return err("Facts.get: key must be a string");
-            };
+            let b = crate::ctxargs::bind_raw("get", "key! default", args, &kw)?;
+            let key = b.get("key").cloned().unwrap_or(Value::None);
+            let default = b.get("default").cloned().unwrap_or(Value::None);
+            if !matches!(key, Value::String(_)) {
+                return Ok(default);
+            }
             return Ok(facts_op("index:Facts", &[pos[0].clone(), key]).unwrap_or(default));
         }
         return err(format!("'Facts' value has no field or method '{member}'"));
@@ -1461,11 +1700,12 @@ fn dispatch_object_inner(
             | "extract"
             | "which"
             | "getenv"
-            | "report_progress"
-            | "load_wasm"
-            | "execute_wasm" => Ok(Value::BuiltinFunction(format!(
+            | "report_progress" => Ok(Value::BuiltinFunction(format!(
                 "host:method:{kind}.{member}"
             ))),
+            "load_wasm" | "execute_wasm" if rt.opts.experimental_repository_ctx_execute_wasm => Ok(
+                Value::BuiltinFunction(format!("host:method:{kind}.{member}")),
+            ),
             "watch" => Ok(Value::BuiltinFunction(format!(
                 "host:method:{kind}.{member}"
             ))),
@@ -1555,7 +1795,11 @@ fn dispatch_object_inner(
                     p.display()
                 ));
             }
-            maybe_watch_tree(rt, &data, &p)?;
+            maybe_watch(rt, &data, &p, "yes")?;
+            if let Some(rel) = repo_cache_friendly_path(rt, &data, &p, "yes")? {
+                let digest = crate::lockfile::compute_dirtree_digest(&p);
+                data.record(format!("DIRTREE:{}", escape_input(&rel)), Some(digest));
+            }
             Ok(Value::None)
         }
         "which" => {
@@ -1568,14 +1812,10 @@ fn dispatch_object_inner(
                     "Program argument of which() may not contain a / or a \\ ('{prog}' given)"
                 ));
             }
-            let path_env = rt.opts.client_env.get("PATH").cloned().unwrap_or_default();
-            for d in path_env.split(':') {
-                let c = Path::new(d).join(&prog);
-                if c.is_file() && is_executable(&c) {
-                    return Ok(path_value(&c));
-                }
+            match find_program_on_path(&prog, &rt.opts.client_env, cfg!(windows)) {
+                Some(c) => Ok(path_value(&c)),
+                None => Ok(Value::None),
             }
-            Ok(Value::None)
         }
         "read" => {
             let v = kwr.get("path").unwrap();
@@ -1733,6 +1973,7 @@ fn dispatch_object_inner(
                     std::fs::write(&to, b"")
                         .map_err(|e| StarlarkError(format!("java.io.IOException: {e}")))?;
                 }
+                maybe_watch(rt, &data, &from, "auto")?;
                 Ok(Value::None)
             }
             #[cfg(all(not(unix), not(windows)))]
@@ -1754,6 +1995,7 @@ fn dispatch_object_inner(
                     std::fs::write(&to, b"")
                         .map_err(|e| StarlarkError(format!("java.io.IOException: {e}")))?;
                 }
+                maybe_watch(rt, &data, &from, "auto")?;
                 Ok(Value::None)
             }
         }
@@ -1946,6 +2188,7 @@ fn dispatch_object_inner(
                 executable: if extract_after { false } else { executable },
                 canonical_id,
                 context: urls.first().cloned().unwrap_or_default(),
+                archive_type: type_suffix.clone().unwrap_or_default(),
             };
             let extract_opts = if extract_after {
                 Some(ExtractOptions {
@@ -1984,10 +2227,13 @@ fn dispatch_object_inner(
                     };
                     let _ = tx.send(r);
                 });
-                let token = register_pending_download(PendingDownload {
-                    receiver: Some(rx),
-                    ..pd
-                });
+                let token = register_pending_download(
+                    rt,
+                    PendingDownload {
+                        receiver: Some(rx),
+                        ..pd
+                    },
+                );
                 return Ok(Value::Host(
                     "pending_download".into(),
                     format!("{}|{}", token, target.display()),
@@ -2056,15 +2302,24 @@ fn dispatch_object_inner(
                     .ok_or_else(|| StarlarkError("patch() missing patch_file".into()))?,
             )?;
             let strip = match arg(args, kwr, 1, "strip") {
-                Some(Value::Int(i)) => i.to_i64().unwrap_or(0),
+                Some(Value::Int(i)) => i
+                    .to_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| {
+                        StarlarkError(format!(
+                            "in call to patch(), parameter 'strip' got {i}, want value in signed 32-bit int range"
+                        ))
+                    })? as i64,
                 _ => 0,
             };
+            let watch = str_arg(&[], kwr, 99, "watch_patch", "auto")?;
+            maybe_watch(rt, &data, &pf, &watch)?;
             let base = match arg(args, kwr, usize::MAX, "directory") {
-                Some(Value::String(d)) if !d.is_empty() => {
-                    data.resolve(rt, &Value::String(d.clone()))?
-                }
-                _ => data.dir.clone(),
+                None => data.dir.clone(),
+                Some(Value::String(d)) if d.is_empty() => data.dir.clone(),
+                Some(d) => data.resolve(rt, d)?,
             };
+            data.check_writable(&base)?;
             s_err(apply_patch(&base, &pf, strip, &rt.opts.client_env))?;
             Ok(Value::None)
         }
@@ -2225,7 +2480,9 @@ fn dispatch_object_inner(
             let path_val = arg(args, kwr, 0, "path")
                 .ok_or_else(|| StarlarkError("load_wasm() missing 'path'".into()))?;
             let alloc_fn = str_arg(args, kwr, 2, "allocate_fn", "allocate")?;
+            let watch = str_arg(&[], kwr, 99, "watch", "auto")?;
             let p = data.resolve(rt, path_val)?;
+            maybe_watch(rt, &data, &p, &watch)?;
             if !p.exists() {
                 return err(format!("load_wasm(): file not found: {}", p.display()));
             }
@@ -2270,7 +2527,9 @@ fn dispatch_object_inner(
                     )
                 }
                 other => {
+                    let watch = str_arg(&[], kwr, 99, "watch", "auto")?;
                     let p = data.resolve(rt, other)?;
+                    maybe_watch(rt, &data, &p, &watch)?;
                     (p.to_string_lossy().to_string(), "allocate".to_string())
                 }
             };
@@ -2307,9 +2566,6 @@ fn dispatch_object_inner(
                     "attrs_for_reproducibility can only be specified if reproducible is False",
                 );
             }
-            if reproducible {
-                *data.reproducible.lock().unwrap() = true;
-            }
             let mut fields = BTreeMap::new();
             fields.insert("reproducible".into(), Value::Bool(reproducible));
             fields.insert("attrs_for_reproducibility".into(), attrs.clone());
@@ -2342,6 +2598,124 @@ fn latin1_bytes_to_string(b: &[u8]) -> String {
         Ok(s) => s.to_string(),
         Err(_) => b.iter().map(|&c| c as char).collect(),
     }
+}
+
+fn is_path_entry_absolute(d: &str, is_windows: bool) -> bool {
+    if d.is_empty() {
+        return false;
+    }
+    if Path::new(d).is_absolute() {
+        return true;
+    }
+    if is_windows {
+        let b = d.as_bytes();
+        if b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\')
+        {
+            return true;
+        }
+        if d.starts_with("\\\\") {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn find_program_on_path(
+    prog: &str,
+    env: &BTreeMap<String, String>,
+    is_windows: bool,
+) -> Option<PathBuf> {
+    let trimmed = prog.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_env = env
+        .get("PATH")
+        .map(String::as_str)
+        .or_else(|| {
+            is_windows
+                .then(|| {
+                    env.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+                        .map(|(_, v)| v.as_str())
+                })
+                .flatten()
+        })
+        .unwrap_or_default();
+    let sep = if is_windows { ';' } else { ':' };
+    let dirs: Vec<&str> = path_env
+        .split(sep)
+        .filter(|d| is_path_entry_absolute(d, is_windows))
+        .collect();
+    if dirs.is_empty() {
+        return None;
+    }
+    let find_in_dirs = |candidate_name: &str| -> Option<PathBuf> {
+        for d in &dirs {
+            let c = Path::new(d).join(candidate_name);
+            if c.is_file() && (is_windows || is_executable(&c)) {
+                return Some(c);
+            }
+        }
+        None
+    };
+
+    // Pass 1: exact `program` across PATH (`StarlarkBaseExternalContext.findCommandOnPath`).
+    if let Some(p) = find_in_dirs(trimmed) {
+        return Some(p);
+    }
+    if !is_windows {
+        return None;
+    }
+
+    // Pass 2: `program + ".exe"` (`OsUtils.executableExtension()` on Windows).
+    let lower_prog = trimmed.to_ascii_lowercase();
+    if !lower_prog.ends_with(".exe") {
+        if let Some(p) = find_in_dirs(&format!("{trimmed}.exe")) {
+            return Some(p);
+        }
+        if let Some(p) = find_in_dirs(&format!("{trimmed}.EXE")) {
+            return Some(p);
+        }
+    }
+
+    // Pass 3: remaining `PATHEXT` extensions (e.g. `.cmd`, `.bat`, `.com`) when no explicit match succeeded.
+    let pathext = env
+        .get("PATHEXT")
+        .map(String::as_str)
+        .or_else(|| {
+            env.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("PATHEXT"))
+                .map(|(_, v)| v.as_str())
+        })
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
+    for raw_ext in pathext.split(';') {
+        let raw_ext = raw_ext.trim();
+        if raw_ext.is_empty() {
+            continue;
+        }
+        let ext = if raw_ext.starts_with('.') {
+            raw_ext.to_string()
+        } else {
+            format!(".{raw_ext}")
+        };
+        let ext_lower = ext.to_ascii_lowercase();
+        if ext_lower == ".exe" || lower_prog.ends_with(&ext_lower) {
+            continue;
+        }
+        if let Some(p) = find_in_dirs(&format!("{trimmed}{ext_lower}")) {
+            return Some(p);
+        }
+        if ext != ext_lower {
+            if let Some(p) = find_in_dirs(&format!("{trimmed}{ext}")) {
+                return Some(p);
+            }
+        }
+    }
+    None
 }
 
 fn is_executable(p: &Path) -> bool {
@@ -2515,12 +2889,9 @@ fn maybe_watch(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<(), Star
     let Some(rel) = repo_cache_friendly_path(rt, data, p, mode)? else {
         return Ok(());
     };
-    let value = if p.is_dir() {
-        "DIR".to_string()
-    } else if !p.exists() {
-        "ENOENT".to_string()
-    } else {
-        match std::fs::read(p) {
+    let value = match std::fs::metadata(p) {
+        Ok(meta) if meta.is_dir() => "DIR".to_string(),
+        Ok(_) => match std::fs::read(p) {
             Ok(b) => crate::hash::sha256_hex(&b),
             Err(e) => {
                 return err(format!(
@@ -2529,6 +2900,21 @@ fn maybe_watch(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<(), Star
                     errno_text(&e)
                 ))
             }
+        },
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            "ENOENT".to_string()
+        }
+        Err(e) => {
+            return err(format!(
+                "java.io.IOException: {} ({})",
+                p.display(),
+                errno_text(&e)
+            ))
         }
     };
     data.record(format!("FILE:{}", escape_input(&rel)), Some(value));
@@ -2560,55 +2946,14 @@ fn maybe_watch_dirents(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<
     Ok(())
 }
 
-/// `DirectoryTreeDigestValue`: recursively hashes sorted directory entries (name, kind, regular
-/// file SHA-256 / symlink target / subdirectory tree digest).
+/// `DirectoryTreeDigestValue`: delegates to [`crate::lockfile::compute_dirtree_digest`].
+#[cfg(test)]
 pub(crate) fn compute_dirtree_digest(p: &Path) -> Result<String, std::io::Error> {
-    let mut entries: Vec<(String, std::fs::DirEntry)> = Vec::new();
-    for entry in std::fs::read_dir(p)? {
-        let entry = entry?;
-        entries.push((entry.file_name().to_string_lossy().into_owned(), entry));
+    match crate::lockfile::compute_dirtree_digest(p).as_str() {
+        "ENOENT" => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        "NOT_DIR" => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+        digest => Ok(digest.to_string()),
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 3);
-    for (name, entry) in entries {
-        let ft = entry.file_type()?;
-        parts.push(name);
-        let child = entry.path();
-        if ft.is_symlink() {
-            parts.push("SYM".to_string());
-            let target = std::fs::read_link(&child)?;
-            parts.push(target.to_string_lossy().into_owned());
-        } else if ft.is_dir() {
-            parts.push("DIR".to_string());
-            parts.push(compute_dirtree_digest(&child)?);
-        } else if ft.is_file() {
-            parts.push("FILE".to_string());
-            let bytes = std::fs::read(&child)?;
-            parts.push(crate::hash::sha256_hex(&bytes));
-        } else {
-            parts.push("SPECIAL".to_string());
-            parts.push(String::new());
-        }
-    }
-    Ok(crate::hash::Fingerprint::new()
-        .add_strings(&parts)
-        .hex_digest())
-}
-
-/// `watch_tree`: records a `DIRTREE:` recursive directory tree digest input.
-fn maybe_watch_tree(rt: &Rt, data: &CtxData, p: &Path) -> Result<(), StarlarkError> {
-    let Some(rel) = repo_cache_friendly_path(rt, data, p, "yes")? else {
-        return Ok(());
-    };
-    let digest = compute_dirtree_digest(p).map_err(|e| {
-        StarlarkError(format!(
-            "java.io.IOException: {} ({})",
-            p.display(),
-            errno_text(&e)
-        ))
-    })?;
-    data.record(format!("DIRTREE:{}", escape_input(&rel)), Some(digest));
-    Ok(())
 }
 
 fn write_file(p: &Path, content: &[u8], exec: bool) -> Result<(), StarlarkError> {
@@ -2706,7 +3051,7 @@ pub fn run_process(
             });
         }
     }
-    let mut child = match crate::netrc::retry_etxtbsy(|| cmd.spawn()) {
+    let mut child = match crate::spawn_retry_etxtbsy(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             return Ok((
@@ -2788,9 +3133,7 @@ impl Rt {
         if let Some(c) = &self.opts.repository_cache {
             d.repo_cache = Some(RepositoryCache::new(c.clone()));
         }
-        if self.opts.download_retries > 0 {
-            d.retries = self.opts.download_retries;
-        }
+        d.retries = self.opts.download_retries;
         d.rewriter = self.opts.downloader_rewriter.clone();
         d.credential_helpers = self.opts.credential_helpers.clone();
         d.client_env = self.opts.client_env.clone();
@@ -2824,7 +3167,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let data = CtxData {
             kind: CtxKind::Repository,
-            name: "test_repo".into(),
+            name: "test_repo+".into(),
             original_name: "test_repo".into(),
             canonical: "test_repo+".into(),
             dir,
@@ -2878,7 +3221,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let data = CtxData {
             kind: CtxKind::Repository,
-            name: "test_copy".into(),
+            name: "test_copy+".into(),
             original_name: "test_copy".into(),
             canonical: "test_copy+".into(),
             dir: dir.clone(),
@@ -3020,5 +3363,133 @@ mod tests {
 
         assert_eq!(k1, Value::Tuple(vec![int_value(0), int_value(1)]));
         assert_eq!(k2, Value::Tuple(vec![int_value(1), int_value(0)]));
+    }
+
+    #[test]
+    fn find_program_on_path_windows_resolves_exe_and_pathext_and_skips_relative() {
+        let root = std::env::temp_dir().join(format!("zel_which_win_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let rel_dir = root.join("rel");
+        let dir_a = root.join("dir_a");
+        let dir_b = root.join("dir_b");
+        std::fs::create_dir_all(&rel_dir).unwrap();
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let git_exe = dir_a.join("git.exe");
+        let wrapper_cmd = dir_b.join("wrapper.cmd");
+        let custom_ps1 = dir_b.join("custom.ps1");
+        std::fs::write(rel_dir.join("git.exe"), b"rel").unwrap();
+        std::fs::write(&git_exe, b"exe").unwrap();
+        std::fs::write(&wrapper_cmd, b"@echo off\r\n").unwrap();
+        std::fs::write(&custom_ps1, b"Write-Host ok\n").unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "Path".into(),
+            format!("relative_bin;{};{}", dir_a.display(), dir_b.display()),
+        );
+
+        assert_eq!(
+            find_program_on_path("git", &env, true),
+            Some(git_exe.clone())
+        );
+        assert_eq!(find_program_on_path("git.exe", &env, true), Some(git_exe));
+        assert_eq!(
+            find_program_on_path("wrapper", &env, true),
+            Some(wrapper_cmd)
+        );
+        assert_eq!(find_program_on_path("custom", &env, true), None);
+
+        env.insert("Pathext".into(), ".EXE;.PS1".into());
+        assert_eq!(find_program_on_path("custom", &env, true), Some(custom_ps1));
+        assert_eq!(find_program_on_path("wrapper", &env, true), None);
+
+        // Unix mode splits on `:`, requires `"PATH"`, and does not append `.exe` / `PATHEXT`.
+        let mut unix_env = BTreeMap::new();
+        unix_env.insert(
+            "PATH".into(),
+            format!("{}:{}", dir_a.display(), dir_b.display()),
+        );
+        assert_eq!(find_program_on_path("git", &unix_env, false), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn int_and_int_list_attrs_enforce_signed_32_bit_range() {
+        let defs = vec![
+            (
+                "count".to_string(),
+                AttrDef {
+                    kind: "int".into(),
+                    default: Some(AttrVal::Int(0)),
+                    mandatory: false,
+                    values: vec![],
+                    allow_empty: true,
+                },
+            ),
+            (
+                "counts".to_string(),
+                AttrDef {
+                    kind: "int_list".into(),
+                    default: Some(AttrVal::List(vec![])),
+                    mandatory: false,
+                    values: vec![],
+                    allow_empty: true,
+                },
+            ),
+        ];
+
+        // Exact i32 bounds succeed.
+        let mut ok_kw = BTreeMap::new();
+        ok_kw.insert("name".into(), str_value("ok_repo"));
+        ok_kw.insert(
+            "count".into(),
+            Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MIN))),
+        );
+        ok_kw.insert(
+            "counts".into(),
+            list_value(vec![
+                Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MIN))),
+                Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MAX))),
+            ]),
+        );
+        validate_repo_rule_call("my_rule", &defs, &ok_kw, &[]).unwrap();
+        let mut ok_tag = ok_kw.clone();
+        ok_tag.remove("name");
+        validate_tag_call("my_tag", &defs, &ok_tag, &[]).unwrap();
+
+        // i32::MAX + 1 on `attr.int` is rejected.
+        let mut over_i64 = BTreeMap::new();
+        over_i64.insert("name".into(), str_value("r"));
+        over_i64.insert(
+            "count".into(),
+            Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MAX) + 1)),
+        );
+        let e1 = validate_repo_rule_call("my_rule", &defs, &over_i64, &[]).unwrap_err();
+        assert_eq!(
+            e1.0,
+            "in call to 'my_rule' repo rule with name 'r', for attribute 'count', got 2147483648, want value in signed 32-bit range"
+        );
+
+        // BigInt beyond i64 on `attr.int` and `attr.int_list` is rejected on both repo rules and tags.
+        let huge =
+            Value::Int(zel_starlark::BigInt::from_str_radix("100000000000000000000", 10).unwrap());
+        let mut over_tag = BTreeMap::new();
+        over_tag.insert("count".into(), huge.clone());
+        let e2 = validate_tag_call("my_tag", &defs, &over_tag, &[]).unwrap_err();
+        assert_eq!(
+            e2.0,
+            "in 'my_tag' tag, for attribute 'count', got 100000000000000000000, want value in signed 32-bit range"
+        );
+
+        let mut over_list = BTreeMap::new();
+        over_list.insert("counts".into(), list_value(vec![int_value(1), huge]));
+        let e3 = validate_tag_call("my_tag", &defs, &over_list, &[]).unwrap_err();
+        assert_eq!(
+            e3.0,
+            "in 'my_tag' tag, for element 1 of attribute 'counts', got 100000000000000000000, want value in signed 32-bit range"
+        );
     }
 }

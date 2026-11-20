@@ -69,10 +69,10 @@ pub enum CheckMode {
 
 impl CheckMode {
     pub fn parse(s: &str) -> Option<CheckMode> {
-        match s {
-            "off" | "OFF" => Some(CheckMode::Off),
-            "warning" | "WARNING" => Some(CheckMode::Warning),
-            "error" | "ERROR" => Some(CheckMode::Error),
+        match s.to_ascii_lowercase().as_str() {
+            "off" => Some(CheckMode::Off),
+            "warning" => Some(CheckMode::Warning),
+            "error" => Some(CheckMode::Error),
             _ => None,
         }
     }
@@ -84,6 +84,38 @@ thread_local! {
     /// Unit tests normally tolerate registries lacking `bazel_tools`' dependencies; set to test the strict (production) behaviour.
     pub(crate) static STRICT_BAZEL_TOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(crate) static HERMETIC_BAZEL_TOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct StrictBazelToolsGuard(bool);
+
+#[cfg(test)]
+impl Drop for StrictBazelToolsGuard {
+    fn drop(&mut self) {
+        STRICT_BAZEL_TOOLS.with(|h| h.set(self.0));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_strict_bazel_tools() -> StrictBazelToolsGuard {
+    let prev = STRICT_BAZEL_TOOLS.with(|h| h.replace(true));
+    StrictBazelToolsGuard(prev)
+}
+
+#[cfg(test)]
+pub(crate) struct HermeticBazelToolsGuard(bool);
+
+#[cfg(test)]
+impl Drop for HermeticBazelToolsGuard {
+    fn drop(&mut self) {
+        HERMETIC_BAZEL_TOOLS.with(|h| h.set(self.0));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn scoped_hermetic_bazel_tools() -> HermeticBazelToolsGuard {
+    let prev = HERMETIC_BAZEL_TOOLS.with(|h| h.replace(true));
+    HermeticBazelToolsGuard(prev)
 }
 
 #[derive(Clone)]
@@ -107,9 +139,13 @@ pub struct ResolveOptions {
     pub inject_repositories: Vec<(String, String)>,
     pub known_hashes: Option<FileHashes>,
     pub known_hashes_mode: KnownHashesMode,
+    /// Previously selected yanked versions from `MODULE.bazel.lock` (reused under `Update` and `Error`).
+    pub locked_yanked: Option<BTreeMap<ModuleKey, String>>,
     pub module_mirrors: Vec<String>,
     /// Repository cache root used to serve lockfile-recorded registry files offline.
     pub repository_cache: Option<PathBuf>,
+    pub vendor_dir: Option<PathBuf>,
+    pub downloader_rewriter: Option<crate::download::UrlRewriter>,
     /// Fetches the repository described by an archive/git override so its MODULE.bazel can be read.
     #[allow(clippy::type_complexity)]
     pub repo_fetcher: Option<Arc<dyn Fn(&str, &RepoSpec) -> Result<PathBuf, String> + Send + Sync>>,
@@ -149,13 +185,67 @@ impl ResolveOptions {
             inject_repositories: vec![],
             known_hashes: None,
             known_hashes_mode: KnownHashesMode::Ignore,
+            locked_yanked: None,
             module_mirrors: vec![],
             repository_cache: None,
+            vendor_dir: None,
+            downloader_rewriter: None,
             repo_fetcher: None,
             credential_helpers: vec![],
             client_env: BTreeMap::new(),
         }
     }
+}
+
+pub fn expand_registry_url(raw: &str, workspace: &Path) -> String {
+    if !raw.contains("%workspace%") {
+        return raw.to_string();
+    }
+    let ws = workspace.to_string_lossy().replace('\\', "/");
+    raw.replace("%workspace%", &ws)
+}
+
+/// Parses `--module_mirrors` entries (`[registry=]url[,url...]`), validating each mirror URL and
+/// checking that any explicit registry key is among the configured registries.
+pub fn parse_module_mirrors(
+    raw_mirrors: &[String],
+    raw_registries: &[String],
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    let mut configured: Vec<String> = if raw_registries.is_empty() {
+        vec![DEFAULT_REGISTRY.trim_end_matches('/').to_string()]
+    } else {
+        raw_registries
+            .iter()
+            .map(|r| r.trim_end_matches('/').to_string())
+            .collect()
+    };
+    configured.dedup();
+    let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for entry in raw_mirrors {
+        let (reg_key, urls_part) = match entry.split_once('=') {
+            Some((k, v)) => (k.trim_end_matches('/').to_string(), v),
+            None => (String::new(), entry.as_str()),
+        };
+        if !reg_key.is_empty() && !configured.iter().any(|c| c == &reg_key) {
+            return Err(format!(
+                "While parsing option --module_mirrors={entry}: Registry '{reg_key}' is not among the configured registries"
+            ));
+        }
+        let mut urls = Vec::new();
+        if !urls_part.is_empty() {
+            for u in urls_part.split(',') {
+                let u_trimmed = u.trim_end_matches('/');
+                crate::registry::validate_registry_url(u_trimmed).map_err(|e| {
+                    format!(
+                        "While parsing option --module_mirrors={entry}: Invalid mirror URL: {e}"
+                    )
+                })?;
+                urls.push(u_trimmed.to_string());
+            }
+        }
+        map.insert(reg_key, urls);
+    }
+    Ok(map)
 }
 
 /// `ModuleExtensionId`.
@@ -236,6 +326,7 @@ struct Ctx<'a> {
     root_name: String,
     root_module_file_paths: Vec<PathBuf>,
     local_registries: HashMap<String, usize>,
+    mirror_map: BTreeMap<String, Vec<String>>,
 }
 
 fn read_file(p: &Path) -> Option<String> {
@@ -246,14 +337,62 @@ pub fn root_module_file(workspace: &Path) -> PathBuf {
     workspace.join("MODULE.bazel")
 }
 
+/// Shared `include()` file loader for both the root module and non-registry module overrides.
+fn read_included_module_file(
+    repo_root: &Path,
+    label: &str,
+    recorded_paths: Option<&Arc<std::sync::Mutex<Vec<PathBuf>>>>,
+) -> Result<String, String> {
+    let stripped = label.strip_prefix("//").unwrap_or(label);
+    let (pkg, target) = match stripped.split_once(':') {
+        Some((p, t)) => (p, t),
+        None => (stripped, stripped.rsplit('/').next().unwrap_or(stripped)),
+    };
+    let rel = if pkg.is_empty() {
+        target.to_string()
+    } else {
+        format!("{pkg}/{target}")
+    };
+    if !pkg.is_empty()
+        && !repo_root.join(pkg).join("BUILD.bazel").is_file()
+        && !repo_root.join(pkg).join("BUILD").is_file()
+    {
+        return Err(format!(
+            "\u{1}PKG:BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - {pkg}"
+        ));
+    }
+    let base = rel.rsplit('/').next().unwrap_or("");
+    if base.starts_with('.') {
+        return Err("the name of the file to be included must not start with '.'".to_string());
+    }
+    let p = repo_root.join(&rel);
+    if !p.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if let Some(rec) = recorded_paths {
+        rec.lock().unwrap().push(p.clone());
+    }
+    std::fs::read_to_string(&p).map_err(|e| e.to_string())
+}
+
 impl Ctx<'_> {
     fn registry_for(&mut self, url: &str) -> Result<&Registry, String> {
         if let Some(i) = self.local_registries.get(url) {
             return Ok(&self.registries[*i]);
         }
-        let mut r = Registry::new(url)?
-            .with_mirrors(self.opts.module_mirrors.clone())
-            .with_repo_cache(self.opts.repository_cache.clone());
+        let raw_key = url.trim_end_matches('/');
+        let mirrors = self
+            .mirror_map
+            .get(raw_key)
+            .or_else(|| self.mirror_map.get(""))
+            .cloned()
+            .unwrap_or_default();
+        let expanded = expand_registry_url(url, &self.opts.workspace_root);
+        let mut r = Registry::new(&expanded)?
+            .with_mirrors(mirrors)
+            .with_repo_cache(self.opts.repository_cache.clone())
+            .with_vendor_dir(self.opts.vendor_dir.clone())
+            .with_rewriter(self.opts.downloader_rewriter.clone());
         if let Some(k) = &self.opts.known_hashes {
             r = r.with_known_hashes(k.clone(), self.opts.known_hashes_mode);
         }
@@ -411,9 +550,7 @@ impl Ctx<'_> {
                 registry_url: None,
                 file_name: mf.display().to_string(),
                 include_reader: Some(Arc::new(move |label: &str| {
-                    let rel = label.trim_start_matches("//").replacen(':', "/", 1);
-                    std::fs::read_to_string(dir2.join(rel))
-                        .map_err(|e| format!("error reading '{label}': {e}"))
+                    read_included_module_file(&dir2, label, None)
                 })),
                 builtin_modules: builtin_modules(),
             };
@@ -545,13 +682,16 @@ fn synthetic_module(key: &ModuleKey) -> InterimModule {
         key: key.clone(),
         name: key.name.clone(),
         version: key.version.clone(),
+        compatibility_level: 0,
         repo_name: key.name.clone(),
         bazel_compatibility: vec![],
         toolchains_to_register: vec![],
         execution_platforms_to_register: vec![],
         deps: vec![],
+        dep_max_compat: BTreeMap::new(),
         original_deps: vec![],
         nodep_deps: vec![],
+        nodep_max_compat: vec![],
         registry_url: None,
         extension_usages: vec![],
         flag_aliases: vec![],
@@ -577,34 +717,7 @@ fn eval_root(
         registry_url: None,
         file_name: path.display().to_string(),
         include_reader: Some(Arc::new(move |label: &str| {
-            let stripped = label.strip_prefix("//").unwrap_or(label);
-            let rel = match stripped.split_once(':') {
-                Some(("", target)) => target.to_string(),
-                Some((pkg, target)) => format!("{pkg}/{target}"),
-                None => stripped.to_string(),
-            };
-            let p = ws.join(&rel);
-            if let Some((pkg, _)) = stripped.split_once(':') {
-                if !pkg.is_empty()
-                    && !ws.join(pkg).join("BUILD.bazel").is_file()
-                    && !ws.join(pkg).join("BUILD").is_file()
-                {
-                    return Err(format!(
-                        "\u{1}PKG:BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - {pkg}"
-                    ));
-                }
-            }
-            let base = rel.rsplit('/').next().unwrap_or("");
-            if base.starts_with('.') {
-                return Err(
-                    "the name of the file to be included must not start with '.'".to_string(),
-                );
-            }
-            if !p.is_file() {
-                return Err("not a regular file".to_string());
-            }
-            inc2.lock().unwrap().push(p.clone());
-            std::fs::read_to_string(&p).map_err(|e| e.to_string())
+            read_included_module_file(&ws, label, Some(&inc2))
         })),
         builtin_modules: builtin_modules(),
     };
@@ -689,6 +802,7 @@ fn eval_root(
         r.module
             .nodep_deps
             .push(ModuleKey::new(name.clone(), Version::empty()));
+        r.module.nodep_max_compat.push(-1);
     }
     // built-in modules override
     for b in builtin_modules() {
@@ -839,8 +953,17 @@ fn discover(ctx: &mut Ctx, root: &InterimModule) -> Result<Discovered, ResolveEr
         for k in keys {
             let m = graph.get(&k).unwrap().clone();
             if !m.nodep_deps.iter().all(|d| graph.contains_key(d)) {
-                let mut m2 = m;
-                m2.nodep_deps.retain(|d| graph.contains_key(d));
+                let mut m2 = m.clone();
+                let mut kept_deps = Vec::new();
+                let mut kept_compat = Vec::new();
+                for (idx, d) in m.nodep_deps.iter().enumerate() {
+                    if graph.contains_key(d) {
+                        kept_deps.push(d.clone());
+                        kept_compat.push(m.nodep_max_compat.get(idx).copied().unwrap_or(-1));
+                    }
+                }
+                m2.nodep_deps = kept_deps;
+                m2.nodep_max_compat = kept_compat;
                 graph.insert(k, m2);
             }
         }
@@ -884,57 +1007,173 @@ fn select(
     graph: &OrderedMap<ModuleKey, InterimModule>,
     overrides: &[(String, ModuleOverride)],
 ) -> Result<Selected, ResolveError> {
-    // allowed version sets
     let mut by_name: HashMap<&str, HashSet<&Version>> = HashMap::new();
     for k in &graph.keys {
         by_name.entry(&k.name).or_default().insert(&k.version);
     }
-    let mut allowed: HashMap<String, BTreeSet<Version>> = HashMap::new();
+    let mut allowed_by_compat: HashMap<(String, i64), BTreeSet<Version>> = HashMap::new();
+    let mut has_mvo: HashSet<String> = HashSet::new();
     for (name, o) in overrides {
         if let ModuleOverride::MultipleVersion { versions, .. } = o {
+            has_mvo.insert(name.clone());
             for v in versions {
-                if !by_name.get(name.as_str()).is_some_and(|s| s.contains(v)) {
+                let k = ModuleKey::new(name.clone(), v.clone());
+                let Some(dm) = graph.get(&k) else {
                     return re(format!(
                         "multiple_version_override for module {name} contains version {v}, but it doesn't exist in the dependency graph"
                     ));
-                }
+                };
+                allowed_by_compat
+                    .entry((name.clone(), dm.compatibility_level))
+                    .or_default()
+                    .insert(v.clone());
             }
-            allowed.insert(name.clone(), versions.iter().cloned().collect());
         }
     }
-    let group = |name: &str, version: &Version| -> (String, Version) {
-        let mut target = Version::empty();
-        if let Some(set) = allowed.get(name) {
-            // ceiling(version): smallest allowed >= version
-            target = set
-                .range(version.clone()..)
-                .next()
-                .cloned()
-                .unwrap_or_else(Version::empty);
+    let compat_of =
+        |k: &ModuleKey| -> i64 { graph.get(k).map(|m| m.compatibility_level).unwrap_or(0) };
+    // Validate max_compatibility_level >= dep's compatibility_level on every discovered module.
+    for m in graph.values() {
+        for (rname, dk) in &m.deps {
+            let max_cl = m.dep_max_compat.get(rname).copied().unwrap_or(-1);
+            if max_cl >= 0 {
+                let dep_cl = compat_of(dk);
+                if max_cl < dep_cl {
+                    return re(format!(
+                        "invalid max_compatibility_level {max_cl} for {dk} in {}: cannot be less than compatibility_level {dep_cl}",
+                        m.key
+                    ));
+                }
+            }
         }
-        (name.to_string(), target)
+        for (idx, dk) in m.nodep_deps.iter().enumerate() {
+            let max_cl = m.nodep_max_compat.get(idx).copied().unwrap_or(-1);
+            if max_cl >= 0 {
+                let dep_cl = compat_of(dk);
+                if max_cl < dep_cl {
+                    return re(format!(
+                        "invalid max_compatibility_level {max_cl} for {dk} in {}: cannot be less than compatibility_level {dep_cl}",
+                        m.key
+                    ));
+                }
+            }
+        }
+    }
+    let target_allowed = |name: &str, cl: i64, version: &Version| -> Version {
+        if has_mvo.contains(name) {
+            allowed_by_compat
+                .get(&(name.to_string(), cl))
+                .and_then(|set| set.range(version.clone()..).next().cloned())
+                .unwrap_or_else(Version::empty)
+        } else {
+            Version::empty()
+        }
     };
-    let mut selected: HashMap<(String, Version), Version> = HashMap::new();
+    let mut selected: HashMap<(String, i64, Version), Version> = HashMap::new();
     for k in &graph.keys {
-        let g = group(&k.name, &k.version);
+        let cl = compat_of(k);
+        let g = (k.name.clone(), cl, target_allowed(&k.name, cl, &k.version));
         let e = selected.entry(g).or_insert_with(|| k.version.clone());
         if k.version > *e {
             *e = k.version.clone();
         }
     }
-    let strategy = |k: &ModuleKey| -> ModuleKey {
-        let g = group(&k.name, &k.version);
-        ModuleKey::new(
-            k.name.clone(),
-            selected
-                .get(&g)
+    // Collect distinct (DepSpec: ModuleKey, max_compat_level) pairs that have > 1 candidate selected version.
+    let mut flex_specs: Vec<((ModuleKey, i64), Vec<ModuleKey>)> = Vec::new();
+    let mut seen_flex: HashSet<(ModuleKey, i64)> = HashSet::new();
+    let candidates_for = |dk: &ModuleKey, max_cl: i64| -> Vec<ModuleKey> {
+        let min_cl = compat_of(dk);
+        let upper = if max_cl < 0 { min_cl } else { max_cl };
+        if upper <= min_cl {
+            let t = target_allowed(&dk.name, min_cl, &dk.version);
+            let v = selected
+                .get(&(dk.name.clone(), min_cl, t))
                 .cloned()
-                .unwrap_or_else(|| k.version.clone()),
-        )
+                .unwrap_or_else(|| dk.version.clone());
+            return vec![ModuleKey::new(dk.name.clone(), v)];
+        }
+        let mut cands: Vec<(i64, ModuleKey)> = Vec::new();
+        for ((name, cl, targ), sel_v) in &selected {
+            if name == &dk.name && *cl >= min_cl && *cl <= upper && *sel_v >= dk.version {
+                if has_mvo.contains(name) && targ.is_empty() {
+                    continue;
+                }
+                if has_mvo.contains(name) && *targ != target_allowed(name, *cl, sel_v) {
+                    continue;
+                }
+                cands.push((*cl, ModuleKey::new(dk.name.clone(), sel_v.clone())));
+            }
+        }
+        cands.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.version.cmp(&b.1.version)));
+        cands.dedup_by(|a, b| a.1 == b.1);
+        if cands.is_empty() {
+            let t = target_allowed(&dk.name, min_cl, &dk.version);
+            let v = selected
+                .get(&(dk.name.clone(), min_cl, t))
+                .cloned()
+                .unwrap_or_else(|| dk.version.clone());
+            vec![ModuleKey::new(dk.name.clone(), v)]
+        } else {
+            cands.into_iter().map(|(_, mk)| mk).collect()
+        }
     };
-    let walk = |ignore_nodeps: bool| -> Result<OrderedMap<ModuleKey, InterimModule>, ResolveError> {
+    for m in graph.values() {
+        for (rname, dk) in &m.deps {
+            let max_cl = m.dep_max_compat.get(rname).copied().unwrap_or(-1);
+            if max_cl >= 0 && seen_flex.insert((dk.clone(), max_cl)) {
+                let cands = candidates_for(dk, max_cl);
+                if cands.len() > 1 {
+                    flex_specs.push(((dk.clone(), max_cl), cands));
+                }
+            }
+        }
+        for (idx, dk) in m.nodep_deps.iter().enumerate() {
+            let max_cl = m.nodep_max_compat.get(idx).copied().unwrap_or(-1);
+            if max_cl >= 0 && seen_flex.insert((dk.clone(), max_cl)) {
+                let cands = candidates_for(dk, max_cl);
+                if cands.len() > 1 {
+                    flex_specs.push(((dk.clone(), max_cl), cands));
+                }
+            }
+        }
+    }
+    let transform_module =
+        |old: &InterimModule, choice_map: &HashMap<(ModuleKey, i64), ModuleKey>| -> InterimModule {
+            let resolve_one = |dk: &ModuleKey, max_cl: i64| -> ModuleKey {
+                if let Some(chosen) = choice_map.get(&(dk.clone(), max_cl)) {
+                    return chosen.clone();
+                }
+                candidates_for(dk, max_cl)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| dk.clone())
+            };
+            let mut m = old.clone();
+            m.deps = old
+                .deps
+                .iter()
+                .map(|(rname, dk)| {
+                    let max_cl = old.dep_max_compat.get(rname).copied().unwrap_or(-1);
+                    (rname.clone(), resolve_one(dk, max_cl))
+                })
+                .collect();
+            m.nodep_deps = old
+                .nodep_deps
+                .iter()
+                .enumerate()
+                .map(|(idx, dk)| {
+                    let max_cl = old.nodep_max_compat.get(idx).copied().unwrap_or(-1);
+                    resolve_one(dk, max_cl)
+                })
+                .collect();
+            m
+        };
+    let walk = |ignore_nodeps: bool,
+                choice_map: &HashMap<(ModuleKey, i64), ModuleKey>|
+     -> Result<OrderedMap<ModuleKey, InterimModule>, ResolveError> {
         let mut out = OrderedMap::new();
         let mut known: HashSet<ModuleKey> = HashSet::new();
+        let mut seen_by_name: HashMap<String, (ModuleKey, i64)> = HashMap::new();
         let mut q: VecDeque<(ModuleKey, Option<ModuleKey>)> = VecDeque::new();
         q.push_back((ModuleKey::root(), None));
         known.insert(ModuleKey::root());
@@ -944,12 +1183,24 @@ fn select(
                     "Module {key} unexpectedly missing from the dependency graph"
                 ));
             };
-            let module = old.with_deps_transformed(&strategy);
-            // visit
+            let module = transform_module(old, choice_map);
+            if !key.is_root() && !has_mvo.contains(&key.name) {
+                let cl = module.compatibility_level;
+                if let Some((prev_key, prev_cl)) = seen_by_name.get(&key.name) {
+                    if *prev_key != key {
+                        return re(format!(
+                            "Found compatibility level conflict for module {}: {} (compatibility_level {}) and {} (compatibility_level {}) are both selected. Consider adding a multiple_version_override if you want to depend on multiple versions of {} simultaneously",
+                            key.name, prev_key, prev_cl, key, cl, key.name
+                        ));
+                    }
+                } else {
+                    seen_by_name.insert(key.name.clone(), (key.clone(), cl));
+                }
+            }
             if let Some((_, ModuleOverride::MultipleVersion { versions, .. })) =
                 overrides.iter().find(|(n, _)| *n == key.name)
             {
-                if group(&key.name, &key.version).1.is_empty() {
+                if target_allowed(&key.name, module.compatibility_level, &key.version).is_empty() {
                     return re(format!(
                         "{} depends on {} which is not allowed by the multiple_version_override on {}, which allows only [{}]",
                         from.map(|f| f.to_string()).unwrap_or_default(),
@@ -981,11 +1232,49 @@ fn select(
         }
         Ok(out)
     };
-    let _ = walk(false)?;
-    let pruned = walk(true)?;
+    let mut indices = vec![0usize; flex_specs.len()];
+    let mut first_err: Option<ResolveError> = None;
+    let mut winning_choices: Option<HashMap<(ModuleKey, i64), ModuleKey>> = None;
+    loop {
+        let mut choice_map = HashMap::with_capacity(flex_specs.len());
+        for (i, (spec, cands)) in flex_specs.iter().enumerate() {
+            choice_map.insert(spec.clone(), cands[indices[i]].clone());
+        }
+        match walk(false, &choice_map) {
+            Ok(_) => {
+                winning_choices = Some(choice_map);
+                break;
+            }
+            Err(e) => {
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+            }
+        }
+        // Advance mixed-radix odometer (capped at reasonable search space).
+        let mut pos = flex_specs.len();
+        let mut advanced = false;
+        while pos > 0 {
+            pos -= 1;
+            indices[pos] += 1;
+            if indices[pos] < flex_specs[pos].1.len() {
+                advanced = true;
+                break;
+            }
+            indices[pos] = 0;
+        }
+        if !advanced {
+            break;
+        }
+    }
+    let choice_map = match winning_choices {
+        Some(c) => c,
+        None => return Err(first_err.unwrap()),
+    };
+    let pruned = walk(true, &choice_map)?;
     let mut unpruned = OrderedMap::new();
     for (k, m) in graph.iter() {
-        unpruned.insert(k.clone(), m.with_deps_transformed(&strategy));
+        unpruned.insert(k.clone(), transform_module(m, &choice_map));
     }
     Ok(Selected {
         resolved: pruned,
@@ -1075,14 +1364,20 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
             message: m,
             warnings: warnings.clone(),
         })?;
-    for url in &opts.registries {
-        // `ModuleFileFunction` strips trailing slashes from registry URLs.
-        let url = url.trim_end_matches('/');
+    for raw_url in &opts.registries {
+        // `RegistryFunction` expands `%workspace%` before URI parsing and strips trailing slashes.
+        let expanded = expand_registry_url(raw_url, &opts.workspace_root);
+        let url = expanded.trim_end_matches('/');
         crate::registry::validate_registry_url(url).map_err(|e| ResolveError {
             message: format!("Invalid registry URL: {url}: {e}"),
             warnings: warnings.clone(),
         })?;
     }
+    let mirror_map =
+        parse_module_mirrors(&opts.module_mirrors, &opts.registries).map_err(|m| ResolveError {
+            message: m,
+            warnings: warnings.clone(),
+        })?;
     let mut ctx = Ctx {
         opts,
         registries: vec![],
@@ -1092,6 +1387,7 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
         root_name: root.name.clone(),
         root_module_file_paths: root_paths,
         local_registries: HashMap::new(),
+        mirror_map,
     };
     let fail = |ctx: &Ctx, e: ResolveError| ResolveError {
         message: e.message,
@@ -1119,27 +1415,82 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
     }
     let sel = select(&disc.graph, &overrides).map_err(|e| fail(&ctx, e))?;
 
-    // yanked versions (`YankedVersionsFunction`: I/O and parse failures fail open with a warning).
+    // yanked versions (`YankedVersionsFunction`: I/O and parse failures fail open with a warning,
+    // and lockfile modes `Error` / `Update` reuse locked yanked state without re-fetching metadata.json).
     let mut selected_yanked = BTreeMap::new();
     for m in sel.resolved.values() {
         let Some(url) = &m.registry_url else { continue };
-        let mut hashes = FileHashes::new();
-        let y = match ctx
-            .registry_for(url)
-            .and_then(|reg| reg.yanked_versions(&m.name, &mut hashes))
+        let is_file_reg = url.starts_with("file://");
+        let yanked_reason: Option<String> = if !is_file_reg
+            && opts.known_hashes_mode == KnownHashesMode::Enforce
         {
-            Ok(y) => y,
-            Err(e) => {
-                ctx.warnings.push(format!(
-                    "WARNING: Could not read metadata file for module {} from registry {url}: {e}",
-                    m.name
-                ));
-                None
+            opts.locked_yanked
+                .as_ref()
+                .and_then(|ly| ly.get(&m.key).cloned())
+        } else if !is_file_reg
+            && opts.known_hashes_mode == KnownHashesMode::UseAndUpdate
+            && opts.locked_yanked.is_some()
+        {
+            if let Some(reason) = opts
+                .locked_yanked
+                .as_ref()
+                .and_then(|ly| ly.get(&m.key).cloned())
+            {
+                Some(reason)
+            } else {
+                let source_url = format!(
+                    "{}/modules/{}/{}/source.json",
+                    url.trim_end_matches('/'),
+                    m.name,
+                    m.version
+                );
+                let is_source_locked = opts
+                    .known_hashes
+                    .as_ref()
+                    .and_then(|kh| kh.get(&source_url))
+                    .is_some_and(|h| h.is_some());
+                if is_source_locked {
+                    None
+                } else {
+                    let mut hashes = FileHashes::new();
+                    let y = match ctx
+                        .registry_for(url)
+                        .and_then(|reg| reg.yanked_versions(&m.name, &mut hashes))
+                    {
+                        Ok(y) => y,
+                        Err(e) => {
+                            ctx.warnings.push(format!(
+                                "WARNING: Could not read metadata file for module {} from registry {url}: {e}",
+                                m.name
+                            ));
+                            None
+                        }
+                    };
+                    ctx.warnings
+                        .extend(crate::registry::take_registry_warnings());
+                    y.and_then(|y| y.get(&m.version).cloned())
+                }
             }
+        } else {
+            let mut hashes = FileHashes::new();
+            let y = match ctx
+                .registry_for(url)
+                .and_then(|reg| reg.yanked_versions(&m.name, &mut hashes))
+            {
+                Ok(y) => y,
+                Err(e) => {
+                    ctx.warnings.push(format!(
+                        "WARNING: Could not read metadata file for module {} from registry {url}: {e}",
+                        m.name
+                    ));
+                    None
+                }
+            };
+            ctx.warnings
+                .extend(crate::registry::take_registry_warnings());
+            y.and_then(|y| y.get(&m.version).cloned())
         };
-        ctx.warnings
-            .extend(crate::registry::take_registry_warnings());
-        if let Some(info) = y.and_then(|y| y.get(&m.version).cloned()) {
+        if let Some(info) = yanked_reason {
             if is_allowed_yanked(opts, &m.key) {
                 selected_yanked.insert(m.key.clone(), info);
             } else {
@@ -1449,7 +1800,7 @@ fn unique_name_candidate(id: &ExtensionId, attempt: usize) -> String {
         attempt.to_string()
     };
     let ext_name = if id.is_innate() {
-        id.name[id.name.find(' ').unwrap() + 1..].to_string()
+        id.name[id.name.rfind(' ').unwrap() + 1..].to_string()
     } else {
         id.name.clone()
     };
@@ -1526,13 +1877,16 @@ impl Resolution {
             key: ModuleKey::root(),
             name: String::new(),
             version: Version::empty(),
+            compatibility_level: 0,
             repo_name: String::new(),
             bazel_compatibility: vec![],
             toolchains_to_register: vec![],
             execution_platforms_to_register: vec![],
             deps: vec![],
+            dep_max_compat: BTreeMap::new(),
             original_deps: vec![],
             nodep_deps: vec![],
+            nodep_max_compat: vec![],
             registry_url: None,
             extension_usages: vec![],
             flag_aliases: vec![],
@@ -1681,6 +2035,51 @@ impl Resolution {
             }
         }
         out
+    }
+
+    /// Returns all `(ExtensionId, exported_repo_name)` pairs whose `<unique>+` prefix matches
+    /// `canonical`, ordered from longest `<unique>+` prefix to shortest.
+    pub fn extension_candidates_for_canonical<'a>(
+        &self,
+        canonical: &'a str,
+    ) -> Vec<(ExtensionId, &'a str)> {
+        let mut candidates: Vec<(usize, ExtensionId, &'a str)> = Vec::new();
+        for id in self
+            .extension_ids()
+            .into_iter()
+            .chain(self.extension_unique_names.keys().cloned())
+        {
+            if candidates.iter().any(|(_, existing, _)| existing == &id) {
+                continue;
+            }
+            let Some(unique) = self.extension_unique_names.get(&id) else {
+                continue;
+            };
+            let Some(rest) = canonical
+                .strip_prefix(unique.as_str())
+                .and_then(|s| s.strip_prefix('+'))
+            else {
+                continue;
+            };
+            candidates.push((unique.len(), id, rest));
+        }
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates
+            .into_iter()
+            .map(|(_, id, rest)| (id, rest))
+            .collect()
+    }
+
+    /// Finds the `(ExtensionId, exported_repo_name)` whose `<unique>+` prefix matches `canonical`,
+    /// preferring the longest `<unique>+` prefix so innate `_name` repo-rule proxies or overlapping
+    /// unique names cannot shadow isolated `+_name+<module>+<version>+<usage>+` extension repos.
+    pub fn extension_for_canonical<'a>(
+        &self,
+        canonical: &'a str,
+    ) -> Option<(ExtensionId, &'a str)> {
+        self.extension_candidates_for_canonical(canonical)
+            .into_iter()
+            .next()
     }
 
     /// Toolchain target patterns of all modules (canonical `@@repo//...` form), in dep graph order
@@ -2107,5 +2506,93 @@ mod tests {
         assert!(bazel_version_satisfies("6.4.0rc1", "<=6.4.0"));
         assert!(!bazel_version_satisfies("6.4.0rc1", "-6.4.0"));
         assert!(bazel_version_satisfies("6.4.0", "-6.4.0-pre.1"));
+    }
+
+    #[test]
+    fn compatibility_levels_max_compat_and_mirrors() {
+        let (r, url) = reg("res_compat");
+        add_module(
+            &r,
+            "lib",
+            "1.0",
+            "module(name='lib', version='1.0', compatibility_level=1)\n",
+            r#"{"type":"local_path","path":"/nonexistent"}"#,
+        );
+        add_module(
+            &r,
+            "lib",
+            "2.0",
+            "module(name='lib', version='2.0', compatibility_level=2)\n",
+            r#"{"type":"local_path","path":"/nonexistent"}"#,
+        );
+        add_module(
+            &r,
+            "consumer",
+            "1.0",
+            "module(name='consumer', version='1.0')\nbazel_dep(name='lib', version='2.0')\n",
+            r#"{"type":"local_path","path":"/nonexistent"}"#,
+        );
+
+        // Compatibility conflict when root wants compat 1 and consumer wants compat 2 without max_compatibility_level.
+        let ws = tmpdir("ws_compat");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='lib', version='1.0')\nbazel_dep(name='consumer', version='1.0')\n",
+        );
+        let mut o = opts(&ws, &url);
+        o.check_direct_dependencies = CheckMode::Off;
+        let err = resolve(&o).unwrap_err();
+        assert!(
+            err.message.contains("compatibility level"),
+            "{}",
+            err.message
+        );
+
+        // Setting max_compatibility_level = 2 allows upgrading to lib@2.0 (compat 2).
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='lib', version='1.0', max_compatibility_level=2)\nbazel_dep(name='consumer', version='1.0')\n",
+        );
+        let res = resolve(&o).unwrap();
+        let lib_key = res.dep_graph.keys.iter().find(|k| k.name == "lib").unwrap();
+        assert_eq!(lib_key.version.to_string(), "2.0");
+
+        // Prerelease-aware bazel_version_satisfies and module_mirrors parsing.
+        assert!(!bazel_version_satisfies("9.0.0-pre.1", ">=9.0.0"));
+        assert!(bazel_version_satisfies("9.0.0", ">=9.0.0-rc1"));
+        let mm = parse_module_mirrors(
+            &[
+                "https://bcr.bazel.build=https://mirror1.example.com,https://mirror2.example.com"
+                    .into(),
+                "https://default-mirror.example.com".into(),
+            ],
+            &[
+                "https://bcr.bazel.build".into(),
+                "https://other.example.com".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            mm.get("").unwrap(),
+            &vec!["https://default-mirror.example.com".to_string()]
+        );
+        assert_eq!(
+            mm.get("https://bcr.bazel.build").unwrap(),
+            &vec![
+                "https://mirror1.example.com".to_string(),
+                "https://mirror2.example.com".to_string()
+            ]
+        );
+        assert_eq!(
+            crate::registry::vendored_registry_path(
+                Path::new("/v"),
+                "https://BCR.Bazel.Build/modules/foo/1.0/MODULE.bazel"
+            ),
+            Some(PathBuf::from(
+                "/v/_registries/bcr.bazel.build/modules/foo/1.0/MODULE.bazel"
+            ))
+        );
     }
 }

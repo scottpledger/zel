@@ -45,6 +45,7 @@ pub struct BzlmodConfig {
     pub bazel_version: String,
     pub experimental_repository_ctx_execute_wasm: bool,
     pub experimental_sibling_repository_layout: bool,
+    pub incompatible_no_implicit_watch_label: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
@@ -56,13 +57,21 @@ fn raw(parsed: &ParsedCommandOptions, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `RepositoryOverrideConverter`'s name check: an apparent name must be a valid user-provided repo name.
+/// `RepositoryOverrideConverter`'s name check: a canonical (`+`) or apparent user-provided repo name.
 fn validate_repo_flag_name(name: &str) -> Result<(), ()> {
     if name.is_empty() || name.starts_with('@') {
         return Err(());
     }
     if name.contains('+') {
-        return Ok(());
+        if name != "."
+            && name != ".."
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+        {
+            return Ok(());
+        }
+        return Err(());
     }
     let valid_start = name
         .chars()
@@ -102,6 +111,26 @@ fn split_pair(v: &str) -> Option<(String, String)> {
         .map(|(a, b)| (a.to_string(), b.to_string()))
 }
 
+fn lexically_normalize_cli_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
 fn resolve_user_home(client_env: &BTreeMap<String, String>) -> Option<String> {
     let non_empty = |v: Option<&String>| v.filter(|s| !s.is_empty()).cloned();
     let non_empty_env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
@@ -124,6 +153,16 @@ pub(crate) fn expand_option_path(
     user_home: Option<&str>,
     windows_mode: bool,
 ) -> PathBuf {
+    expand_option_path_ex(p, workspace, user_home, windows_mode, true)
+}
+
+fn expand_option_path_ex(
+    p: &str,
+    workspace: &Path,
+    user_home: Option<&str>,
+    windows_mode: bool,
+    expand_workspace: bool,
+) -> PathBuf {
     let trim_dir = |base: &str| -> PathBuf {
         let normalized = if windows_mode {
             base.replace('/', "\\")
@@ -136,11 +175,11 @@ pub(crate) fn expand_option_path(
             PathBuf::from(normalized)
         }
     };
-    if p == "%workspace%" {
+    let raw_joined = if expand_workspace && p == "%workspace%" {
         trim_dir(&workspace.display().to_string())
     } else if let Some(rest) = p
         .strip_prefix("%workspace%")
-        .filter(|r| r.starts_with(['/', '\\']))
+        .filter(|r| expand_workspace && r.starts_with(['/', '\\']))
     {
         let mut out = trim_dir(&workspace.display().to_string());
         for seg in rest
@@ -150,6 +189,14 @@ pub(crate) fn expand_option_path(
             out.push(seg);
         }
         out
+    } else if expand_workspace && p.contains("%workspace%") {
+        let replaced = p.replace("%workspace%", &workspace.to_string_lossy());
+        let pb = PathBuf::from(&replaced);
+        if pb.is_absolute() {
+            pb
+        } else {
+            trim_dir(&workspace.display().to_string()).join(pb)
+        }
     } else if p == "~" {
         if let Some(home) = user_home {
             PathBuf::from(home)
@@ -179,6 +226,11 @@ pub(crate) fn expand_option_path(
         } else {
             trim_dir(&workspace.display().to_string()).join(pb)
         }
+    };
+    if windows_mode {
+        raw_joined
+    } else {
+        lexically_normalize_cli_path(&raw_joined)
     }
 }
 
@@ -223,13 +275,21 @@ impl BzlmodConfig {
             if p == "%workspace%"
                 || p.strip_prefix("%workspace%")
                     .is_some_and(|r| r.starts_with(['/', '\\']))
+                || p.contains("%workspace%")
                 || p == "~"
                 || p.starts_with("~/")
                 || (windows_mode && p.starts_with("~\\"))
             {
-                expand_option_path(p, workspace, user_home.as_deref(), windows_mode)
+                expand_option_path_ex(p, workspace, user_home.as_deref(), windows_mode, true)
             } else {
-                expand_option_path(p, &cwd, user_home.as_deref(), windows_mode)
+                expand_option_path_ex(p, &cwd, user_home.as_deref(), windows_mode, true)
+            }
+        };
+        let abs_no_ws = |p: &str| -> PathBuf {
+            if p == "~" || p.starts_with("~/") || (windows_mode && p.starts_with("~\\")) {
+                expand_option_path_ex(p, workspace, user_home.as_deref(), windows_mode, false)
+            } else {
+                expand_option_path_ex(p, &cwd, user_home.as_deref(), windows_mode, false)
             }
         };
         let mode_str = |n: &str, d: &str| {
@@ -255,7 +315,9 @@ impl BzlmodConfig {
             if !n.is_empty() {
                 validate_repo_flag_name(&n).map_err(|_| format!("While parsing option --override_repository={v}: Invalid repository name given to override"))?;
             }
-            if !p.is_empty() {
+            if p.is_empty() {
+                override_repository.remove(&n);
+            } else {
                 override_repository.insert(n, abs(&p));
             }
         }
@@ -273,22 +335,45 @@ impl BzlmodConfig {
             strict_repo_env,
             workspace.to_str(),
         );
-        let pairs = |n: &str| -> Result<Vec<(String, String)>, String> {
-            raw(parsed, n)
-                .iter()
-                .map(|v| {
-                    split_pair(v)
-                        .map(|(a, b)| {
-                            let b_path = abs(&b);
-                            (a, format_option_path_fragment(&b_path, windows_mode))
-                        })
-                        .ok_or_else(|| {
-                            let kind = if n == "override_module" { "Module overrides" } else { "Module injections" };
-                            format!("While parsing option --{n}={v}: {kind} must be of the form 'module-name=path'")
-                        })
-                        .and_then(|(a, b)| validate_module_flag_name(&a, n, v).map(|_| (a, b)))
-                })
-                .collect()
+        let parse_map_flag = |n: &str,
+                              is_repo_name: bool|
+         -> Result<Vec<(String, String)>, String> {
+            let mut out: Vec<(String, String)> = Vec::new();
+            for v in raw(parsed, n) {
+                let (a, b) = split_pair(&v).ok_or_else(|| {
+                    let kind = match n {
+                        "override_module" => "Module overrides",
+                        "inject_repository" => "Repository injections",
+                        _ => "Module injections",
+                    };
+                    let form = if is_repo_name {
+                        "repository-name=path"
+                    } else {
+                        "module-name=path"
+                    };
+                    format!("While parsing option --{n}={v}: {kind} must be of the form '{form}'")
+                })?;
+                if is_repo_name {
+                    if a.contains('+') || validate_repo_flag_name(&a).is_err() {
+                        return Err(format!(
+                            "While parsing option --{n}={v}: Invalid repository name given to inject"
+                        ));
+                    }
+                } else {
+                    validate_module_flag_name(&a, n, &v)?;
+                }
+                if b.is_empty() {
+                    out.retain(|(k, _)| k != &a);
+                } else {
+                    let expanded = format_option_path_fragment(&abs(&b), windows_mode);
+                    if let Some(existing) = out.iter_mut().find(|(k, _)| k == &a) {
+                        existing.1 = expanded;
+                    } else {
+                        out.push((a, expanded));
+                    }
+                }
+            }
+            Ok(out)
         };
         let allow_yanked: Vec<String> = raw(parsed, "allow_yanked_versions")
             .iter()
@@ -331,35 +416,58 @@ impl BzlmodConfig {
                 }
             })
             .collect();
+        let registries = raw(parsed, "registry");
+        let module_mirrors = raw(parsed, "module_mirrors");
+        crate::resolve::parse_module_mirrors(&module_mirrors, &registries)?;
+        let repository_cache = match raw(parsed, "repository_cache").last() {
+            // An explicitly empty `--repository_cache=` disables the cache.
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(abs(s)),
+            None => Some(default_repository_cache(output_base)),
+        };
+        let repo_contents_cache = match raw(parsed, "repo_contents_cache").last() {
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(abs(s)),
+            None => repository_cache.as_ref().map(|rc| rc.join("contents")),
+        };
+        if let Some(ref rcc) = repo_contents_cache {
+            if rcc.starts_with(workspace) {
+                return Err(format!(
+                    "The repo contents cache [{}] is inside the main repo [{}]. This can cause spurious failures. Disable the repo contents cache with `--repo_contents_cache=`, or specify `--repo_contents_cache=<path outside the main repo>`.",
+                    rcc.display(),
+                    workspace.display()
+                ));
+            }
+            if output_base.starts_with(rcc) {
+                return Err(format!(
+                    "The output base [{}] is inside the repo contents cache [{}]. This can cause spurious failures. Disable the repo contents cache with `--repo_contents_cache=`, or specify `--repo_contents_cache=<path outside the output base>`.",
+                    output_base.display(),
+                    rcc.display()
+                ));
+            }
+        }
         Ok(BzlmodConfig {
             workspace: workspace.to_path_buf(),
             output_base: output_base.to_path_buf(),
             client_env: env,
-            registries: raw(parsed, "registry"),
+            registries,
             check_direct_dependencies: check("check_direct_dependencies", "warning")?,
             bazel_compatibility_mode: check("check_bazel_compatibility", "error")?,
             lockfile_mode,
             override_repository,
             distdirs: raw(parsed, "distdir").iter().map(|d| abs(d)).collect(),
-            repository_cache: match raw(parsed, "repository_cache").last() {
-                // An explicitly empty `--repository_cache=` disables the cache.
-                Some(s) if s.is_empty() => None,
-                Some(s) => Some(abs(s)),
-                None => Some(default_repository_cache(output_base)),
-            },
-            repo_contents_cache: raw(parsed, "repo_contents_cache")
-                .last()
-                .filter(|s| !s.is_empty())
-                .map(|s| abs(s)),
+            repository_cache,
+            repo_contents_cache,
             disable_download: parsed
                 .get_bool("repository_disable_download")
                 .unwrap_or(false),
             // An empty `--vendor_dir=` is the (empty) path fragment relative to the workspace, i.e. the workspace root.
+            // `--vendor_dir` does NOT expand `%workspace%`.
             vendor_dir: raw(parsed, "vendor_dir").last().map(|s| {
                 if s.is_empty() {
                     workspace.to_path_buf()
                 } else {
-                    abs(s)
+                    abs_no_ws(s)
                 }
             }),
             ignore_dev_dependency: parsed.get_bool("ignore_dev_dependency").unwrap_or(false),
@@ -367,18 +475,10 @@ impl BzlmodConfig {
                 .get_bool("experimental_isolated_extension_usages")
                 .unwrap_or(false),
             allow_yanked,
-            override_modules: pairs("override_module")?
-                .into_iter()
-                .zip(raw(parsed, "override_module"))
-                .filter_map(|(pair, raw)| {
-                    raw.split_once('=')
-                        .filter(|(_, path)| !path.is_empty())
-                        .map(|_| pair)
-                })
-                .collect(),
-            inject_modules: pairs("inject_module")?,
-            inject_repositories: pairs("inject_repository")?,
-            module_mirrors: raw(parsed, "module_mirrors"),
+            override_modules: parse_map_flag("override_module", false)?,
+            inject_modules: parse_map_flag("inject_module", false)?,
+            inject_repositories: parse_map_flag("inject_repository", true)?,
+            module_mirrors,
             main_mapping_errors: false,
             semantics_fingerprint: crate::semantics_fp::stable_fingerprint(
                 &crate::semantics_fp::bool_overrides(parsed),
@@ -409,6 +509,9 @@ impl BzlmodConfig {
             experimental_sibling_repository_layout: parsed
                 .get_bool("experimental_sibling_repository_layout")
                 .unwrap_or(false),
+            incompatible_no_implicit_watch_label: parsed
+                .get_bool("incompatible_no_implicit_watch_label")
+                .unwrap_or(true),
             credential_helpers,
         })
     }
@@ -432,6 +535,7 @@ impl BzlmodConfig {
             verbose: false,
             experimental_repository_ctx_execute_wasm: self.experimental_repository_ctx_execute_wasm,
             experimental_sibling_repository_layout: self.experimental_sibling_repository_layout,
+            incompatible_no_implicit_watch_label: self.incompatible_no_implicit_watch_label,
             credential_helpers: self.credential_helpers.clone(),
         }
     }
@@ -500,6 +604,7 @@ fn check_override_flags(
         a.starts_with("--override_repository")
             || a.starts_with("--override_module")
             || a.starts_with("--inject_")
+            || a.starts_with("--module_mirrors")
     }) {
         return Ok(());
     }
@@ -514,7 +619,8 @@ fn check_override_flags(
     ) {
         Err(e)
             if e.starts_with("While parsing option --override_")
-                || e.starts_with("While parsing option --inject_") =>
+                || e.starts_with("While parsing option --inject_")
+                || e.starts_with("While parsing option --module_mirrors") =>
         {
             Err(e)
         }
@@ -563,6 +669,35 @@ fn check_repo_contents_cache_location(
 
 static OUTPUT_USER_ROOT: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
+thread_local! {
+    static SCOPED_OUTPUT_USER_ROOT: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+    static SCOPED_INSTALL_BASE: std::cell::RefCell<Option<Option<PathBuf>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// RAII guard restoring the calling thread's `output_user_root` override on drop.
+pub struct OutputUserRootGuard {
+    prev: Option<Option<PathBuf>>,
+}
+
+impl Drop for OutputUserRootGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        SCOPED_OUTPUT_USER_ROOT.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Overrides `output_user_root` for the current thread until the returned guard is dropped.
+/// Passing `None` forces fallback to `output_base.parent()` on this thread regardless of any
+/// process-wide `set_output_user_root` value.
+pub fn scoped_output_user_root(p: Option<&Path>) -> OutputUserRootGuard {
+    let next = Some(p.map(Path::to_path_buf));
+    let prev =
+        SCOPED_OUTPUT_USER_ROOT.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next));
+    OutputUserRootGuard { prev }
+}
+
 /// Records the server's `output_user_root`, below which the default repository cache
 /// (`<output_user_root>/cache/repos/v1`, `BlazeWorkspace.getCacheDir`) lives.
 pub fn set_output_user_root(p: &Path) {
@@ -571,23 +706,46 @@ pub fn set_output_user_root(p: &Path) {
 
 static INSTALL_BASE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
+/// RAII guard restoring the calling thread's `install_base` override on drop.
+pub struct InstallBaseGuard {
+    prev: Option<Option<PathBuf>>,
+}
+
+impl Drop for InstallBaseGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        SCOPED_INSTALL_BASE.with(|slot| *slot.borrow_mut() = prev);
+    }
+}
+
+/// Overrides `install_base` for the current thread until the returned guard is dropped.
+pub fn scoped_install_base(p: Option<&Path>) -> InstallBaseGuard {
+    let next = Some(p.map(Path::to_path_buf));
+    let prev = SCOPED_INSTALL_BASE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), next));
+    InstallBaseGuard { prev }
+}
+
 /// Records the server's install base (`@bazel_tools` is reported at `<install_base>/embedded_tools`).
 pub fn set_install_base(p: &Path) {
     *INSTALL_BASE.lock().unwrap() = Some(p.to_path_buf());
 }
 
 pub fn install_base() -> Option<PathBuf> {
+    if let Some(scoped) = SCOPED_INSTALL_BASE.with(|slot| slot.borrow().clone()) {
+        return scoped;
+    }
     INSTALL_BASE.lock().unwrap().clone()
 }
 
 /// The default repository cache: `<output_user_root>/cache/repos/v1`, falling back to the parent
 /// of the output base (the default `output_user_root` layout) before the server registered one.
 pub fn default_repository_cache(output_base: &Path) -> PathBuf {
-    let root = OUTPUT_USER_ROOT
-        .lock()
-        .unwrap()
-        .clone()
-        .unwrap_or_else(|| output_base.join(".."));
+    let configured = match SCOPED_OUTPUT_USER_ROOT.with(|slot| slot.borrow().clone()) {
+        Some(scoped) => scoped,
+        None => OUTPUT_USER_ROOT.lock().unwrap().clone(),
+    };
+    let root =
+        configured.unwrap_or_else(|| output_base.parent().unwrap_or(output_base).to_path_buf());
     root.join("cache").join("repos").join("v1")
 }
 
@@ -635,6 +793,8 @@ impl Session {
         ro.inject_repositories = cfg.inject_repositories.clone();
         ro.module_mirrors = cfg.module_mirrors.clone();
         ro.repository_cache = cfg.repository_cache.clone();
+        ro.vendor_dir = cfg.vendor_dir.clone();
+        ro.downloader_rewriter = cfg.downloader_rewriter.clone();
         ro.credential_helpers = cfg.credential_helpers.clone();
         ro.client_env = cfg.client_env.clone();
         match mode {
@@ -642,6 +802,7 @@ impl Session {
             LockfileMode::Update => {
                 ro.known_hashes = Some(ws_lock.registry_file_hashes.clone());
                 ro.known_hashes_mode = KnownHashesMode::UseAndUpdate;
+                ro.locked_yanked = Some(ws_lock.selected_yanked_versions.clone());
             }
             LockfileMode::Refresh => {
                 let mut k = ws_lock.registry_file_hashes.clone();
@@ -652,6 +813,7 @@ impl Session {
             LockfileMode::Error => {
                 ro.known_hashes = Some(ws_lock.registry_file_hashes.clone());
                 ro.known_hashes_mode = KnownHashesMode::Enforce;
+                ro.locked_yanked = Some(ws_lock.selected_yanked_versions.clone());
             }
         }
         // Non-registry (archive/git) module overrides are fetched through a bootstrap runtime.
@@ -1476,27 +1638,25 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
                 let _ = std::os::unix::fs::symlink(&target, &dir);
             }
         }
-        // Vendor registry files fetched over the network.
-        let registries_dir = vendor_dir.join("_registries");
+        // Vendor registry files fetched over the network (using repo_cache first when available).
         for (url, hash) in &session.resolution.registry_file_hashes {
-            if url.starts_with("file://") || hash.is_none() {
-                continue;
-            }
-            let Some(rel) = registry_vendor_rel_path(url) else {
+            let Some(h) = hash.as_ref().filter(|_| !url.starts_with("file://")) else {
                 continue;
             };
-            if rel.is_absolute()
-                || !rel
-                    .components()
-                    .all(|c| matches!(c, std::path::Component::Normal(_)))
-            {
+            let Some(p) = crate::registry::vendored_registry_path(&vendor_dir, url) else {
                 continue;
-            }
-            let p = registries_dir.join(&rel);
-            if !p.starts_with(&registries_dir) {
-                continue;
-            }
-            if let Ok(Some(b)) = crate::registry::fetch_url(url, 3) {
+            };
+            let cached_bytes = session.cfg.repository_cache.as_ref().and_then(|rc_root| {
+                let rc = crate::download::RepositoryCache::new(rc_root);
+                let ck = crate::hash::Checksum::sha256_hex(h).ok()?;
+                let path = rc.get(&ck, "").ok().flatten()?;
+                std::fs::read(path).ok()
+            });
+            let bytes = match cached_bytes {
+                Some(b) => Some(b),
+                None => crate::registry::fetch_url(url, 3).ok().flatten(),
+            };
+            if let Some(b) = bytes {
                 if let Some(par) = p.parent() {
                     let _ = std::fs::create_dir_all(par);
                 }
@@ -1535,7 +1695,7 @@ impl Rt {
 
     /// Whether `canonical` is created by a `local=True` or `configure=True` rule (excluded from vendoring).
     pub fn is_local_repo(self: &Arc<Self>, canonical: &str) -> bool {
-        if self.opts.override_repository.keys().any(|k| k == canonical) {
+        if self.repo_override_for(canonical).ok().flatten().is_some() {
             return true;
         }
         match self.repo_spec_for(canonical) {
@@ -1558,7 +1718,7 @@ impl Rt {
 /// (`<lowercased_host>/<url_decoded_path>`, stripping `:port`, `?query`, and `#fragment`),
 /// returning `None` if the host or decoded path is empty, contains NUL or a drive prefix, or
 /// attempts to traverse above `<lowercased_host>`.
-fn registry_vendor_rel_path(url: &str) -> Option<PathBuf> {
+pub(crate) fn registry_vendor_rel_path(url: &str) -> Option<PathBuf> {
     let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let no_frag = after_scheme
         .split_once('#')
@@ -1878,15 +2038,17 @@ mod repo_env_tests {
             Some(Path::new("/users/win_alice/cache"))
         );
 
-        // When neither home variable is non-empty, literal ~/... falls back to workspace-relative.
+        // When neither home variable is non-empty, literal ~/... falls back to workspace-relative
+        // (with `--repo_contents_cache=` disabling the nested contents cache inside `/ws`).
         let no_home_cfg = cfg_of(
             &[("HOME", ""), ("USERPROFILE", "")],
-            &["--repository_cache=~/cache"],
+            &["--repository_cache=~/cache", "--repo_contents_cache="],
         );
         assert_eq!(
             no_home_cfg.repository_cache.as_deref(),
             Some(Path::new("/ws/~/cache"))
         );
+        assert!(no_home_cfg.repo_contents_cache.is_none());
 
         // Windows backslash forms (`~\...`, `%workspace%\...`, drive-letter `USERPROFILE`) normalize
         // to Bazel PathFragment `/` separators and uppercase drive letters.
@@ -1973,21 +2135,17 @@ mod repo_env_tests {
         assert!(full_up.is_ok(), "{full_up:?}");
 
         // `--repo_contents_cache=~/...` expanding inside `ws` via `--client_env=HOME=<root>` is
-        // rejected by early check (both `=` and two-token forms), matching `from_parsed`'s path.
+        // rejected identically by both early check and `from_parsed` (both `=` and two-token forms).
         let inside_cache_args = vec![
             format!("--client_env=HOME={}", root.display()),
             "--repo_contents_cache=~/ws/cache_inside".to_string(),
         ];
         let (early_inside, full_inside) = run_both(&inside_cache_args);
         let expected_inside = ws.join("cache_inside");
-        assert_eq!(
-            full_inside
-                .expect("from_parsed")
-                .repo_contents_cache
-                .as_deref(),
-            Some(expected_inside.as_path())
-        );
         let inside_err = early_inside.expect_err("cache inside main repo must fail");
+        let full_inside_err =
+            full_inside.expect_err("from_parsed must also reject cache inside main repo");
+        assert_eq!(inside_err, full_inside_err);
         assert!(
             inside_err
                 .replace('\\', "/")
