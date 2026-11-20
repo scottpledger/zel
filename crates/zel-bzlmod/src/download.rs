@@ -1259,20 +1259,30 @@ impl Downloader {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        // Bazel applies `--credential_helper` ahead of `.netrc` and `auth` from `get_auth`.
-        if let Ok(extra) = crate::netrc::resolve_credential_helper_headers(
+        // Mirrors `CredentialHelperCredentials.getRequestMetadata` +
+        // `HttpConnectorMultiplexer.getHeaderFunction`:
+        // - When a `--credential_helper` matches `url`, its headers override matching keys in
+        //   `req.headers` (`buildKeepingLast`) and fallback credentials (`req.auth`, URL
+        //   userinfo, `.netrc`) are never consulted — even if the helper returned `{}` or
+        //   only non-`Authorization` headers, or failed with an `IOException`.
+        // - Only when no `--credential_helper` matches `url` (`Ok(None)`) do we fall back to
+        //   `req.auth`, URL userinfo, and `.netrc`.
+        match crate::netrc::resolve_credential_helper_headers(
             url,
             &self.credential_helpers,
             &self.client_env,
         ) {
-            for (k, v) in extra {
-                if !h
-                    .iter()
-                    .any(|(existing, _)| existing.eq_ignore_ascii_case(&k))
-                {
-                    h.push((k, v));
+            Ok(Some(extra)) => {
+                for (k, _) in &extra {
+                    h.retain(|(existing, _)| !existing.eq_ignore_ascii_case(k));
                 }
+                h.extend(extra);
+                return h;
             }
+            Err(_) => {
+                return h;
+            }
+            Ok(None) => {}
         }
         let has_auth = |hdrs: &[(String, String)]| {
             hdrs.iter()
@@ -2318,6 +2328,12 @@ mod tests {
             let (port, seen) = serve(1, |_, _| ok(b"authed-body"));
             let url = format!("http://127.0.0.1:{port}/pkg.tgz");
             let mut r = req(vec![url.clone()], d.join("authed_out"));
+            r.headers.insert(
+                "Authorization".to_string(),
+                "Bearer FROM-STARLARK".to_string(),
+            );
+            r.headers
+                .insert("X-Starlark-Keep".to_string(), "kept".to_string());
             let mut auth_entry = BTreeMap::new();
             auth_entry.insert("type".to_string(), "basic".to_string());
             auth_entry.insert("login".to_string(), "auth_u".to_string());
@@ -2328,7 +2344,7 @@ mod tests {
             client_env.insert("NETRC".to_string(), netrc.to_string_lossy().into_owned());
             let dl_http = Downloader {
                 credential_helpers: vec![("127.0.0.1".to_string(), helper)],
-                client_env,
+                client_env: client_env.clone(),
                 ..quick()
             };
             dl_http.download(&r).unwrap();
@@ -2338,7 +2354,90 @@ mod tests {
                 reqtext.contains("Authorization: Bearer FROM-HELPER\r\n"),
                 "{reqtext}"
             );
+            assert!(!reqtext.contains("FROM-STARLARK"), "{reqtext}");
+            assert!(reqtext.contains("X-Starlark-Keep: kept\r\n"), "{reqtext}");
             assert!(reqtext.contains("X-Helper: ok\r\n"), "{reqtext}");
+
+            // Matching `--credential_helper` returning non-Authorization custom headers or `{}`
+            // must NOT attach `.netrc` or Starlark `auth` `Authorization`, whereas a non-matching
+            // `--credential_helper` (`other.example.com`) MUST still fall back to `.netrc`.
+            let custom_only_helper = d.join("cred_helper_custom_only.sh");
+            fs::write(
+                &custom_only_helper,
+                "#!/bin/sh\n[ \"$1\" = \"get\" ] || exit 2\necho '{\"headers\":{\"X-Custom-Auth\":[\"custom-only\"]}}'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&custom_only_helper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let empty_helper = d.join("cred_helper_empty.sh");
+            fs::write(
+                &empty_helper,
+                "#!/bin/sh\n[ \"$1\" = \"get\" ] || exit 2\necho '{}'\n",
+            )
+            .unwrap();
+            fs::set_permissions(&empty_helper, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let (port2, seen2) = serve(3, |_, _| ok(b"body2"));
+            let url2 = format!("http://127.0.0.1:{port2}/pkg2.tgz");
+
+            // 1. Matching helper with custom header only (both Starlark `auth` and `.netrc` set).
+            let mut r_custom = req(vec![url2.clone()], d.join("custom_only_out"));
+            let mut fallback_auth = BTreeMap::new();
+            fallback_auth.insert("type".to_string(), "basic".to_string());
+            fallback_auth.insert("login".to_string(), "auth_u".to_string());
+            fallback_auth.insert("password".to_string(), "auth_p".to_string());
+            r_custom.auth.insert(url2.clone(), fallback_auth.clone());
+            Downloader {
+                credential_helpers: vec![("127.0.0.1".to_string(), custom_only_helper.clone())],
+                client_env: client_env.clone(),
+                ..quick()
+            }
+            .download(&r_custom)
+            .unwrap();
+
+            // 2. Matching helper returning `{}` (both Starlark `auth` and `.netrc` set).
+            let mut r_empty = req(vec![url2.clone()], d.join("empty_helper_out"));
+            r_empty.auth.insert(url2.clone(), fallback_auth);
+            Downloader {
+                credential_helpers: vec![("127.0.0.1".to_string(), empty_helper)],
+                client_env: client_env.clone(),
+                ..quick()
+            }
+            .download(&r_empty)
+            .unwrap();
+
+            // 3. Non-matching helper (`other.example.com`) falls back to `.netrc` for `127.0.0.1`.
+            let r_non_match = req(vec![url2], d.join("non_match_out"));
+            Downloader {
+                credential_helpers: vec![("other.example.com".to_string(), custom_only_helper)],
+                client_env,
+                ..quick()
+            }
+            .download(&r_non_match)
+            .unwrap();
+
+            let reqs2 = seen2.lock().unwrap().clone();
+            assert!(
+                reqs2[0].contains("X-Custom-Auth: custom-only\r\n"),
+                "{}",
+                reqs2[0]
+            );
+            assert!(
+                !reqs2[0].to_ascii_lowercase().contains("authorization:"),
+                "matching custom-header helper must not attach fallback auth:\n{}",
+                reqs2[0]
+            );
+            assert!(
+                !reqs2[1].to_ascii_lowercase().contains("authorization:"),
+                "matching empty helper must not attach fallback auth:\n{}",
+                reqs2[1]
+            );
+            let expected_netrc_b64 = base64_encode(b"netrc_u:netrc_p");
+            assert!(
+                reqs2[2].contains(&format!("Authorization: Basic {expected_netrc_b64}\r\n")),
+                "non-matching helper must still fall back to .netrc:\n{}",
+                reqs2[2]
+            );
         }
         let _ = fs::remove_dir_all(&d);
     }

@@ -196,6 +196,50 @@ fn helper_matches_host(scope: &str, host: &str) -> bool {
     }
 }
 
+fn find_matching_credential_helper<'a>(
+    host: &str,
+    helpers: &'a [(String, PathBuf)],
+) -> Option<&'a Path> {
+    if helpers.is_empty() {
+        return None;
+    }
+    // Mirrors `CredentialHelperProvider.findCredentialHelper`:
+    // 1. Exact host match (later flag overrides earlier flag).
+    // 2. Most specific `*.suffix` wildcard match (longest suffix wins; later flag breaks ties).
+    // 3. Default un-scoped helper (later flag overrides earlier flag).
+    let mut exact: Option<&'a Path> = None;
+    for (scope, path) in helpers {
+        if !scope.is_empty() && !scope.starts_with("*.") && host.eq_ignore_ascii_case(scope) {
+            exact = Some(path.as_path());
+        }
+    }
+    if exact.is_some() {
+        return exact;
+    }
+    let mut best_wildcard: Option<(usize, &'a Path)> = None;
+    for (scope, path) in helpers {
+        if let Some(suffix) = scope.strip_prefix("*.") {
+            if helper_matches_host(scope, host)
+                && best_wildcard
+                    .as_ref()
+                    .is_none_or(|(best_len, _)| suffix.len() >= *best_len)
+            {
+                best_wildcard = Some((suffix.len(), path.as_path()));
+            }
+        }
+    }
+    if let Some((_, path)) = best_wildcard {
+        return Some(path);
+    }
+    let mut default_helper: Option<&'a Path> = None;
+    for (scope, path) in helpers {
+        if scope.is_empty() {
+            default_helper = Some(path.as_path());
+        }
+    }
+    default_helper
+}
+
 fn run_credential_helper(
     helper: &Path,
     url: &str,
@@ -239,7 +283,10 @@ fn run_credential_helper(
     let text = String::from_utf8_lossy(&out.stdout);
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return Ok(Vec::new());
+        return Err(format!(
+            "Credential helper {} exited without output",
+            helper.display()
+        ));
     }
     let json = crate::json::Json::parse(trimmed).map_err(|e| {
         format!(
@@ -248,7 +295,10 @@ fn run_credential_helper(
         )
     })?;
     let crate::json::Json::Obj(top) = json else {
-        return Ok(Vec::new());
+        return Err(format!(
+            "Expected JSON object from credential helper {}",
+            helper.display()
+        ));
     };
     let mut result = Vec::new();
     if let Some((_, crate::json::Json::Obj(hdrs))) = top.into_iter().find(|(k, _)| k == "headers") {
@@ -265,33 +315,23 @@ fn run_credential_helper(
     Ok(result)
 }
 
-/// Resolves headers for `url` from configured `--credential_helper` entries, if any match.
+/// Resolves headers for `url` from configured `--credential_helper` entries.
+///
+/// Mirrors `CredentialHelperCredentials.getCredentialsFromHelper`:
+/// - `Ok(Some(headers))` when a configured helper matches `url`'s host (even if
+///   `headers` is empty `{}` or contains no `Authorization` header);
+/// - `Ok(None)` when no configured helper matches `url`;
+/// - `Err(_)` when a matching helper fails.
 pub fn resolve_credential_helper_headers(
     url: &str,
     helpers: &[(String, PathBuf)],
     client_env: &BTreeMap<String, String>,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Option<Vec<(String, String)>>, String> {
     let host = url_host(url);
-    if !helpers.is_empty() {
-        // Specific scope wins over wildcard; later flag overrides earlier flag.
-        let mut best: Option<&PathBuf> = None;
-        for (scope, path) in helpers {
-            if !scope.is_empty() && helper_matches_host(scope, host) {
-                best = Some(path);
-            }
-        }
-        if best.is_none() {
-            for (scope, path) in helpers {
-                if scope.is_empty() {
-                    best = Some(path);
-                }
-            }
-        }
-        if let Some(helper) = best {
-            return run_credential_helper(helper, url, client_env);
-        }
+    match find_matching_credential_helper(host, helpers) {
+        Some(helper) => run_credential_helper(helper, url, client_env).map(Some),
+        None => Ok(None),
     }
-    Ok(Vec::new())
 }
 
 /// Resolves fallback `.netrc` `Authorization` header for `url` from `NETRC` / `HOME`.
@@ -316,13 +356,16 @@ pub fn resolve_netrc_headers(
 }
 
 /// Resolves auth headers for `url` using `--credential_helper` (highest priority) or `.netrc`.
+///
+/// Mirrors `CredentialHelperCredentials.getRequestMetadata`: when a `--credential_helper`
+/// matches `url`, its response headers are returned directly without falling back to `.netrc`
+/// (even when the helper returns `{}` or only non-`Authorization` headers).
 pub fn resolve_auth_headers(
     url: &str,
     helpers: &[(String, PathBuf)],
     client_env: &BTreeMap<String, String>,
 ) -> Result<Vec<(String, String)>, String> {
-    let hdrs = resolve_credential_helper_headers(url, helpers, client_env)?;
-    if !hdrs.is_empty() {
+    if let Some(hdrs) = resolve_credential_helper_headers(url, helpers, client_env)? {
         return Ok(hdrs);
     }
     Ok(resolve_netrc_headers(url, client_env))
@@ -399,5 +442,73 @@ default login defuser password defpass
         let d = netrc.get_credential("other.com").unwrap();
         assert_eq!(d.login.as_deref(), Some("defuser"));
         assert_eq!(d.password.as_deref(), Some("defpass"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_match_suppresses_netrc_fallback_while_non_match_falls_back() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("zel-netrc-cred-precedence-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let netrc = dir.join(".netrc");
+        std::fs::write(
+            &netrc,
+            "machine target.example.com login netrc_user password netrc_secret\n",
+        )
+        .unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("NETRC".to_string(), netrc.to_string_lossy().into_owned());
+
+        let custom_helper = dir.join("custom_helper.sh");
+        std::fs::write(
+            &custom_helper,
+            "#!/bin/sh\necho '{\"headers\":{\"X-Custom-Auth\":[\"custom-tok\"]}}'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&custom_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let empty_helper = dir.join("empty_helper.sh");
+        std::fs::write(&empty_helper, "#!/bin/sh\necho '{}'\n").unwrap();
+        std::fs::set_permissions(&empty_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Matching helper returning custom non-Authorization header does NOT fall back to .netrc.
+        let hdrs_custom = resolve_auth_headers(
+            "https://target.example.com/archive.tar.gz",
+            &[("target.example.com".to_string(), custom_helper.clone())],
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            hdrs_custom,
+            vec![("X-Custom-Auth".to_string(), "custom-tok".to_string())]
+        );
+
+        // Matching helper returning empty `{}` headers does NOT fall back to .netrc.
+        let hdrs_empty = resolve_auth_headers(
+            "https://target.example.com/archive.tar.gz",
+            &[("target.example.com".to_string(), empty_helper)],
+            &env,
+        )
+        .unwrap();
+        assert!(hdrs_empty.is_empty(), "{hdrs_empty:?}");
+
+        // Non-matching helper (configured for other.example.com) DOES fall back to .netrc.
+        let hdrs_fallback = resolve_auth_headers(
+            "https://target.example.com/archive.tar.gz",
+            &[("other.example.com".to_string(), custom_helper)],
+            &env,
+        )
+        .unwrap();
+        let expected_b64 = crate::hash::base64_encode(b"netrc_user:netrc_secret");
+        assert_eq!(
+            hdrs_fallback,
+            vec![("Authorization".to_string(), format!("Basic {expected_b64}"))]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
