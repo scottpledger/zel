@@ -3447,14 +3447,20 @@ pub fn execute_action_with(
                 let out_abs = execroot.get_relative(&out_dir.exec_path);
                 if let Ok(Some(st)) = fs.stat_if_found(&out_abs, false) {
                     if !st.is_directory || st.is_symlink {
-                        let _ = fs.delete(&out_abs);
+                        if !zel_vfs::unlink_path_for_write(std::path::Path::new(
+                            out_abs.path_string(),
+                        )) {
+                            let _ = fs.delete(&out_abs);
+                        }
                     } else {
                         #[cfg(unix)]
                         {
                             fn unlock_dirs(dir: &std::path::Path) {
                                 use std::os::unix::fs::PermissionsExt;
                                 if let Ok(sm) = std::fs::symlink_metadata(dir) {
-                                    if sm.file_type().is_dir() {
+                                    if sm.file_type().is_dir()
+                                        && !zel_vfs::is_junction_or_symlink(dir)
+                                    {
                                         let _ = std::fs::set_permissions(
                                             dir,
                                             std::fs::Permissions::from_mode(0o755),
@@ -3500,7 +3506,11 @@ pub fn execute_action_with(
                                         action_cache.remove(rel.path_string());
                                     }
                                     invalidate_computed_digest(child.path_string());
-                                    let _ = fs.delete(&child);
+                                    if !zel_vfs::unlink_path_for_write(std::path::Path::new(
+                                        child.path_string(),
+                                    )) {
+                                        let _ = fs.delete(&child);
+                                    }
                                 }
                             }
                             has_kept
@@ -3822,7 +3832,7 @@ fn validate_and_chmod_tree_artifact(
         for child in children {
             let sm = std::fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
             let ft = sm.file_type();
-            if ft.is_symlink() {
+            if zel_vfs::is_junction_or_symlink(&child) {
                 match std::fs::metadata(&child) {
                     Ok(_) => {}
                     Err(e)
