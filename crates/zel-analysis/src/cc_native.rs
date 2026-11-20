@@ -88,15 +88,21 @@ fn exec_os_for_ctx(st: &CtxState) -> &'static str {
 fn cc_per_label_matches(spec: &str, exec_path: &str, label: Option<&Label>) -> Result<bool, StarlarkError> {
     let mut incs = Vec::new();
     let mut excs = Vec::new();
-    for raw_pat in spec.split(',').filter(|p| !p.is_empty()) {
-        if let Some(neg) = raw_pat.strip_prefix('-') {
-            let re = zel_util::java_regex::Regex::new(neg)
-                .map_err(|e| StarlarkError(format!("invalid per-file regex '{neg}': {e}")))?;
+    for piece in split_unescaped_commas(spec) {
+        let excluded = piece.starts_with('-');
+        let raw_pat = if excluded {
+            &piece[1..]
+        } else {
+            piece.strip_prefix('+').unwrap_or(&piece)
+        };
+        if raw_pat.is_empty() {
+            continue;
+        }
+        let re = zel_util::java_regex::Regex::new(raw_pat)
+            .map_err(|e| StarlarkError(format!("invalid per-file regex '{raw_pat}': {e}")))?;
+        if excluded {
             excs.push(re);
         } else {
-            let pos_pat = raw_pat.strip_prefix('+').unwrap_or(raw_pat);
-            let re = zel_util::java_regex::Regex::new(pos_pat)
-                .map_err(|e| StarlarkError(format!("invalid per-file regex '{pos_pat}': {e}")))?;
             incs.push(re);
         }
     }
@@ -106,8 +112,11 @@ fn cc_per_label_matches(spec: &str, exec_path: &str, label: Option<&Label>) -> R
     };
     if let Some(lbl) = label {
         let canon = lbl.canonical_form();
-        let noncanon = format!("//{}:{}", lbl.package_identifier().package_fragment().path_string(), lbl.name());
-        if matches_one(&canon) || matches_one(&noncanon) {
+        let label_str = canon
+            .strip_prefix("@@")
+            .filter(|r| r.starts_with("//"))
+            .unwrap_or(&canon);
+        if matches_one(label_str) {
             return Ok(true);
         }
     }
@@ -135,6 +144,45 @@ fn split_unescaped_commas(s: &str) -> Vec<String> {
     out
 }
 
+fn parse_per_label_entry(entry: &str) -> (String, Vec<String>) {
+    // `PerLabelOptions.toString()` rendering stored in `BuildOptions`:
+    // `<RegexFilter.toString()> Options: [<opt1>, <opt2>, ...]`, where `RegexFilter.toString()`
+    // is empty or starts with `(?:(?>` / `-(?:(?>`.
+    if let Some(without_bracket) = entry.strip_suffix(']') {
+        if let Some((filter_part, opts_inner)) = without_bracket.split_once(" Options: [") {
+            if filter_part.is_empty()
+                || filter_part.starts_with("(?:(?>")
+                || filter_part.starts_with("-(?:(?>")
+            {
+                let opts = if opts_inner.is_empty() {
+                    Vec::new()
+                } else {
+                    opts_inner
+                        .split(", ")
+                        .filter(|s| !s.trim().is_empty())
+                        .map(str::to_string)
+                        .collect()
+                };
+                return (filter_part.to_string(), opts);
+            }
+        }
+    }
+    let chars: Vec<char> = entry.chars().collect();
+    let at_pos = (0..chars.len()).find(|&i| chars[i] == '@' && (i == 0 || chars[i - 1] != '\\'));
+    match at_pos {
+        None => (entry.replace("\\@", "@"), Vec::new()),
+        Some(idx) => {
+            let filter_spec = chars[..idx].iter().collect::<String>().replace("\\@", "@");
+            let opts_spec: String = chars[idx + 1..].iter().collect();
+            let opts = split_unescaped_commas(&opts_spec)
+                .into_iter()
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+            (filter_spec, opts)
+        }
+    }
+}
+
 fn cc_eval_per_file_opts(
     entries: &[String],
     file: &Artifact,
@@ -143,14 +191,15 @@ fn cc_eval_per_file_opts(
     let exec_path = file.exec_path.path_string();
     let mut out = Vec::new();
     for entry in entries {
-        let Some((filter_spec, opts_spec)) = entry.split_once('@') else {
-            continue;
-        };
-        if filter_spec.is_empty() || opts_spec.is_empty() {
+        if entry.is_empty() {
             continue;
         }
-        if cc_per_label_matches(filter_spec, exec_path, label)? {
-            for opt in split_unescaped_commas(opts_spec) {
+        let (filter_spec, opts) = parse_per_label_entry(entry);
+        if opts.is_empty() {
+            continue;
+        }
+        if cc_per_label_matches(&filter_spec, exec_path, label)? {
+            for opt in opts {
                 out.push(Value::String(opt));
             }
         }
@@ -290,18 +339,21 @@ fn cc_native(
                 Some(Value::Label(l)) => Some(l.clone()),
                 _ => None,
             };
-            let entries = crate::fragments::Opts::new(&st.cfg).list_unsplit("per_file_copt");
+            let entries = crate::fragments::Opts::new(&st.cfg).per_label_list("per_file_copt");
             cc_eval_per_file_opts(&entries, &src, lbl.as_ref()).map(mk_list)
         }
         "collect_per_file_lto_backend_opts" => {
-            let obj = cc_kw(pos, kw, 1, "object")
+            let obj = pos
+                .get(1)
+                .or_else(|| kw.get("obj"))
+                .or_else(|| kw.get("object"))
                 .and_then(artifact_of)
-                .ok_or_else(|| StarlarkError("collect_per_file_lto_backend_opts: object must be a File".into()));
+                .ok_or_else(|| StarlarkError("collect_per_file_lto_backend_opts: obj must be a File".into()));
             let obj = match obj {
                 Ok(a) => a,
                 Err(e) => return Some(Err(e)),
             };
-            let entries = crate::fragments::Opts::new(&st.cfg).list_unsplit("per_file_ltobackendopt");
+            let entries = crate::fragments::Opts::new(&st.cfg).per_label_list("per_file_ltobackendopt");
             cc_eval_per_file_opts(&entries, &obj, None).map(mk_list)
         }
         _ => return None,
@@ -337,10 +389,15 @@ fn cc_declare_other_output(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Stri
     Ok(file_value(&st.derived(PathFragment::create(&rel))))
 }
 
-/// `CppCompileActionBuilder.initializeActionName`: determines the default action name for
-/// `source` when no explicit `action_name` is supplied.
+/// `CppCompileActionBuilder.getActionName`: determines the default action name for `source`
+/// when no explicit `action_name` is supplied.
 fn cc_default_compile_action(source: &str, fc: &FeatureConfiguration) -> Result<&'static str, StarlarkError> {
-    if source.ends_with(".cppmap") {
+    let is_cppmap = if cfg!(windows) {
+        source.len() >= 7 && source[source.len() - 7..].eq_ignore_ascii_case(".cppmap")
+    } else {
+        source.ends_with(".cppmap")
+    };
+    if is_cppmap {
         return Ok("c++-module-compile");
     }
     if source.ends_with(".pic.s") {
@@ -349,25 +406,49 @@ fn cc_default_compile_action(source: &str, fc: &FeatureConfiguration) -> Result<
         ));
     }
     let ext = source.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+    // `CppFileTypes`: `C_SOURCE`, `CPP_SOURCE`, `.s`, and `.S` are always case-sensitive;
+    // `FileType.of(...)` extensions (`CPP_HEADER`, `.m`, `.mm`, `.asm`, `.ipb`, `CPP_MODULE`)
+    // are case-sensitive on Unix and case-insensitive on Windows (`FileType.hasExtension`).
+    let is_header = if cfg!(windows) {
+        matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "h" | "hh" | "hpp" | "ipp" | "hxx" | "h++" | "inc" | "inl" | "tlh" | "tli" | "tcc"
+        )
+    } else {
+        matches!(
+            ext,
+            "h" | "hh" | "hpp" | "ipp" | "hxx" | "h++" | "inc" | "inl" | "tlh" | "tli" | "H" | "tcc"
+        )
+    };
+    if is_header {
+        return if fc.is_enabled("parse_headers") {
+            Ok("c++-header-parsing")
+        } else {
+            err(format!(
+                "Header file '{source}' cannot be compiled without 'parse_headers' feature enabled"
+            ))
+        };
+    }
     match ext {
-        "h" | "hh" | "hpp" | "hxx" | "h++" | "inc" | "inl" | "tlh" | "tli" | "H" | "tcc" => {
-            if fc.is_enabled("parse_headers") {
-                Ok("c++-header-parsing")
-            } else {
-                err(format!(
-                    "Header file '{source}' cannot be compiled without 'parse_headers' feature enabled"
-                ))
-            }
-        }
         "c" => Ok("c-compile"),
         "cc" | "cpp" | "cxx" | "c++" | "C" | "cu" | "cl" => Ok("c++-compile"),
-        "m" => Ok("objc-compile"),
-        "mm" => Ok("objc++-compile"),
-        "s" | "asm" => Ok("assemble"),
+        "s" => Ok("assemble"),
         "S" => Ok("preprocess-assemble"),
-        "ipb" => Ok("clif-match"),
-        "pcm" | "gcm" | "ifc" => Ok("c++-module-codegen"),
-        _ => err(format!("Unrecognized source file type for '{source}'")),
+        _ => {
+            let norm = if cfg!(windows) {
+                ext.to_ascii_lowercase()
+            } else {
+                ext.to_string()
+            };
+            match norm.as_str() {
+                "m" => Ok("objc-compile"),
+                "mm" => Ok("objc++-compile"),
+                "asm" => Ok("assemble"),
+                "ipb" => Ok("clif-match"),
+                "pcm" | "gcm" | "ifc" => Ok("c++-module-codegen"),
+                _ => err(format!("Unrecognized source file type for '{source}'")),
+            }
+        }
     }
 }
 
@@ -704,16 +785,48 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
     let fc = cc_kw(pos, kw, 1, "feature_configuration")
         .and_then(|v| cc_features::lookup::<FeatureConfiguration>(v, cc_features::KIND_FEATURE_CONFIGURATION))
         .ok_or_else(|| StarlarkError("create_lto_backend_action: invalid feature_configuration".into()))?;
-    let vars: Arc<Variables> = cc_kw(pos, kw, 3, "build_variables")
+    let vars: Arc<Variables> = cc_kw(pos, kw, 2, "build_variables")
+        .or_else(|| cc_kw(pos, kw, 3, "build_variables"))
         .or_else(|| cc_kw(pos, kw, 100, "compile_build_variables"))
         .and_then(cc_features::variables_of)
         .ok_or_else(|| StarlarkError("create_lto_backend_action: invalid build_variables".into()))?;
-    let bitcode = cc_kw(pos, kw, 100, "bitcode_file")
-        .and_then(artifact_of)
-        .ok_or_else(|| StarlarkError("create_lto_backend_action: bitcode_file must be a File".into()))?;
-    let object_file = cc_kw(pos, kw, 100, "object_file")
-        .and_then(artifact_of)
-        .ok_or_else(|| StarlarkError("create_lto_backend_action: object_file must be a File".into()))?;
+    let outputs = if let Some(outs_val) = cc_kw(pos, kw, 7, "outputs") {
+        let outs = cc_artifacts(Some(outs_val));
+        if outs.is_empty() {
+            return err("create_lto_backend_action: outputs must not be empty");
+        }
+        outs
+    } else {
+        let object_file = cc_kw(pos, kw, 100, "object_file")
+            .and_then(artifact_of)
+            .ok_or_else(|| StarlarkError("create_lto_backend_action: object_file must be a File".into()))?;
+        let mut outs = vec![object_file];
+        if let Some(dwo) = cc_kw(pos, kw, 100, "dwo_file").and_then(artifact_of) {
+            outs.push(dwo);
+        }
+        outs
+    };
+    let mut inputs = if let Some(ins_val) = cc_kw(pos, kw, 4, "inputs") {
+        let mut ins = cc_artifacts(Some(ins_val));
+        ins.extend(cc_artifacts(cc_kw(pos, kw, 5, "all_bitcode_files")));
+        if let Some(imp) = cc_kw(pos, kw, 6, "imports").and_then(artifact_of) {
+            ins.push(imp);
+        }
+        ins
+    } else {
+        let bitcode = cc_kw(pos, kw, 100, "bitcode_file")
+            .and_then(artifact_of)
+            .ok_or_else(|| StarlarkError("create_lto_backend_action: bitcode_file must be a File".into()))?;
+        let mut ins = vec![bitcode];
+        for k in ["index", "imports"] {
+            if let Some(a) = cc_kw(pos, kw, 100, k).and_then(artifact_of) {
+                ins.push(a);
+            }
+        }
+        ins.extend(cc_artifacts(cc_kw(pos, kw, 100, "bitcode_inputs")));
+        ins.extend(cc_artifacts(cc_kw(pos, kw, 100, "all_bitcode_files")));
+        ins
+    };
     let action_name = "lto-backend";
     if !fc.action_is_configured(action_name) {
         return err("Action lto-backend does not have an enabled configuration in the toolchain.");
@@ -722,24 +835,21 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
     let tool = fc.tool_path_for_action(action_name).map_err(|e| StarlarkError(e.0))?;
     let argv = fc.command_line(action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
     let exec_reqs = cc_build_exec_reqs(&fc, action_name, None);
-    let env = cc_build_compile_env(&fc, action_name, &vars, &exec_reqs)?;
-    let mut outputs = vec![object_file.clone()];
-    if let Some(dwo) = cc_kw(pos, kw, 100, "dwo_file").and_then(artifact_of) {
-        outputs.push(dwo);
-    }
-    let mut inputs = vec![bitcode.clone()];
-    for k in ["index", "imports"] {
-        if let Some(a) = cc_kw(pos, kw, 100, k).and_then(artifact_of) {
-            inputs.push(a);
+    let mut env = cc_build_compile_env(&fc, action_name, &vars, &exec_reqs)?;
+    if let Some(Value::Dict(d)) = cc_kw(pos, kw, 8, "env") {
+        for (k, v) in &d.lock().unwrap().entries {
+            if let Some(ks) = k.as_str() {
+                env.insert(ks.to_string(), v.as_str().unwrap_or("").to_string());
+            }
         }
     }
-    inputs.extend(cc_artifacts(cc_kw(pos, kw, 100, "bitcode_inputs")));
     let mut tools = Vec::new();
-    if let Some(tc) = cc_kw(pos, kw, 2, "cc_toolchain") {
+    if let Some(tc) = cc_kw(pos, kw, 100, "cc_toolchain") {
         for f in ["_compiler_files", "compiler_files", "_all_files", "all_files"] {
             tools.extend(cc_artifacts(field(tc, f).as_ref()));
         }
     }
+    let primary_out = outputs[0].exec_path.path_string().to_string();
     let mut a = Action::new(
         st.label.clone(),
         "CcLtoBackendCompile",
@@ -749,11 +859,11 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
             shell_command: None,
         },
     );
-    a.progress_message = Some(format!("LTO Backend Compile {}", object_file.exec_path.path_string()));
+    a.progress_message = Some(format!("LTO Backend Compile {primary_out}"));
     a.env = env;
     a.execution_requirements = exec_reqs;
     inputs.extend(tools.iter().cloned());
-    a.inputs = inputs;
+    a.inputs = dedup(inputs);
     a.tools = dedup(tools);
     a.outputs = outputs;
     a.use_default_shell_env = true;
@@ -1824,5 +1934,211 @@ mod cc_native_tests {
             err.contains("Cannot instrument FDO without --copt=-Wno-error"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn per_file_opts_escaped_comma_filters_and_ipp_header_parsing_parity() {
+        let label = Label::parse_canonical("//pkg:lib").unwrap();
+
+        // 1. `BuildOptions`-converted `PerLabelOptions.toString()` entries (even when `raw` is
+        // empty) and escaped commas `\,` in both inclusion and exclusion regex filters.
+        let (_, pfc_opt) = crate::build_options::find_option("per_file_copt").unwrap();
+        let (_, lto_opt) = crate::build_options::find_option("per_file_ltobackendopt").unwrap();
+        let (_, host_pfc_opt) = crate::build_options::find_option("host_per_file_copt").unwrap();
+
+        let pfc_raw = vec!["pkg/.*\\.cc,-pkg/skip\\,me\\.cc@-DFROM_BO=1,-DPAIR=x\\,y".to_string()];
+        let pfc_converted = crate::build_options::convert_raws(
+            pfc_opt,
+            &pfc_raw,
+            &crate::build_options::canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+        let lto_raw = vec![
+            "pkg/.*a\\,1\\.o,-pkg/skip\\.o@-O3,-mllvm".to_string(),
+            "pkg/extra\\.o@-fno-lto".to_string(),
+        ];
+        let lto_converted = crate::build_options::convert_raws(
+            lto_opt,
+            &lto_raw,
+            &crate::build_options::canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+        let host_pfc_raw = vec!["pkg/tool\\.cc@-DHOST_PFC=1".to_string()];
+        let host_pfc_converted = crate::build_options::convert_raws(
+            host_pfc_opt,
+            &host_pfc_raw,
+            &crate::build_options::canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+
+        // Test converted `BuildOptions` values directly (with `raw: ""`) to prove `PerLabelOptions`
+        // `toString()` entries are parsed and applied rather than dropped.
+        let mut bo_only_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        bo_only_cfg.native.insert(
+            "per_file_copt".into(),
+            crate::NativeSetting {
+                raw: String::new(),
+                value: pfc_converted.clone(),
+            },
+        );
+        bo_only_cfg.native.insert(
+            "per_file_ltobackendopt".into(),
+            crate::NativeSetting {
+                raw: String::new(),
+                value: lto_converted.clone(),
+            },
+        );
+        bo_only_cfg.native.insert(
+            "host_per_file_copt".into(),
+            crate::NativeSetting {
+                raw: String::new(),
+                value: host_pfc_converted,
+            },
+        );
+
+        let mut st = Arc::try_unwrap(cc_test_ctx_state(&label)).ok().unwrap();
+        st.cfg = bo_only_cfg.clone();
+        let st = Arc::new(st);
+        let mut ectx = EvalContext::default();
+        let cpp_frag = Value::None;
+
+        let match_src = Artifact::source(PathFragment::create("pkg/keep,ok.cc"), label.clone());
+        let skip_src = Artifact::source(PathFragment::create("pkg/skip,me.cc"), label.clone());
+        let res_match = cc_native(
+            &st,
+            &mut ectx,
+            "cc_internal.per_file_copts",
+            &[cpp_frag.clone(), file_value(&match_src), Value::None],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            res_match,
+            mk_list(vec![
+                Value::String("-DFROM_BO=1".into()),
+                Value::String("-DPAIR=x,y".into()),
+            ])
+        );
+        let res_skip = cc_native(
+            &st,
+            &mut ectx,
+            "cc_internal.per_file_copts",
+            &[cpp_frag.clone(), file_value(&skip_src), Value::None],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(res_skip, mk_list(vec![]));
+
+        let obj_match = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/_objs/lib/a,1.o"),
+            label.clone(),
+        );
+        let obj_skip = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/_objs/lib/skip.o"),
+            label.clone(),
+        );
+        let lto_match = cc_native(
+            &st,
+            &mut ectx,
+            "cc_internal.collect_per_file_lto_backend_opts",
+            &[cpp_frag.clone(), file_value(&obj_match)],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            lto_match,
+            mk_list(vec![
+                Value::String("-O3".into()),
+                Value::String("-mllvm".into()),
+            ])
+        );
+        let lto_skip = cc_native(
+            &st,
+            &mut ectx,
+            "cc_internal.collect_per_file_lto_backend_opts",
+            &[],
+            &BTreeMap::from([
+                ("cpp_config".to_string(), cpp_frag.clone()),
+                ("obj".to_string(), file_value(&obj_skip)),
+            ]),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(lto_skip, mk_list(vec![]));
+
+        // Exec config uses `host_per_file_copt` rather than target `per_file_copt`.
+        let mut exec_st = Arc::try_unwrap(cc_test_ctx_state(&label)).ok().unwrap();
+        exec_st.cfg = bo_only_cfg.to_exec();
+        let exec_st = Arc::new(exec_st);
+        let tool_src = Artifact::source(PathFragment::create("pkg/tool.cc"), label.clone());
+        let exec_res = cc_native(
+            &exec_st,
+            &mut ectx,
+            "cc_internal.per_file_copts",
+            &[cpp_frag, file_value(&tool_src), Value::None],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(exec_res, mk_list(vec![Value::String("-DHOST_PFC=1".into())]));
+
+        // 2. CLI `NativeSetting` with `raw` preserved also exposes original `filter@opts` to
+        // Starlark transitions (`PerLabelOptionsConverter.reverseForStarlark`).
+        let mut cli_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cli_cfg.native.insert(
+            "per_file_copt".into(),
+            crate::NativeSetting {
+                raw: crate::build_options::encode_unsplit_list(&pfc_raw),
+                value: pfc_converted,
+            },
+        );
+        assert_eq!(
+            crate::transition::setting_value(&cli_cfg, "//command_line_option:per_file_copt"),
+            mk_list(vec![Value::String(pfc_raw[0].clone())])
+        );
+
+        // 3. All 12 `CppFileTypes.CPP_HEADER` extensions (including `.ipp`) map to
+        // `c++-header-parsing` when `parse_headers` is enabled and fail cleanly when disabled.
+        let tool = test_struct(vec![("path", Value::String("/usr/bin/g++".into()))]);
+        let hdr_ac = test_struct(vec![
+            ("action_name", Value::String("c++-header-parsing".into())),
+            ("enabled", Value::Bool(true)),
+            ("tools", mk_list(vec![tool])),
+        ]);
+        let ph_feat = test_struct(vec![
+            ("name", Value::String("parse_headers".into())),
+            ("enabled", Value::Bool(false)),
+        ]);
+        let tf = Arc::new(ToolchainFeatures::new(&[ph_feat], &[hdr_ac], &[], "", &|_| None).unwrap());
+        let fc_disabled = tf.configure(&tf.default_features_and_action_configs()).unwrap();
+        let mut with_ph = tf.default_features_and_action_configs();
+        with_ph.push("parse_headers".into());
+        let fc_enabled = tf.configure(&with_ph).unwrap();
+
+        for ext in [
+            "h", "hh", "hpp", "ipp", "hxx", "h++", "inc", "inl", "tlh", "tli", "H", "tcc",
+        ] {
+            let hdr_path = format!("pkg/tmpl.{ext}");
+            assert_eq!(
+                cc_default_compile_action(&hdr_path, &fc_enabled).unwrap(),
+                "c++-header-parsing",
+                "extension .{ext} should use c++-header-parsing"
+            );
+            let disabled_err = cc_default_compile_action(&hdr_path, &fc_disabled).unwrap_err();
+            assert!(
+                disabled_err
+                    .0
+                    .contains("cannot be compiled without 'parse_headers' feature enabled"),
+                "{disabled_err:?}"
+            );
+        }
     }
 }

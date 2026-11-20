@@ -1273,3 +1273,204 @@ probe_rule(
         bad2.err
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn per_file_copt_escaped_commas_and_ipp_header_parsing_cli_parity() {
+    let w = make_ws("per-file-copt-ipp");
+    w.write(
+        "MODULE.bazel",
+        "module(name = \"w\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.17\")\nbazel_dep(name = \"platforms\", version = \"1.0.0\")\n",
+    );
+    w.write(
+        "tc/BUILD",
+        r#"
+load("@rules_cc//cc/toolchains:cc_toolchain.bzl", "cc_toolchain")
+load("@rules_cc//cc/private/toolchain:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(name = "empty", srcs = [])
+
+cc_toolchain_config(
+    name = "unix_cfg",
+    cpu = "k8",
+    compiler = "clang",
+    toolchain_identifier = "test-k8-clang",
+    host_system_name = "local",
+    target_system_name = "local",
+    target_libc = "local",
+    abi_version = "local",
+    abi_libc_version = "local",
+    supports_start_end_lib = True,
+    tool_paths = {
+        "ar": "/usr/bin/ar",
+        "cpp": "/usr/bin/cpp",
+        "gcc": "/usr/bin/clang",
+        "gcov": "/usr/bin/gcov",
+        "ld": "/usr/bin/ld",
+        "llvm-cov": "/usr/bin/llvm-cov",
+        "nm": "/usr/bin/nm",
+        "objcopy": "/usr/bin/objcopy",
+        "objdump": "/usr/bin/objdump",
+        "parse_headers": "/usr/bin/clang",
+        "strip": "/usr/bin/strip",
+    },
+)
+
+cc_toolchain(
+    name = "cc_impl",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_header_parsing = 1,
+    supports_param_files = 0,
+    toolchain_config = ":unix_cfg",
+    toolchain_identifier = "test-k8-clang",
+)
+
+toolchain(
+    name = "cc_tc",
+    toolchain = ":cc_impl",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+"#,
+    );
+    w.write("p/a,1.cc", "int f() { return 1; }\n");
+    w.write("p/skip,me.cc", "int g() { return 2; }\n");
+    w.write("p/tmpl.ipp", "inline int h() { return 3; }\n");
+    w.write(
+        "p/main.cc",
+        "int f(); int g(); int main() { return f() + g(); }\n",
+    );
+    w.write(
+        "p/defs.bzl",
+        r#"
+def _tr_impl(settings, attr):
+    cur = settings["//command_line_option:per_file_copt"]
+    return {
+        "//command_line_option:per_file_copt": list(cur) + ["p/main\\.cc@-DTRANSITION_PER_FILE=1"],
+    }
+
+_tr = transition(
+    implementation = _tr_impl,
+    inputs = ["//command_line_option:per_file_copt"],
+    outputs = ["//command_line_option:per_file_copt"],
+)
+
+def _wrap_impl(ctx):
+    return [DefaultInfo(files = depset(ctx.files.dep))]
+
+wrap = rule(
+    implementation = _wrap_impl,
+    attrs = {
+        "dep": attr.label(cfg = _tr),
+    },
+)
+"#,
+    );
+    w.write(
+        "p/BUILD",
+        r#"
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//p:defs.bzl", "wrap")
+
+cc_library(
+    name = "mylib",
+    srcs = ["a,1.cc", "skip,me.cc"],
+    hdrs = ["tmpl.ipp"],
+)
+
+cc_binary(
+    name = "app",
+    srcs = ["main.cc"],
+    deps = [":mylib"],
+)
+
+wrap(
+    name = "wrapped_app",
+    dep = ":app",
+)
+"#,
+    );
+
+    let aq = w.run(&[
+        "aquery",
+        "--extra_toolchains=//tc:cc_tc",
+        "--features=parse_headers",
+        "--features=thin_lto",
+        "--per_file_copt=p/.*\\.cc,-p/skip\\,me\\.cc@-DPER_FILE_HIT=1,-DCOMMA_OPT=u\\,v",
+        "--per_file_ltobackendopt=.*a\\,1.*\\.o,-.*skip\\,me.*\\.o@-DLTO_PER_FILE=1",
+        "deps(//p:wrapped_app)",
+    ]);
+    assert_eq!(aq.code, 0, "stdout:\n{}\nstderr:\n{}", aq.out, aq.err);
+    assert!(
+        aq.out.contains("Mnemonic: CppCompileHeader"),
+        "expected .ipp header compile action in aquery output:\n{}",
+        aq.out
+    );
+    assert!(
+        aq.out.contains("-DPER_FILE_HIT=1") && aq.out.contains("-DCOMMA_OPT=u,v"),
+        "expected CLI --per_file_copt flags in matching compile action:\n{}",
+        aq.out
+    );
+    assert!(
+        aq.out.contains("-DTRANSITION_PER_FILE=1"),
+        "expected Starlark-transitioned per_file_copt flag in main.cc compile action:\n{}",
+        aq.out
+    );
+    assert!(
+        aq.out.contains("-DLTO_PER_FILE=1"),
+        "expected CLI --per_file_ltobackendopt flag in matching LTO backend action:\n{}",
+        aq.out
+    );
+
+    let mut saw_skip_compile = false;
+    let mut saw_skip_lto = false;
+    let mut saw_ipp_header = false;
+    for block in aq.out.split("\n\n") {
+        let header = block.lines().next().unwrap_or("");
+        if header.contains("tmpl.ipp") {
+            saw_ipp_header = true;
+            assert!(
+                block.contains("Mnemonic: CppCompileHeader"),
+                "expected CppCompileHeader for tmpl.ipp:\n{block}"
+            );
+        }
+        if header.contains("skip,me") {
+            if header.contains("Compiling") {
+                saw_skip_compile = true;
+            }
+            if header.contains("LTO Backend Compile") {
+                saw_skip_lto = true;
+            }
+            assert!(
+                !block.contains("-DPER_FILE_HIT=1")
+                    && !block.contains("-DLTO_PER_FILE=1")
+                    && !block.contains("-DTRANSITION_PER_FILE=1"),
+                "excluded file skip,me.cc must not receive per-file copt or LTO backend opt:\n{block}"
+            );
+        }
+    }
+    assert!(
+        saw_ipp_header,
+        "did not find tmpl.ipp action block in:\n{}",
+        aq.out
+    );
+    assert!(
+        saw_skip_compile,
+        "did not find Compiling p/skip,me.cc in:\n{}",
+        aq.out
+    );
+    assert!(
+        saw_skip_lto,
+        "did not find LTO Backend Compile for skip,me in:\n{}",
+        aq.out
+    );
+}

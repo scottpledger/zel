@@ -180,6 +180,38 @@ impl<'a> Opts<'a> {
         Vec::new()
     }
 
+    /// Raw or `BuildOptions`-converted `PerLabelOptions` entries (`--per_file_copt`,
+    /// `--host_per_file_copt`, `--per_file_ltobackendopt`), preferring raw `filter@opts` strings
+    /// when available so original regex filters and comma-space option values are preserved.
+    pub(crate) fn per_label_list(&self, k: &str) -> Vec<String> {
+        if self.cfg.is_exec {
+            if k == "per_file_copt" {
+                if self.cfg.has_options_override("host_per_file_copt") {
+                    if let Some(v) = self.cfg.options.get("host_per_file_copt") {
+                        return crate::build_options::decode_unsplit_list(v);
+                    }
+                }
+                if let Some(n) = self.cfg.native.get("host_per_file_copt") {
+                    if !n.raw.is_empty() {
+                        return crate::build_options::decode_unsplit_list(&n.raw);
+                    }
+                }
+            }
+            return self.list_unsplit(k);
+        }
+        if self.cfg.has_options_override(k) {
+            if let Some(v) = self.cfg.options.get(k) {
+                return crate::build_options::decode_unsplit_list(v);
+            }
+        }
+        if let Some(n) = self.cfg.native.get(k) {
+            if !n.raw.is_empty() {
+                return crate::build_options::decode_unsplit_list(&n.raw);
+            }
+        }
+        self.list_unsplit(k)
+    }
+
     #[allow(dead_code)]
     fn list_v(&self, k: &str) -> Value {
         mk_list(self.list(k).into_iter().map(Value::String).collect())

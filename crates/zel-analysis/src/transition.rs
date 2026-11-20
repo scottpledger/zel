@@ -90,6 +90,17 @@ pub fn setting_value(cfg: &BuildConfigurationKey, key: &str) -> Value {
                     };
                     to_list_value(items)
                 } else {
+                    if crate::build_options::find_option(other)
+                        .is_some_and(|(_, opt)| opt.java_type.contains("PerLabelOptions"))
+                    {
+                        if let Some(n) = cfg.native.get(other) {
+                            if !n.raw.is_empty() {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    &n.raw,
+                                ));
+                            }
+                        }
+                    }
                     match cfg.build_options().get(other) {
                         Some(crate::build_options::ConfigValue::List(l)) => {
                             to_list_value(l.clone())
