@@ -138,6 +138,54 @@ impl Drop for RecordTagMappingsGuard {
     }
 }
 
+struct ActiveCtxGuard<'a> {
+    rt: &'a Rt,
+    idx: usize,
+}
+
+impl Drop for ActiveCtxGuard<'_> {
+    fn drop(&mut self) {
+        self.rt.drop_ctx(self.idx);
+    }
+}
+
+struct CollectorGuard<'a> {
+    rt: &'a Rt,
+    active: bool,
+}
+
+impl<'a> CollectorGuard<'a> {
+    fn enter(rt: &'a Rt) -> Self {
+        rt.state
+            .lock()
+            .unwrap()
+            .collectors
+            .push(crate::rt::RepoCollector::default());
+        Self { rt, active: true }
+    }
+
+    fn finish(mut self) -> Vec<crate::rt::DeferredRepoCall> {
+        self.active = false;
+        self.rt
+            .state
+            .lock()
+            .unwrap()
+            .collectors
+            .pop()
+            .map(|c| c.calls)
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for CollectorGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            let _ = self.rt.state.lock().unwrap().collectors.pop();
+        }
+    }
+}
+
 /// Java `os.name` lower-cased and `os.arch` lower-cased (`DigestWriter.computePredeclaredInputHash`).
 fn java_os_name_and_arch() -> (&'static str, &'static str) {
     let name = match std::env::consts::OS {
@@ -1047,12 +1095,15 @@ impl Rt {
         };
         let idx = self.register_ctx(data);
         crate::ctx::CTX_CACHE_HITS.with(|h| h.borrow_mut().clear());
-        let r = c.call_value(
-            def.implementation.clone(),
-            vec![Value::Host("repository_ctx".into(), idx.to_string())],
-            BTreeMap::new(),
-        );
-        self.drop_ctx(idx);
+        let r = {
+            let _ctx_guard = ActiveCtxGuard { rt: self, idx };
+            let _phase = crate::rt::EvalPhaseGuard::enter(crate::rt::EvalPhase::RepoRuleImpl);
+            c.call_value(
+                def.implementation.clone(),
+                vec![Value::Host("repository_ctx".into(), idx.to_string())],
+                BTreeMap::new(),
+            )
+        };
         if let Err(e) = r.clone() {
             let prefix = {
                 let mut pre = if canonical.ends_with('+') {
@@ -1881,20 +1932,19 @@ impl Rt {
             );
         }
         let idx = self.register_ctx(data);
-        self.state.lock().unwrap().collectors.push(vec![]);
-        let r = c.call_value(
-            def.implementation.clone(),
-            vec![Value::Host("module_ctx".into(), idx.to_string())],
-            BTreeMap::new(),
-        );
-        let deferred = self
-            .state
-            .lock()
-            .unwrap()
-            .collectors
-            .pop()
-            .unwrap_or_default();
-        self.drop_ctx(idx);
+        let (r, deferred) = {
+            let _ctx_guard = ActiveCtxGuard { rt: self, idx };
+            let collector_guard = CollectorGuard::enter(self);
+            let r = {
+                let _phase = crate::rt::EvalPhaseGuard::enter(crate::rt::EvalPhase::ExtensionImpl);
+                c.call_value(
+                    def.implementation.clone(),
+                    vec![Value::Host("module_ctx".into(), idx.to_string())],
+                    BTreeMap::new(),
+                )
+            };
+            (r, collector_guard.finish())
+        };
         // `shouldDeleteWorkingDirectoryOnClose`: the extension's working directory is ephemeral.
         let _ = remove_any(&dir);
         let ext_label = format!("@@//{pkg}:{file}%{}", id.name);
@@ -3129,6 +3179,385 @@ my_ext = _make_ext()
             .fetch_repo("+bad_r+x")
             .unwrap_err()
             .contains("initializing a .bzl file"));
+    }
+
+    #[test]
+    fn module_extension_impl_can_load_bzl_defining_module_extension() {
+        let base = tmpdir("nested_me_from_ext");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "extra_ext.bzl",
+            concat!(
+                "EXTRA_VAL = 'from_extra'\n",
+                "def _extra(mctx):\n",
+                "    pass\n",
+                "non_module_deps = module_extension(implementation = _extra)\n",
+            ),
+        );
+        write(
+            &ws,
+            "inner.bzl",
+            concat!(
+                "load('//:extra_ext.bzl', 'EXTRA_VAL')\n",
+                "def _inner_r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('data.txt', rctx.attr.val)\n",
+                "inner_repo = repository_rule(implementation = _inner_r, attrs = {'val': attr.string()})\n",
+                "def _inner_ext(mctx):\n",
+                "    inner_repo(name = 'inner_gen', val = EXTRA_VAL)\n",
+                "inner_ext = module_extension(implementation = _inner_ext)\n",
+            ),
+        );
+        write(
+            &ws,
+            "helper_rule.bzl",
+            concat!(
+                "load('//:extra_ext.bzl', 'EXTRA_VAL')\n",
+                "def _helper(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('helper.txt', 'helper:' + EXTRA_VAL)\n",
+                "helper_repo = repository_rule(implementation = _helper)\n",
+            ),
+        );
+        write(
+            &ws,
+            "outer.bzl",
+            concat!(
+                "def _out_r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('out.txt', rctx.attr.body)\n",
+                "out_repo = repository_rule(implementation = _out_r, attrs = {'body': attr.string()})\n",
+                "def _outer_ext(mctx):\n",
+                "    a = mctx.read(Label('@inner_gen//:data.txt'))\n",
+                "    b = mctx.read(Label('@helper_gen//:helper.txt'))\n",
+                "    out_repo(name = 'outer_gen', body = a + '|' + b)\n",
+                "outer_ext = module_extension(implementation = _outer_ext)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "inner_ext = use_extension('//:inner.bzl', 'inner_ext')\n",
+                "use_repo(inner_ext, 'inner_gen')\n",
+                "helper_repo = use_repo_rule('//:helper_rule.bzl', 'helper_repo')\n",
+                "helper_repo(name = 'helper_gen')\n",
+                "outer_ext = use_extension('//:outer.bzl', 'outer_ext')\n",
+                "use_repo(outer_ext, 'outer_gen')\n",
+            ),
+        );
+        let o = hermetic_opts(&ws, &base);
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        let dir = rt.fetch_repo("+outer_ext+outer_gen").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+            "from_extra|helper:from_extra"
+        );
+        let st = rt.state.lock().unwrap();
+        assert!(
+            st.ext_defs
+                .iter()
+                .any(|d| d.name == "inner_ext" && d.bzl_file == "@@//:inner.bzl"),
+            "nested inner_ext must be exported with its name and bzl_file"
+        );
+        assert!(
+            st.ext_defs
+                .iter()
+                .any(|d| d.name == "non_module_deps" && d.bzl_file == "@@//:extra_ext.bzl"),
+            "transitively loaded non_module_deps must be exported with its name and bzl_file"
+        );
+    }
+
+    #[test]
+    fn repository_rule_impl_can_load_bzl_defining_module_extension() {
+        let base = tmpdir("nested_me_from_repo");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "tar_extensions.bzl",
+            concat!(
+                "def _tar_r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('version.txt', 'bsdtar-3.7')\n",
+                "tar_repo = repository_rule(implementation = _tar_r)\n",
+                "def _toolchains(mctx):\n",
+                "    tar_repo(name = 'tar_toolchain')\n",
+                "toolchains = module_extension(implementation = _toolchains)\n",
+            ),
+        );
+        write(
+            &ws,
+            "llvm_repo.bzl",
+            concat!(
+                "def _llvm_tar(rctx):\n",
+                "    ver = rctx.read(Label('@tar_toolchain//:version.txt'))\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('resolved.txt', 'using:' + ver)\n",
+                "http_bsdtar_archive = repository_rule(implementation = _llvm_tar)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "tar = use_extension('//:tar_extensions.bzl', 'toolchains')\n",
+                "use_repo(tar, 'tar_toolchain')\n",
+                "http_bsdtar_archive = use_repo_rule('//:llvm_repo.bzl', 'http_bsdtar_archive')\n",
+                "http_bsdtar_archive(name = 'llvm_tar')\n",
+            ),
+        );
+        let o = hermetic_opts(&ws, &base);
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        let dir = rt.fetch_repo("+http_bsdtar_archive+llvm_tar").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("resolved.txt")).unwrap(),
+            "using:bsdtar-3.7"
+        );
+        let st = rt.state.lock().unwrap();
+        assert!(
+            st.ext_defs
+                .iter()
+                .any(|d| d.name == "toolchains" && d.bzl_file == "@@//:tar_extensions.bzl"),
+            "nested toolchains extension must be exported with its name and bzl_file"
+        );
+    }
+
+    #[test]
+    fn direct_bzl_init_constructors_rejected_inside_extension_and_repo_rule_impl() {
+        let base = tmpdir("direct_me_rejected");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "inner.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('ok.txt', 'ok')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _inner(mctx):\n",
+                "    r(name = 'inner_gen')\n",
+                "inner_ext = module_extension(implementation = _inner)\n",
+            ),
+        );
+        write(
+            &ws,
+            "bad_ext_direct.bzl",
+            concat!(
+                "def _impl(mctx):\n",
+                "    module_extension(implementation = lambda m: None)\n",
+                "bad_ext = module_extension(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "bad_ext_after_nested.bzl",
+            concat!(
+                "def _impl(mctx):\n",
+                "    _ = mctx.read(Label('@inner_gen//:ok.txt'))\n",
+                "    module_extension(implementation = lambda m: None)\n",
+                "bad_ext_after = module_extension(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "bad_repo_after_nested.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    _ = rctx.read(Label('@inner_gen//:ok.txt'))\n",
+                "    module_extension(implementation = lambda m: None)\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "bad_repo_after = repository_rule(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "bad_rr_in_ext.bzl",
+            concat!(
+                "def _impl(mctx):\n",
+                "    repository_rule(implementation = lambda r: None)\n",
+                "bad_rr_ext = module_extension(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "bad_rr_in_repo.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    repository_rule(implementation = lambda r: None)\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "bad_rr_repo = repository_rule(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "inner_ext = use_extension('//:inner.bzl', 'inner_ext')\n",
+                "use_repo(inner_ext, 'inner_gen')\n",
+                "bad_ext = use_extension('//:bad_ext_direct.bzl', 'bad_ext')\n",
+                "use_repo(bad_ext, 'e1')\n",
+                "bad_ext_after = use_extension('//:bad_ext_after_nested.bzl', 'bad_ext_after')\n",
+                "use_repo(bad_ext_after, 'e2')\n",
+                "bad_repo_after = use_repo_rule('//:bad_repo_after_nested.bzl', 'bad_repo_after')\n",
+                "bad_repo_after(name = 'r2')\n",
+                "bad_rr_ext = use_extension('//:bad_rr_in_ext.bzl', 'bad_rr_ext')\n",
+                "use_repo(bad_rr_ext, 'e3')\n",
+                "bad_rr_repo = use_repo_rule('//:bad_rr_in_repo.bzl', 'bad_rr_repo')\n",
+                "bad_rr_repo(name = 'r3')\n",
+            ),
+        );
+        let o = hermetic_opts(&ws, &base);
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+
+        let find_ext = |name: &str| {
+            res.extension_ids()
+                .into_iter()
+                .find(|id| id.name == name)
+                .unwrap()
+        };
+
+        let err1 = rt.eval_extension(&find_ext("bad_ext")).unwrap_err();
+        assert!(
+            err1.contains("module_extension() can only be used while initializing a .bzl file"),
+            "unexpected error for bad_ext: {err1}"
+        );
+
+        let err2 = rt.eval_extension(&find_ext("bad_ext_after")).unwrap_err();
+        assert!(
+            err2.contains("module_extension() can only be used while initializing a .bzl file"),
+            "unexpected error for bad_ext_after: {err2}"
+        );
+
+        let err3 = rt.fetch_repo("+bad_repo_after+r2").unwrap_err();
+        assert!(
+            err3.contains("module_extension() can only be used while initializing a .bzl file"),
+            "unexpected error for bad_repo_after: {err3}"
+        );
+
+        let err4 = rt.eval_extension(&find_ext("bad_rr_ext")).unwrap_err();
+        assert!(
+            err4.contains("repository_rule() can only be used while initializing a .bzl file"),
+            "unexpected error for bad_rr_ext: {err4}"
+        );
+
+        let err5 = rt.fetch_repo("+bad_rr_repo+r3").unwrap_err();
+        assert!(
+            err5.contains("repository_rule() can only be used while initializing a .bzl file"),
+            "unexpected error for bad_rr_repo: {err5}"
+        );
+    }
+
+    #[test]
+    fn nested_bzl_load_failure_restores_eval_phase_stack() {
+        let base = tmpdir("nested_fail_restores_stack");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "broken_nested.bzl",
+            concat!(
+                "def _unused(mctx):\n",
+                "    pass\n",
+                "broken_ext = module_extension(implementation = _unused)\n",
+                "fail('boom during nested init')\n",
+            ),
+        );
+        write(
+            &ws,
+            "outer_calling_broken.bzl",
+            concat!(
+                "def _outer(mctx):\n",
+                "    mctx.read(Label('@broken_gen//:x'))\n",
+                "outer_broken = module_extension(implementation = _outer)\n",
+            ),
+        );
+        write(
+            &ws,
+            "healthy.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('ok.txt', 'still_healthy')\n",
+                "r = repository_rule(implementation = _r)\n",
+                "def _h(mctx):\n",
+                "    r(name = 'healthy_gen')\n",
+                "healthy_ext = module_extension(implementation = _h)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "broken_ext = use_extension('//:broken_nested.bzl', 'broken_ext')\n",
+                "use_repo(broken_ext, 'broken_gen')\n",
+                "outer_broken = use_extension('//:outer_calling_broken.bzl', 'outer_broken')\n",
+                "use_repo(outer_broken, 'outer_gen')\n",
+                "healthy_ext = use_extension('//:healthy.bzl', 'healthy_ext')\n",
+                "use_repo(healthy_ext, 'healthy_gen')\n",
+            ),
+        );
+        let o = hermetic_opts(&ws, &base);
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        let outer_id = res
+            .extension_ids()
+            .into_iter()
+            .find(|id| id.name == "outer_broken")
+            .unwrap();
+        let err = rt.eval_extension(&outer_id).unwrap_err();
+        assert!(
+            err.contains("boom during nested init"),
+            "expected nested init failure, got: {err}"
+        );
+        // After the nested init error unwound, subsequent extension evaluation must succeed cleanly.
+        let dir = rt.fetch_repo("+healthy_ext+healthy_gen").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ok.txt")).unwrap(),
+            "still_healthy"
+        );
     }
 
     #[test]
