@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 pub use zel_sandbox::{
-    delete_tree, delete_trees_below, link_manifest, sync_symlink_tree, RunfilesSymlinksMode,
-    RunfilesTarget, RunfilesTreeData, RunfilesTreeUpdater,
+    delete_tree, delete_trees_below, link_manifest, sync_symlink_tree, sync_symlink_tree_raw,
+    RunfilesSymlinksMode, RunfilesTarget, RunfilesTreeData, RunfilesTreeUpdater,
 };
 use zel_vfs::PathFragment;
 
@@ -77,6 +77,16 @@ impl SymlinkTreeHelper {
         symlinks: &BTreeMap<PathFragment, Option<PathFragment>>,
     ) -> io::Result<()> {
         sync_symlink_tree(&self.symlink_tree_root, symlinks)?;
+        self.create_workspace_subdirectory()
+    }
+
+    /// Like [`Self::create_runfiles_symlinks`], but preserves raw symlink target strings verbatim
+    /// without collapsing `.` or `..` segments.
+    pub fn create_runfiles_symlinks_raw(
+        &self,
+        symlinks: &BTreeMap<PathFragment, Option<String>>,
+    ) -> io::Result<()> {
+        sync_symlink_tree_raw(&self.symlink_tree_root, symlinks)?;
         self.create_workspace_subdirectory()
     }
 
@@ -289,25 +299,16 @@ pub fn build_runfiles_tree(
         return Ok(manifest);
     }
 
-    let mut symlink_map: BTreeMap<PathFragment, Option<PathFragment>> = BTreeMap::new();
+    let mut symlink_map: BTreeMap<PathFragment, Option<String>> = BTreeMap::new();
     for (k, v) in &resolved_entries {
         if k == "MANIFEST" {
             continue;
         }
-        let target = if v.is_empty() {
-            None
-        } else {
-            let pf = PathFragment::create(v);
-            if pf.is_empty() {
-                Some(PathFragment::create_already_normalized("."))
-            } else {
-                Some(pf)
-            }
-        };
+        let target = if v.is_empty() { None } else { Some(v.clone()) };
         symlink_map.insert(PathFragment::create(k), target);
     }
 
-    helper.create_runfiles_symlinks(&symlink_map)?;
+    helper.create_runfiles_symlinks_raw(&symlink_map)?;
     helper.link_manifest()?;
     if !symlink_map.contains_key(&PathFragment::create("_repo_mapping"))
         && !opts.repo_mapping.is_empty()

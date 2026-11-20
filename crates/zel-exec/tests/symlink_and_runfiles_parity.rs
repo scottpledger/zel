@@ -762,6 +762,42 @@ fn source_symlink_manifest_and_runfiles_tree_preserve_unnormalized_targets_witho
         assert_eq!(in_tree, action_bytes);
     }
 
+    // 2b. On-disk symlinks inside `.runfiles` preserve the exact raw targets verbatim, and a
+    //     second `build_runfiles_tree(..., enable_runfiles: true)` call is a no-op (same inode).
+    let rf_root = execroot_dir.join("bazel-out/k8-fastbuild/bin/pkg/tool.runfiles");
+    let mut inodes_before = Vec::new();
+    for (rel, raw_target) in sym_cases {
+        use std::os::unix::fs::MetadataExt;
+        let link_path = rf_root.join(format!("_main/{rel}"));
+        assert_eq!(
+            std::fs::read_link(&link_path).unwrap(),
+            std::path::PathBuf::from(raw_target),
+            "on-disk .runfiles symlink must preserve raw target verbatim for `{rel}`"
+        );
+        inodes_before.push((rel, std::fs::symlink_metadata(&link_path).unwrap().ino()));
+    }
+    zel_exec::runfiles_tree::build_runfiles_tree(
+        &execroot_dir,
+        &execroot_dir.join(exe_rel),
+        "_main",
+        &entries,
+        &zel_exec::runfiles_tree::RunfilesTreeOptions {
+            enable_runfiles: true,
+            unresolved_symlink_paths: unresolved_paths.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (rel, ino_before) in inodes_before {
+        use std::os::unix::fs::MetadataExt;
+        let link_path = rf_root.join(format!("_main/{rel}"));
+        assert_eq!(
+            std::fs::symlink_metadata(&link_path).unwrap().ino(),
+            ino_before,
+            "second build_runfiles_tree should be a no-op for unchanged raw symlink `{rel}`"
+        );
+    }
+
     // 3. Re-running SourceSymlinkManifestAction hits the action cache (zero invalidation).
     let sched2 = zel_exec::execute_actions(
         &[&mf_act],
@@ -777,7 +813,7 @@ fn source_symlink_manifest_and_runfiles_tree_preserve_unnormalized_targets_witho
     assert_eq!(sched2.cache_hits(), 1, "{:?}", sched2.actions);
 
     // 4. Changing `./foo` -> `foo` (identical normalized PathFragment, different raw target)
-    //    invalidates the cache and updates the manifest.
+    //    invalidates the cache, updates the manifest, and retargets the `.runfiles` symlink.
     let dot_prefix_path = execroot_dir.join("bazel-out/k8-fastbuild/bin/pkg/sub/dot_prefix");
     std::fs::remove_file(&dot_prefix_path).unwrap();
     std::os::unix::fs::symlink("foo", &dot_prefix_path).unwrap();
@@ -797,6 +833,23 @@ fn source_symlink_manifest_and_runfiles_tree_preserve_unnormalized_targets_witho
     assert!(
         updated_text.contains("_main/pkg/sub/dot_prefix foo\n"),
         "expected updated target:\n{updated_text}"
+    );
+    zel_exec::runfiles_tree::build_runfiles_tree(
+        &execroot_dir,
+        &execroot_dir.join(exe_rel),
+        "_main",
+        &entries,
+        &zel_exec::runfiles_tree::RunfilesTreeOptions {
+            enable_runfiles: true,
+            unresolved_symlink_paths: unresolved_paths,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_link(rf_root.join("_main/pkg/sub/dot_prefix")).unwrap(),
+        std::path::PathBuf::from("foo"),
+        "build_runfiles_tree must retarget `.runfiles` symlink when raw target changes `./foo` -> `foo`"
     );
 
     // 5. InMemoryFileSystem preserves raw targets identically via create_symbolic_link_raw.
