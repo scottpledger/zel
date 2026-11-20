@@ -370,6 +370,9 @@ impl PackageLoader {
         if let Some(r) = zel_builtins::call(name, pos.clone(), kw.clone()) {
             return r;
         }
+        if let Some(sym) = name.strip_prefix("autoload_missing.") {
+            return Err(herr(ctx, crate::autoload::missing_autoload_error(sym)));
+        }
         // `--incompatible_enable_proto_toolchain_resolution` defaults to true in Bazel 9.
         if name == "proto_common_do_not_use.incompatible_enable_proto_toolchain_resolution" {
             return Ok(Value::Bool(true));

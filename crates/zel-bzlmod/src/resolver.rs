@@ -68,6 +68,69 @@ impl RepoResolver for BzlmodRepoResolver {
             .collect();
         RepositoryMapping::new_ordered(entries, owner.clone())
     }
+
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        autoload_module_repo_for_resolution(self, &self.rt.resolution, module_name, repo_name)
+    }
+}
+
+enum AutoloadModuleLookup {
+    Found(RepositoryName),
+    TooOld,
+    NotFound,
+}
+
+fn autoload_module_repo_for_resolution<R: RepoResolver>(
+    resolver: &R,
+    res: &crate::resolve::Resolution,
+    module_name: &str,
+    repo_name: &str,
+) -> Option<RepositoryName> {
+    match resolve_autoload_module_repo(res, module_name, repo_name) {
+        AutoloadModuleLookup::Found(repo) => Some(repo),
+        // Module exists in the Bzlmod dep graph but is below the minimum version required for
+        // autoloading; do not fall back to the main repo mapping (which would return that same
+        // too-old repo and fail autoloading instead of installing missing-module stubs).
+        AutoloadModuleLookup::TooOld => None,
+        AutoloadModuleLookup::NotFound => {
+            let main_map = resolver.mapping(&RepositoryName::main());
+            for name in [repo_name, module_name] {
+                let r = main_map.get(name);
+                if r.is_visible() && resolver.repo_root(&r).is_some() {
+                    return Some(r);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn resolve_autoload_module_repo(
+    res: &crate::resolve::Resolution,
+    module_name: &str,
+    repo_name: &str,
+) -> AutoloadModuleLookup {
+    let best = res
+        .canonical_repo_names
+        .iter()
+        .filter(|(_, mk)| !mk.is_root() && (mk.name == module_name || mk.name == repo_name))
+        .max_by(|(_, a), (_, b)| a.version.cmp(&b.version));
+    let Some((canon, mk)) = best else {
+        return AutoloadModuleLookup::NotFound;
+    };
+    let min_ver = match module_name {
+        "protobuf" => Some("29.0-rc1"),
+        "rules_android" => Some("0.6.0-rc1"),
+        _ => None,
+    };
+    if let Some(min_s) = min_ver {
+        if let Ok(min_v) = crate::version::Version::parse(min_s) {
+            if !mk.version.is_empty() && mk.version <= min_v {
+                return AutoloadModuleLookup::TooOld;
+            }
+        }
+    }
+    AutoloadModuleLookup::Found(RepositoryName::create_unvalidated(canon.as_str()))
 }
 
 /// Resolver that opens the Bzlmod session lazily, on the first lookup of a non-main repository,
@@ -211,6 +274,14 @@ impl RepoResolver for LazyBzlmodResolver {
                 .map(|(a, c)| (a, RepositoryName::create_unvalidated(c)))
                 .collect();
         RepositoryMapping::new_ordered(entries, owner.clone())
+    }
+
+    fn autoload_module_repo(&self, module_name: &str, repo_name: &str) -> Option<RepositoryName> {
+        if !self.cfg.workspace.join("MODULE.bazel").exists() {
+            return None;
+        }
+        let s = self.session()?;
+        autoload_module_repo_for_resolution(self, &s.rt.resolution, module_name, repo_name)
     }
 }
 
@@ -628,5 +699,134 @@ mod tests {
         );
         assert_eq!(regs.execution_platforms, vec!["@@//plat:p".to_string()]);
         assert_eq!(regs.platforms_repo, "platforms");
+    }
+
+    #[test]
+    fn autoload_module_repo_rejects_too_old_version_without_mapping_fallback() {
+        let base = tmpdir("autoload-minver");
+        let reg = base.join("registry");
+        let old_pb_src = base.join("old_pb_src");
+        let new_pb_src = base.join("new_pb_src");
+        let old_android_src = base.join("old_android_src");
+        let new_android_src = base.join("new_android_src");
+
+        for (src, mod_name, ver) in [
+            (&old_pb_src, "protobuf", "28.0"),
+            (&new_pb_src, "protobuf", "29.0"),
+            (&old_android_src, "rules_android", "0.6.0-rc1"),
+            (&new_android_src, "rules_android", "0.6.0"),
+        ] {
+            write(
+                src,
+                "MODULE.bazel",
+                &format!("module(name = '{mod_name}', version = '{ver}')\n"),
+            );
+            write(src, "BUILD.bazel", "");
+        }
+
+        let reg_add = |name: &str, versions: &[(&str, &std::path::Path)]| {
+            let v_json: Vec<String> = versions.iter().map(|(v, _)| format!("\"{v}\"")).collect();
+            write(
+                &reg,
+                &format!("modules/{name}/metadata.json"),
+                &format!(
+                    "{{\"versions\": [{}], \"yanked_versions\": {{}}}}",
+                    v_json.join(", ")
+                ),
+            );
+            for (v, src) in versions {
+                write(
+                    &reg,
+                    &format!("modules/{name}/{v}/MODULE.bazel"),
+                    &format!("module(name = '{name}', version = '{v}')\n"),
+                );
+                let source_json = crate::json::Json::Obj(vec![
+                    ("type".to_string(), crate::json::Json::str("local_path")),
+                    (
+                        "path".to_string(),
+                        crate::json::Json::str(src.to_string_lossy().replace('\\', "/")),
+                    ),
+                ])
+                .to_compact();
+                write(
+                    &reg,
+                    &format!("modules/{name}/{v}/source.json"),
+                    &source_json,
+                );
+            }
+        };
+        write(&reg, "bazel_registry.json", "{}");
+        reg_add("protobuf", &[("28.0", &old_pb_src), ("29.0", &new_pb_src)]);
+        reg_add(
+            "rules_android",
+            &[("0.6.0-rc1", &old_android_src), ("0.6.0", &new_android_src)],
+        );
+
+        let open_resolvers = |label: &str, module_bazel: &str| {
+            let ws = base.join(format!("ws_{label}"));
+            let ob = base.join(format!("ob_{label}"));
+            write(&ws, "MODULE.bazel", module_bazel);
+            write(&ws, "BUILD.bazel", "");
+            let parsed = zel_options::ParsedCommandOptions::parse_for_command(
+                "build",
+                &[format!("--registry={}", crate::file_url_for_path(&reg))],
+            )
+            .unwrap();
+            let cfg =
+                BzlmodConfig::from_parsed(&parsed, &ws, &ob, std::env::vars().collect()).unwrap();
+            let session = Session::open(cfg.clone()).unwrap_or_else(|e| panic!("{}", e.message));
+            let eager = BzlmodRepoResolver::new(session.rt.clone());
+            let lazy = LazyBzlmodResolver::new(cfg);
+            (eager, lazy)
+        };
+
+        // Case 1: protobuf@28.0 (<= 29.0-rc1) and rules_android@0.6.0-rc1 (<= 0.6.0-rc1) are both
+        // present in the Bzlmod graph AND visible in the main repo mapping; both resolvers must
+        // return None (never falling back to main repo mapping).
+        let (eager_old, lazy_old) = open_resolvers(
+            "old",
+            "module(name = 'root')\nbazel_dep(name = 'protobuf', version = '28.0', repo_name = 'com_google_protobuf')\nbazel_dep(name = 'rules_android', version = '0.6.0-rc1')\n",
+        );
+        // Sanity check: the main repo mapping DOES see com_google_protobuf and its root exists.
+        let mapped_pb = eager_old
+            .mapping(&RepositoryName::main())
+            .get("com_google_protobuf");
+        assert!(mapped_pb.is_visible());
+        assert!(eager_old.repo_root(&mapped_pb).is_some());
+
+        assert_eq!(
+            eager_old.autoload_module_repo("protobuf", "com_google_protobuf"),
+            None
+        );
+        assert_eq!(
+            lazy_old.autoload_module_repo("protobuf", "com_google_protobuf"),
+            None
+        );
+        assert_eq!(
+            eager_old.autoload_module_repo("rules_android", "rules_android"),
+            None
+        );
+        assert_eq!(
+            lazy_old.autoload_module_repo("rules_android", "rules_android"),
+            None
+        );
+
+        // Case 2: protobuf@29.0 (> 29.0-rc1) and rules_android@0.6.0 (> 0.6.0-rc1) resolve cleanly.
+        let (eager_new, lazy_new) = open_resolvers(
+            "new",
+            "module(name = 'root')\nbazel_dep(name = 'protobuf', version = '29.0', repo_name = 'com_google_protobuf')\nbazel_dep(name = 'rules_android', version = '0.6.0')\n",
+        );
+        assert!(eager_new
+            .autoload_module_repo("protobuf", "com_google_protobuf")
+            .is_some());
+        assert!(lazy_new
+            .autoload_module_repo("protobuf", "com_google_protobuf")
+            .is_some());
+        assert!(eager_new
+            .autoload_module_repo("rules_android", "rules_android")
+            .is_some());
+        assert!(lazy_new
+            .autoload_module_repo("rules_android", "rules_android")
+            .is_some());
     }
 }

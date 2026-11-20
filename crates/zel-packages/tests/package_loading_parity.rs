@@ -1165,3 +1165,515 @@ make_analysis_test(name = "my_check", dep = ":c")
     );
     assert!(pkg.targets.contains_key("my_check"));
 }
+
+#[test]
+fn bazel9_removed_bzl_symbols_and_autoload_externally() {
+    let base = std::env::temp_dir().join(format!("zel-pkg-autoload-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let fs = Arc::new(zel_vfs::LocalFileSystem::new(
+        zel_vfs::DigestHashFunction::Sha256,
+    ));
+    let root = PathFragment::create(base.join("ws").to_str().unwrap());
+    let rules_cc_root = PathFragment::create(base.join("ext/rules_cc+").to_str().unwrap());
+    let ext_root = PathFragment::create(base.join("ext/ext+").to_str().unwrap());
+    fs.create_directory_and_parents(&root).unwrap();
+    fs.create_directory_and_parents(&rules_cc_root).unwrap();
+    fs.create_directory_and_parents(&ext_root).unwrap();
+    let write =
+        |fs: &Arc<zel_vfs::LocalFileSystem>, dir: &PathFragment, rel: &str, content: &str| {
+            let p = dir.get_relative_str(rel);
+            if let Some(parent) = p.parent_directory() {
+                fs.create_directory_and_parents(&parent).unwrap();
+            }
+            fs.write_file(&p, content.as_bytes()).unwrap();
+        };
+
+    // Minimal fake @rules_cc providing all symbols referenced by AUTOLOAD_CONFIG for @rules_cc.
+    let cc_rule_bzl = |name: &str| {
+        let test_kw = if name.ends_with("_test") {
+            ", test = True"
+        } else {
+            ""
+        };
+        format!(
+            "def _impl(ctx):\n    return []\n{name} = rule(implementation = _impl{test_kw}, attrs = {{\"srcs\": attr.label_list(allow_files = True)}})\n"
+        )
+    };
+    let cc_provider_bzl = |name: &str| format!("{name} = provider()\n");
+    write(&fs, &rules_cc_root, "cc/BUILD", "");
+    write(&fs, &rules_cc_root, "cc/common/BUILD", "");
+    write(&fs, &rules_cc_root, "cc/toolchains/BUILD", "");
+    for r in [
+        "cc_binary",
+        "cc_import",
+        "cc_library",
+        "cc_shared_library",
+        "cc_test",
+        "objc_import",
+        "objc_library",
+    ] {
+        write(&fs, &rules_cc_root, &format!("cc/{r}.bzl"), &cc_rule_bzl(r));
+    }
+    for r in [
+        "cc_toolchain",
+        "cc_toolchain_suite",
+        "fdo_prefetch_hints",
+        "fdo_profile",
+        "memprof_profile",
+        "propeller_optimize",
+    ] {
+        write(
+            &fs,
+            &rules_cc_root,
+            &format!("cc/toolchains/{r}.bzl"),
+            &cc_rule_bzl(r),
+        );
+    }
+    write(
+        &fs,
+        &rules_cc_root,
+        "cc/common/cc_info.bzl",
+        &cc_provider_bzl("CcInfo"),
+    );
+    write(
+        &fs,
+        &rules_cc_root,
+        "cc/common/debug_package_info.bzl",
+        &cc_provider_bzl("DebugPackageInfo"),
+    );
+    write(
+        &fs,
+        &rules_cc_root,
+        "cc/common/cc_shared_library_info.bzl",
+        &cc_provider_bzl("CcSharedLibraryInfo"),
+    );
+    write(
+        &fs,
+        &rules_cc_root,
+        "cc/common/cc_shared_library_hint_info.bzl",
+        &cc_provider_bzl("CcSharedLibraryHintInfo"),
+    );
+    write(
+        &fs,
+        &rules_cc_root,
+        "cc/common/cc_common.bzl",
+        "cc_common = struct(tag = 'autoloaded_cc_common')\n",
+    );
+    write(
+        &fs,
+        &rules_cc_root,
+        "cc/toolchains/cc_toolchain_config_info.bzl",
+        &cc_provider_bzl("CcToolchainConfigInfo"),
+    );
+
+    // Main-repo packages testing bare removed symbols, shadowing, and non-predeclared symbols.
+    write(&fs, &root, "bad_cc_info/defs.bzl", "X = CcInfo\n");
+    write(&fs, &root, "bad_cc_info/BUILD", "load(':defs.bzl', 'X')\n");
+    write(
+        &fs,
+        &root,
+        "bad_debug_info/defs.bzl",
+        "X = DebugPackageInfo\n",
+    );
+    write(
+        &fs,
+        &root,
+        "bad_debug_info/BUILD",
+        "load(':defs.bzl', 'X')\n",
+    );
+    write(
+        &fs,
+        &root,
+        "shadow_cc_info/defs.bzl",
+        "def f(CcInfo):\n    return CcInfo\nX = f(42)\n",
+    );
+    write(
+        &fs,
+        &root,
+        "shadow_cc_info/BUILD",
+        "load(':defs.bzl', 'X')\nfilegroup(name = 'ok')\n",
+    );
+    write(&fs, &root, "undef_proto_info/defs.bzl", "X = ProtoInfo\n");
+    write(
+        &fs,
+        &root,
+        "undef_proto_info/BUILD",
+        "load(':defs.bzl', 'X')\n",
+    );
+    write(
+        &fs,
+        &root,
+        "main_bare_cc/BUILD",
+        "cc_library(name = 'm', srcs = ['m.c'])\n",
+    );
+
+    // External repo calling bare cc_library and bare CcInfo / native.cc_library.
+    write(
+        &fs,
+        &ext_root,
+        "BUILD.bazel",
+        "cc_library(name = 'lib', srcs = ['a.c'])\n",
+    );
+    write(
+        &fs,
+        &ext_root,
+        "bzl/defs.bzl",
+        "INFO = CcInfo\ndef make(name):\n    native.cc_library(name = name, srcs = ['b.c'])\n",
+    );
+    write(
+        &fs,
+        &ext_root,
+        "bzl/BUILD.bazel",
+        "load(':defs.bzl', 'make')\nmake('from_bzl')\n",
+    );
+    write(
+        &fs,
+        &ext_root,
+        "missing_sh/BUILD.bazel",
+        "sh_binary(name = 's', srcs = ['s.sh'])\n",
+    );
+
+    let make_resolver = || {
+        let mut r = SimpleRepoResolver::new(root.clone());
+        let cc_canon = RepositoryName::create("rules_cc+").unwrap();
+        let ext_canon = RepositoryName::create("ext+").unwrap();
+        r.external
+            .insert("rules_cc+".to_string(), rules_cc_root.clone());
+        r.external.insert("ext+".to_string(), ext_root.clone());
+        r.apparent.insert("rules_cc".to_string(), cc_canon);
+        r.apparent.insert("ext".to_string(), ext_canon);
+        Arc::new(r)
+    };
+
+    let load_err_text = |loader: &Arc<PackageLoader>, id: &PackageIdentifier| -> String {
+        match loader.load_package(id) {
+            Ok(pkg) => {
+                assert!(pkg.contains_errors, "expected errors loading {id}");
+                pkg.events
+                    .iter()
+                    .map(|e| e.render())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Err(err) => {
+                let mut parts: Vec<String> = err.events.iter().map(|e| e.render()).collect();
+                parts.push(err.message);
+                parts.join("\n")
+            }
+        }
+    };
+
+    // 1. Default Bazel 9.3.2 behavior (autoloads disabled):
+    //    - Bare CcInfo / DebugPackageInfo emit Bazel 9's exact removal error.
+    //    - Shadowing CcInfo as a parameter succeeds.
+    //    - ProtoInfo is undefined (not predeclared).
+    //    - Bare cc_library fails with _removed_rule_failure.
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    let loader = PackageLoader::new(cfg);
+
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create_in_main_repo("bad_cc_info").unwrap(),
+    );
+    assert!(
+        rendered.contains(
+            "The CcInfo symbol has been removed, add the following to your BUILD/bzl file:\n\nload(\"@rules_cc//cc/common:cc_info.bzl\", \"CcInfo\")"
+        ),
+        "unexpected CcInfo error:\n{rendered}"
+    );
+
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create_in_main_repo("bad_debug_info").unwrap(),
+    );
+    assert!(
+        rendered.contains(
+            "The DebugPackageInfo symbol has been removed, add the following to your BUILD/bzl file:\n\nload(\"@rules_cc//cc/common:debug_package_info.bzl\", \"DebugPackageInfo\")"
+        ),
+        "unexpected DebugPackageInfo error:\n{rendered}"
+    );
+
+    let pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("shadow_cc_info").unwrap())
+        .unwrap();
+    assert!(!pkg.contains_errors, "{:?}", pkg.events);
+
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create_in_main_repo("undef_proto_info").unwrap(),
+    );
+    assert!(
+        rendered.contains("name 'ProtoInfo' is not defined"),
+        "unexpected ProtoInfo error:\n{rendered}"
+    );
+
+    let ext_repo = RepositoryName::create("ext+").unwrap();
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create(ext_repo.clone(), PathFragment::create("")).unwrap(),
+    );
+    assert!(
+        rendered.contains("rule has been removed"),
+        "expected removed rule error for bare cc_library without autoload, got:\n{rendered}"
+    );
+
+    // 2. With --incompatible_autoload_externally=+@rules_cc and default
+    //    --incompatible_disable_autoloads_in_main_repo=true:
+    //    - External repo BUILD (cc_library) and .bzl (CcInfo + native.cc_library) succeed!
+    //    - Main repo still rejects bare CcInfo and bare cc_library!
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+@rules_cc".to_string()];
+    cfg.incompatible_disable_autoloads_in_main_repo = true;
+    let loader = PackageLoader::new(cfg);
+
+    let ext_pkg = loader
+        .load_package(
+            &PackageIdentifier::create(ext_repo.clone(), PathFragment::create("")).unwrap(),
+        )
+        .unwrap();
+    assert!(!ext_pkg.contains_errors, "{:?}", ext_pkg.events);
+    assert!(ext_pkg.targets.contains_key("lib"));
+
+    let ext_bzl_pkg = loader
+        .load_package(
+            &PackageIdentifier::create(ext_repo.clone(), PathFragment::create("bzl")).unwrap(),
+        )
+        .unwrap();
+    assert!(!ext_bzl_pkg.contains_errors, "{:?}", ext_bzl_pkg.events);
+    assert!(ext_bzl_pkg.targets.contains_key("from_bzl"));
+
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create_in_main_repo("main_bare_cc").unwrap(),
+    );
+    assert!(
+        rendered.contains("rule has been removed"),
+        "main repo should still have autoloads disabled, got:\n{rendered}"
+    );
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create_in_main_repo("bad_cc_info").unwrap(),
+    );
+    assert!(
+        rendered.contains("The CcInfo symbol has been removed"),
+        "main repo .bzl should still reject bare CcInfo, got:\n{rendered}"
+    );
+
+    // 3. With --incompatible_disable_autoloads_in_main_repo=false:
+    //    - Main repo bare cc_library AND bare CcInfo both autoload cleanly!
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+@rules_cc".to_string()];
+    cfg.incompatible_disable_autoloads_in_main_repo = false;
+    let loader = PackageLoader::new(cfg);
+
+    let main_pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("main_bare_cc").unwrap())
+        .unwrap();
+    assert!(!main_pkg.contains_errors, "{:?}", main_pkg.events);
+    assert!(main_pkg.targets.contains_key("m"));
+
+    let main_bzl_pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("bad_cc_info").unwrap())
+        .unwrap();
+    assert!(!main_bzl_pkg.contains_errors, "{:?}", main_bzl_pkg.events);
+
+    // 4. --repositories_without_autoloads disables .bzl autoloads for the listed repo.
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+@rules_cc".to_string()];
+    cfg.repositories_without_autoloads = vec!["ext".to_string()];
+    let loader = PackageLoader::new(cfg);
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create(ext_repo.clone(), PathFragment::create("bzl")).unwrap(),
+    );
+    assert!(
+        rendered.contains("The CcInfo symbol has been removed"),
+        "ext .bzl should not autoload CcInfo when listed in repositories_without_autoloads, got:\n{rendered}"
+    );
+
+    // 5. Autoloading a symbol whose module (@rules_shell) is absent installs a stub that fails on call.
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+@rules_shell".to_string()];
+    let loader = PackageLoader::new(cfg);
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create(ext_repo.clone(), PathFragment::create("missing_sh")).unwrap(),
+    );
+    assert!(
+        rendered.contains(
+            "Couldn't auto load 'sh_binary' from '@rules_shell//shell:sh_binary.bzl'. Ensure that you have a 'bazel_dep(name = \"rules_shell\", ...)' in your MODULE.bazel file or add an explicit load statement to your BUILD file."
+        ),
+        "unexpected missing autoload error:\n{rendered}"
+    );
+
+    // 6. `-cc_library` removes cc_library completely from BUILD and native.
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["-cc_library".to_string()];
+    let loader = PackageLoader::new(cfg);
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create(ext_repo.clone(), PathFragment::create("")).unwrap(),
+    );
+    assert!(
+        rendered.contains("name 'cc_library' is not defined"),
+        "expected undefined cc_library after -cc_library, got:\n{rendered}"
+    );
+
+    // 7. Unknown symbol in --incompatible_autoload_externally fails package load.
+    let mut cfg = LoaderConfig::new(fs.clone(), make_resolver());
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+nonexistent_symbol".to_string()];
+    let loader = PackageLoader::new(cfg);
+    let rendered = load_err_text(
+        &loader,
+        &PackageIdentifier::create(ext_repo, PathFragment::create("")).unwrap(),
+    );
+    assert!(
+        rendered
+            .contains("Undefined symbol in --incompatible_autoload_externally: nonexistent_symbol"),
+        "unexpected error:\n{rendered}"
+    );
+}
+
+#[test]
+fn concurrent_autoload_resolution_waits_for_populated_values() {
+    use std::sync::{Condvar, Mutex};
+
+    let base = std::env::temp_dir().join(format!(
+        "zel-pkg-autoload-concurrent-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&base);
+    let fs = Arc::new(zel_vfs::LocalFileSystem::new(
+        zel_vfs::DigestHashFunction::Sha256,
+    ));
+    let root = PathFragment::create(base.join("ws").to_str().unwrap());
+    let rules_cc_root = PathFragment::create(base.join("ext/rules_cc+").to_str().unwrap());
+    let ext_root = PathFragment::create(base.join("ext/ext+").to_str().unwrap());
+    fs.create_directory_and_parents(&root).unwrap();
+    fs.create_directory_and_parents(&rules_cc_root).unwrap();
+    fs.create_directory_and_parents(&ext_root).unwrap();
+    let write = |dir: &PathFragment, rel: &str, content: &str| {
+        let p = dir.get_relative_str(rel);
+        if let Some(parent) = p.parent_directory() {
+            fs.create_directory_and_parents(&parent).unwrap();
+        }
+        fs.write_file(&p, content.as_bytes()).unwrap();
+    };
+
+    write(&rules_cc_root, "cc/BUILD", "");
+    write(
+        &rules_cc_root,
+        "cc/cc_library.bzl",
+        "def _impl(ctx):\n    return []\ncc_library = rule(implementation = _impl, attrs = {\"srcs\": attr.label_list(allow_files = True)})\n",
+    );
+    write(
+        &ext_root,
+        "p1/BUILD.bazel",
+        "cc_library(name = 'lib1', srcs = ['a.c'])\n",
+    );
+    write(
+        &ext_root,
+        "p2/BUILD.bazel",
+        "cc_library(name = 'lib2', srcs = ['b.c'])\n",
+    );
+
+    struct SyncState {
+        t1_in_autoload: bool,
+        t2_started: bool,
+    }
+    struct BlockingAutoloadResolver {
+        inner: SimpleRepoResolver,
+        sync: Arc<(Mutex<SyncState>, Condvar)>,
+    }
+    impl RepoResolver for BlockingAutoloadResolver {
+        fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+            self.inner.repo_root(repo)
+        }
+        fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
+            self.inner.mapping(owner)
+        }
+        fn autoload_module_repo(
+            &self,
+            module_name: &str,
+            repo_name: &str,
+        ) -> Option<RepositoryName> {
+            let (lock, cv) = &*self.sync;
+            {
+                let mut st = lock.lock().unwrap();
+                if !st.t1_in_autoload {
+                    st.t1_in_autoload = true;
+                    cv.notify_all();
+                    while !st.t2_started {
+                        st = cv.wait(st).unwrap();
+                    }
+                }
+            }
+            // Give thread 2 time to enter `resolve_autoload_values` while thread 1 holds `Loading`.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.inner.autoload_module_repo(module_name, repo_name)
+        }
+    }
+
+    let mut inner = SimpleRepoResolver::new(root);
+    let cc_canon = RepositoryName::create("rules_cc+").unwrap();
+    let ext_canon = RepositoryName::create("ext+").unwrap();
+    inner
+        .external
+        .insert("rules_cc+".to_string(), rules_cc_root);
+    inner.external.insert("ext+".to_string(), ext_root);
+    inner.apparent.insert("rules_cc".to_string(), cc_canon);
+    inner.apparent.insert("ext".to_string(), ext_canon.clone());
+
+    let sync = Arc::new((
+        Mutex::new(SyncState {
+            t1_in_autoload: false,
+            t2_started: false,
+        }),
+        Condvar::new(),
+    ));
+    let resolver = Arc::new(BlockingAutoloadResolver {
+        inner,
+        sync: Arc::clone(&sync),
+    });
+
+    let mut cfg = LoaderConfig::new(fs, resolver);
+    cfg.use_prelude = false;
+    cfg.incompatible_autoload_externally = vec!["+cc_library".to_string()];
+    let loader = PackageLoader::new(cfg);
+
+    let l1 = Arc::clone(&loader);
+    let ext1 = ext_canon.clone();
+    let t1 = std::thread::spawn(move || {
+        l1.load_package(&PackageIdentifier::create(ext1, PathFragment::create("p1")).unwrap())
+    });
+
+    let l2 = Arc::clone(&loader);
+    let ext2 = ext_canon;
+    let sync2 = Arc::clone(&sync);
+    let t2 = std::thread::spawn(move || {
+        let (lock, cv) = &*sync2;
+        {
+            let mut st = lock.lock().unwrap();
+            while !st.t1_in_autoload {
+                st = cv.wait(st).unwrap();
+            }
+            st.t2_started = true;
+            cv.notify_all();
+        }
+        l2.load_package(&PackageIdentifier::create(ext2, PathFragment::create("p2")).unwrap())
+    });
+
+    let p1 = t1.join().unwrap().expect("p1 should load");
+    let p2 = t2.join().unwrap().expect("p2 should load");
+    assert!(!p1.contains_errors, "p1 errors: {:?}", p1.events);
+    assert!(!p2.contains_errors, "p2 errors: {:?}", p2.events);
+    assert!(p1.targets.contains_key("lib1"));
+    assert!(p2.targets.contains_key("lib2"));
+}

@@ -56,6 +56,12 @@ pub struct LoaderConfig {
     pub check_bzl_visibility: bool,
     /// Options listed in `--incompatible_disable_transitions_on`.
     pub incompatible_disable_transitions_on: Vec<String>,
+    /// `--incompatible_autoload_externally` entries (default empty in Bazel 9.3.2).
+    pub incompatible_autoload_externally: Vec<String>,
+    /// `--incompatible_disable_autoloads_in_main_repo` (default `true` in Bazel 9.3.2).
+    pub incompatible_disable_autoloads_in_main_repo: bool,
+    /// `--repositories_without_autoloads` entries (default empty).
+    pub repositories_without_autoloads: Vec<String>,
     /// Whether to apply `//tools/build_rules:prelude_bazel` (main repo only).
     pub use_prelude: bool,
     /// `--experimental_sibling_repository_layout`: when `false`, `//...` skips top-level `external/`.
@@ -111,6 +117,9 @@ impl LoaderConfig {
             experimental_bzl_visibility: true,
             check_bzl_visibility: true,
             incompatible_disable_transitions_on: Vec::new(),
+            incompatible_autoload_externally: Vec::new(),
+            incompatible_disable_autoloads_in_main_repo: true,
+            repositories_without_autoloads: Vec::new(),
             use_prelude: true,
             sibling_repository_layout: false,
             experimental_enable_scl_dialect: true,
@@ -264,6 +273,12 @@ pub struct PackageLoader {
     bzl_cache: Mutex<HashMap<String, BzlResult>>,
     /// `exported_toplevels` of `@_builtins//:exports.bzl` (computed on first use).
     builtin_toplevels: Mutex<BuiltinToplevels>,
+    /// Parsed `--incompatible_autoload_externally` configuration (or validation error).
+    autoload_symbols: Result<crate::autoload::AutoloadSymbols, String>,
+    /// Lazily loaded autoloaded symbol values from external ruleset repositories.
+    autoload_values: Mutex<AutoloadValues>,
+    /// Notifies concurrent threads waiting on an in-flight `autoload_values` load.
+    autoload_values_cv: std::sync::Condvar,
 }
 
 /// Key under which `exported_rules` are stored in the builtins map (not a valid identifier).
@@ -274,6 +289,15 @@ enum BuiltinToplevels {
     #[default]
     Unloaded,
     Loading,
+    Ready(BTreeMap<String, Value>),
+    Failed(String),
+}
+
+#[derive(Default)]
+enum AutoloadValues {
+    #[default]
+    Unloaded,
+    Loading(std::thread::ThreadId),
     Ready(BTreeMap<String, Value>),
     Failed(String),
 }
@@ -338,20 +362,14 @@ const ANALYSIS_ONLY_GLOBALS: &[&str] = &[
     "OutputGroupInfo",
     "RunEnvironmentInfo",
     "InstrumentedFilesInfo",
-    "CcInfo",
     "CcToolchainConfigInfo",
     "IncompatiblePlatformProvider",
-    "JavaInfo",
-    "PyInfo",
-    "ProtoInfo",
-    "DebugPackageInfo",
     "ToolchainInfo",
     "TemplateVariableInfo",
     "FilesToRunProvider",
     "analysis_test_transition",
     "cc_common",
     "java_common",
-    "proto_common",
     "platform_common",
     "config_common",
     "apple_common",
@@ -544,6 +562,11 @@ fn check_kwargs(func: &str, kw: &BTreeMap<String, Value>, allowed: &[&str]) -> R
 
 impl PackageLoader {
     pub fn new(mut cfg: LoaderConfig) -> Arc<Self> {
+        let autoload_symbols = crate::autoload::AutoloadSymbols::parse(
+            &cfg.incompatible_autoload_externally,
+            &cfg.repositories_without_autoloads,
+            cfg.incompatible_disable_autoloads_in_main_repo,
+        );
         // Serve `@_builtins` (Bazel's embedded Starlark builtins) next to the configured repos.
         if let Ok(root) = crate::builtins::materialize() {
             cfg.lookup.resolver = Arc::new(crate::builtins::BuiltinsResolver {
@@ -553,11 +576,19 @@ impl PackageLoader {
         }
         Arc::new(Self {
             builtin_toplevels: Mutex::new(BuiltinToplevels::Unloaded),
+            autoload_symbols,
+            autoload_values: Mutex::new(AutoloadValues::Unloaded),
+            autoload_values_cv: std::sync::Condvar::new(),
             cfg,
             rule_classes: native_rule_classes(),
             registry: Mutex::new(Registry::default()),
             bzl_cache: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Validation error from `--incompatible_autoload_externally`, if any.
+    pub fn autoload_error(&self) -> Option<&str> {
+        self.autoload_symbols.as_ref().err().map(String::as_str)
     }
 
     pub fn config(&self) -> &LoaderConfig {
@@ -855,6 +886,26 @@ impl PackageLoader {
         ctx.captured_prints = Some(Vec::new());
         self.install_build_globals(&mut ctx);
         self.inject_builtin_toplevels(&mut ctx, true);
+        if let Err(msg) = self.apply_autoloads(&mut ctx, id.repository(), true) {
+            let mut s = state.lock().unwrap();
+            s.error(None, msg.clone());
+            let pkg = Package {
+                id: id.clone(),
+                build_file: build_file.clone(),
+                targets: std::mem::take(&mut s.targets),
+                loads: Vec::new(),
+                default_visibility: Vec::new(),
+                args: s.args.clone(),
+                exported_files: BTreeMap::new(),
+                group_includes: BTreeMap::new(),
+                target_locations: BTreeMap::new(),
+                environment_groups: BTreeMap::new(),
+                macro_namespace_violating_targets: BTreeMap::new(),
+                events: std::mem::take(&mut s.events),
+                contains_errors: true,
+            };
+            return (pkg, Some(msg));
+        }
         self.install_host(&mut ctx, Some(Arc::clone(&state)), None, id.clone());
         let sink: Arc<Mutex<Vec<PackageEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let load_fatal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
@@ -1178,19 +1229,6 @@ impl PackageLoader {
         ctx.globals.insert(
             "proto_common_do_not_use".to_string(),
             Value::Struct(Arc::new(StructValue::new(pcdnu))),
-        );
-        let mut proto_common = BTreeMap::new();
-        proto_common.insert(
-            "ProtoLangToolchainInfo".to_string(),
-            crate::provider::proto_lang_toolchain_info_provider(),
-        );
-        proto_common.insert(
-            "INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION".to_string(),
-            Value::Bool(true),
-        );
-        ctx.globals.insert(
-            "proto_common".to_string(),
-            Value::Struct(Arc::new(StructValue::new(proto_common))),
         );
         ctx.globals
             .entry("exec_transition".to_string())
@@ -1710,6 +1748,9 @@ impl PackageLoader {
             });
             let template = Arc::new(Self {
                 builtin_toplevels: Mutex::new(BuiltinToplevels::Loading),
+                autoload_symbols: Ok(crate::autoload::AutoloadSymbols::empty()),
+                autoload_values: Mutex::new(AutoloadValues::Unloaded),
+                autoload_values_cv: std::sync::Condvar::new(),
                 cfg,
                 rule_classes: native_rule_classes(),
                 registry: Mutex::new(Registry::default()),
@@ -1861,6 +1902,294 @@ impl PackageLoader {
         }
     }
 
+    /// Names present in the uninjected `.bzl` environment (globals + `native` attributes) after
+    /// removing `partially_removed_symbols`, used to enforce `AutoloadSymbols` rdeps checks.
+    fn uninjected_bzl_names_without_autoloads(
+        &self,
+        autoloads: &crate::autoload::AutoloadSymbols,
+    ) -> BTreeSet<String> {
+        let mut names: BTreeSet<String> = ANALYSIS_ONLY_GLOBALS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        for &(sym, _) in crate::autoload::REMOVED_BZL_SYMBOLS {
+            names.insert(sym.to_string());
+        }
+        names.insert("proto_common_do_not_use".to_string());
+        for rc in self.rule_classes.keys() {
+            names.insert(rc.clone());
+        }
+        if let BuiltinToplevels::Ready(m) = &*self.builtin_toplevels.lock().unwrap() {
+            for (k, v) in m {
+                if k == EXPORTED_RULES_KEY {
+                    if let Value::Dict(d) = v {
+                        for (rk, rv) in &d.lock().unwrap().entries {
+                            if let Value::String(rn) = rk {
+                                let clean = if let Some(rest) = rn.strip_prefix('+') {
+                                    rest
+                                } else if rn.starts_with('-') {
+                                    continue;
+                                } else {
+                                    rn.as_str()
+                                };
+                                if matches!(rv, Value::None) {
+                                    names.remove(clean);
+                                } else {
+                                    names.insert(clean.to_string());
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    names.insert(k.clone());
+                }
+            }
+        }
+        for sym in autoloads.partially_removed_symbols() {
+            names.remove(sym);
+        }
+        names
+    }
+
+    /// Resolves and caches the exported Starlark values for all symbols listed in
+    /// `autoloads.autoloaded_symbols()` (`AutoloadSymbols.getLoadKeys` + `processLoads`).
+    fn resolve_autoload_values(
+        self: &Arc<Self>,
+        autoloads: &crate::autoload::AutoloadSymbols,
+    ) -> Result<BTreeMap<String, Value>, String> {
+        let me = std::thread::current().id();
+        {
+            let mut st = self
+                .autoload_values
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            loop {
+                match &*st {
+                    AutoloadValues::Ready(m) => return Ok(m.clone()),
+                    AutoloadValues::Failed(e) => return Err(e.clone()),
+                    AutoloadValues::Loading(owner) if *owner == me => return Ok(BTreeMap::new()),
+                    AutoloadValues::Loading(_) => {
+                        st = self
+                            .autoload_values_cv
+                            .wait(st)
+                            .unwrap_or_else(|e| e.into_inner());
+                    }
+                    AutoloadValues::Unloaded => {
+                        *st = AutoloadValues::Loading(me);
+                        break;
+                    }
+                }
+            }
+        }
+        struct LoadingGuard<'a> {
+            state: &'a Mutex<AutoloadValues>,
+            cv: &'a std::sync::Condvar,
+            armed: bool,
+        }
+        impl Drop for LoadingGuard<'_> {
+            fn drop(&mut self) {
+                if self.armed {
+                    let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    if matches!(&*st, AutoloadValues::Loading(_)) {
+                        *st = AutoloadValues::Unloaded;
+                    }
+                    self.cv.notify_all();
+                }
+            }
+        }
+        let mut guard = LoadingGuard {
+            state: &self.autoload_values,
+            cv: &self.autoload_values_cv,
+            armed: true,
+        };
+        let mut loaded: BTreeMap<String, Value> = BTreeMap::new();
+        let mut err: Option<String> = None;
+        for sym in autoloads.autoloaded_symbols() {
+            let Some(redirect) = crate::autoload::lookup(sym) else {
+                continue;
+            };
+            let repo = self
+                .cfg
+                .lookup
+                .resolver
+                .autoload_module_repo(redirect.module_name(), redirect.repo_name());
+            match repo {
+                Some(canon_repo) => {
+                    let (pkg, file) = redirect.package_and_file();
+                    let label_res =
+                        PackageIdentifier::create(canon_repo, PathFragment::create(pkg))
+                            .and_then(|pkg_id| Label::create(pkg_id, file))
+                            .map_err(|e| e.to_string());
+                    let label = match label_res {
+                        Ok(l) => l,
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    };
+                    match self.load_bzl_exports(&label) {
+                        Ok(exports) => {
+                            let export_name = redirect.exported_name();
+                            if let Some(val) = exports.get(export_name) {
+                                loaded.insert(sym.clone(), val.clone());
+                            } else {
+                                err = Some(format!(
+                                    "The toplevel symbol '{sym}' set by --incompatible_load_symbols_externally couldn't be loaded. '{export_name}' not found in auto loaded '{}'.",
+                                    redirect.load_label
+                                ));
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    loaded.insert(
+                        sym.clone(),
+                        Value::BuiltinFunction(format!("host:autoload_missing.{sym}")),
+                    );
+                }
+            }
+        }
+        let mut st = self
+            .autoload_values
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let res = match err {
+            Some(e) => {
+                *st = AutoloadValues::Failed(e.clone());
+                Err(e)
+            }
+            None => {
+                *st = AutoloadValues::Ready(loaded.clone());
+                Ok(loaded)
+            }
+        };
+        guard.armed = false;
+        self.autoload_values_cv.notify_all();
+        res
+    }
+
+    /// Applies `--incompatible_autoload_externally` (and `--repositories_without_autoloads` /
+    /// `--incompatible_disable_autoloads_in_main_repo`) to a `BUILD` or `.bzl` evaluation
+    /// context (`AutoloadSymbols.modifyBuildEnv` / `modifyBuildBzlEnv`).
+    fn apply_autoloads(
+        self: &Arc<Self>,
+        ctx: &mut EvalContext,
+        repo: &RepositoryName,
+        is_build: bool,
+    ) -> Result<(), String> {
+        let autoloads = match &self.autoload_symbols {
+            Ok(a) => a,
+            Err(e) => return Err(e.clone()),
+        };
+        if !autoloads.is_enabled() {
+            return Ok(());
+        }
+        if !autoloads.partially_removed_symbols().is_empty() {
+            let remaining = self.uninjected_bzl_names_without_autoloads(autoloads);
+            autoloads.validate_rdeps(&remaining)?;
+        }
+        let use_autoloads = if is_build {
+            !autoloads.disabled_in_build_for_repo(repo)
+        } else {
+            !autoloads.disabled_in_bzl_for_repo(repo)
+        };
+        let loaded = if use_autoloads {
+            self.resolve_autoload_values(autoloads)?
+        } else {
+            BTreeMap::new()
+        };
+        let to_remove = if use_autoloads {
+            autoloads.removed_symbols()
+        } else {
+            autoloads.partially_removed_symbols()
+        };
+
+        if is_build {
+            for (sym, val) in loaded {
+                if crate::autoload::lookup(&sym).is_some_and(|r| r.is_rule) {
+                    ctx.globals.insert(sym, val);
+                }
+            }
+            for sym in to_remove {
+                if crate::autoload::lookup(sym).is_some_and(|r| r.is_rule) {
+                    ctx.globals.remove(sym);
+                }
+            }
+            return Ok(());
+        }
+
+        let mut native_fields = match ctx.globals.get("native") {
+            Some(Value::Struct(s)) => s.fields.clone(),
+            _ => BTreeMap::new(),
+        };
+        for (sym, val) in loaded {
+            if let Some(redirect) = crate::autoload::lookup(&sym) {
+                if redirect.is_rule {
+                    native_fields.insert(sym, val);
+                } else {
+                    ctx.guarded_globals.remove(&sym);
+                    ctx.globals.insert(sym, val);
+                }
+            }
+        }
+        for sym in to_remove {
+            if let Some(redirect) = crate::autoload::lookup(sym) {
+                if redirect.is_rule {
+                    native_fields.remove(sym);
+                } else if sym == "proto_common_do_not_use" {
+                    if let Some(Value::Struct(s)) =
+                        ctx.globals.get("proto_common_do_not_use").cloned()
+                    {
+                        let mut kept = BTreeMap::new();
+                        if let Some(v) = s
+                            .fields
+                            .get("INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION")
+                        {
+                            kept.insert(
+                                "INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION".to_string(),
+                                v.clone(),
+                            );
+                        }
+                        ctx.globals.insert(
+                            "proto_common_do_not_use".to_string(),
+                            Value::Struct(Arc::new(StructValue::new(kept))),
+                        );
+                    }
+                } else {
+                    ctx.globals.remove(sym);
+                    ctx.guarded_globals.remove(sym);
+                }
+            }
+        }
+        if !use_autoloads {
+            let mut legacy = BTreeMap::new();
+            for (k, v) in &ctx.globals {
+                if crate::autoload::lookup(k).is_some() {
+                    legacy.insert(k.clone(), v.clone());
+                }
+            }
+            for k in ctx.guarded_globals.keys() {
+                if crate::autoload::lookup(k).is_some() {
+                    legacy.entry(k.clone()).or_insert(Value::None);
+                }
+            }
+            native_fields.insert(
+                "legacy_globals".to_string(),
+                Value::Struct(Arc::new(StructValue::new(legacy))),
+            );
+        }
+        ctx.globals.insert(
+            "native".to_string(),
+            Value::Struct(Arc::new(StructValue::new(native_fields))),
+        );
+        Ok(())
+    }
+
     fn eval_bzl_file(
         self: &Arc<Self>,
         label: &Label,
@@ -1933,7 +2262,22 @@ impl PackageLoader {
                 let m = crate::builtins::builtins_module(&ctx.globals);
                 ctx.globals.insert("_builtins".to_string(), m);
             } else {
+                for &(sym, bzl_label) in crate::autoload::REMOVED_BZL_SYMBOLS {
+                    ctx.guarded_globals.insert(
+                        sym.to_string(),
+                        crate::autoload::removed_symbol_error(sym, bzl_label),
+                    );
+                }
                 self.inject_builtin_toplevels(&mut ctx, false);
+                if let Err(msg) =
+                    self.apply_autoloads(&mut ctx, label.package_identifier().repository(), false)
+                {
+                    return Err(BzlError {
+                        events: vec![PackageEvent::error(None, msg.clone())],
+                        message: msg,
+                        observed_files: Vec::new(),
+                    });
+                }
             }
         }
         let mut chain2 = chain.to_vec();

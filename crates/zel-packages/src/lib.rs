@@ -18,6 +18,7 @@
 
 pub mod aspect;
 pub mod attr;
+pub mod autoload;
 pub mod builtins;
 pub mod glob;
 pub mod loader;
@@ -35,6 +36,7 @@ use zel_starlark::{LoadStatement, Value};
 use zel_vfs::{FileSystem, PathFragment};
 
 pub use attr::{AttrType, AttrValue, Attribute};
+pub use autoload::AutoloadSymbols;
 pub use loader::{BzlOverride, LoaderConfig, PackageCache, PackageLoadError, PackageLoader};
 pub use lookup::{PackageEvent, PackageLookupConfig, RepoResolver, SimpleRepoResolver};
 pub use resolve::{PackageErrors, PatternError, PatternResolver, ResolveOutcome};
