@@ -1162,6 +1162,13 @@ fn resolve_symlink_path(fs: &dyn FileSystem, path: &PathFragment) -> io::Result<
     step(fs, path, path, &mut depth)
 }
 
+#[derive(Clone, Copy)]
+enum TreeVisitEvent<'a> {
+    File(&'a PathFragment),
+    EnterDir,
+    ExitDir,
+}
+
 /// Visits entries inside a materialized tree artifact matching `TreeArtifactValue.visitTree`:
 /// enumerates with `NOFOLLOW`, rejects dangling symlinks, cyclic directory symlinks, and special
 /// files, and reports apparent tree-relative paths.
@@ -1171,7 +1178,7 @@ fn visit_tree_artifact<F>(
     mut on_entry: F,
 ) -> io::Result<()>
 where
-    F: FnMut(&str, &PathFragment, bool) -> io::Result<()>,
+    F: FnMut(&str, TreeVisitEvent<'_>) -> io::Result<()>,
 {
     fn walk<F>(
         fs: &dyn FileSystem,
@@ -1182,7 +1189,7 @@ where
         on_entry: &mut F,
     ) -> io::Result<()>
     where
-        F: FnMut(&str, &PathFragment, bool) -> io::Result<()>,
+        F: FnMut(&str, TreeVisitEvent<'_>) -> io::Result<()>,
     {
         let mut entries = fs.readdir(cur_abs)?;
         entries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1204,7 +1211,7 @@ where
                     ));
                 };
                 if target_st.is_file && !target_st.is_special_file {
-                    on_entry(&rel, &real_target, false)?;
+                    on_entry(&rel, TreeVisitEvent::File(&real_target))?;
                 } else if target_st.is_directory {
                     if real_base.starts_with(&real_target)
                         || !active_dirs.insert(real_target.clone())
@@ -1214,10 +1221,11 @@ where
                             format!("{child_abs} (Too many levels of symbolic links)"),
                         ));
                     }
-                    on_entry(&rel, &real_target, true)?;
+                    on_entry(&rel, TreeVisitEvent::EnterDir)?;
                     let res = walk(fs, real_base, &rel, &real_target, active_dirs, on_entry);
                     active_dirs.remove(&real_target);
                     res?;
+                    on_entry(&rel, TreeVisitEvent::ExitDir)?;
                 } else {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -1235,14 +1243,15 @@ where
             } else if lst.is_directory {
                 let real_dir = resolve_symlink_path(fs, &child_abs)?;
                 let inserted = active_dirs.insert(real_dir.clone());
-                on_entry(&rel, &child_abs, true)?;
+                on_entry(&rel, TreeVisitEvent::EnterDir)?;
                 let res = walk(fs, real_base, &rel, &child_abs, active_dirs, on_entry);
                 if inserted {
                     active_dirs.remove(&real_dir);
                 }
                 res?;
+                on_entry(&rel, TreeVisitEvent::ExitDir)?;
             } else {
-                on_entry(&rel, &child_abs, false)?;
+                on_entry(&rel, TreeVisitEvent::File(&child_abs))?;
             }
         }
         Ok(())
@@ -1269,8 +1278,8 @@ fn collect_tree_children(
     owner: &zel_cmdline::Label,
     out: &mut Vec<(String, Artifact)>,
 ) -> io::Result<()> {
-    visit_tree_artifact(fs, base_abs, |rel, _resolved_path, is_dir| {
-        if !is_dir {
+    visit_tree_artifact(fs, base_abs, |rel, ev| {
+        if matches!(ev, TreeVisitEvent::File(_)) {
             let child_art = Artifact {
                 is_source: false,
                 is_tree_artifact: false,
@@ -1297,16 +1306,26 @@ pub fn path_digest(
     let st = fs.stat(path, true).ok()?;
     if st.is_directory {
         let mut buf = Vec::new();
-        visit_tree_artifact(fs, path, |rel, resolved_path, is_dir| {
-            let slash_rel = format!("/{rel}");
-            buf.extend_from_slice(slash_rel.as_bytes());
-            buf.push(0);
-            if !is_dir {
-                if let Ok(b) = fs.read_file(resolved_path) {
-                    buf.extend_from_slice(digest.hex(&b).as_bytes());
+        visit_tree_artifact(fs, path, |rel, ev| {
+            match ev {
+                TreeVisitEvent::File(resolved_path) => {
+                    let slash_rel = format!("/{rel}");
+                    buf.extend_from_slice(slash_rel.as_bytes());
+                    buf.push(0);
+                    if let Ok(b) = fs.read_file(resolved_path) {
+                        buf.extend_from_slice(digest.hex(&b).as_bytes());
+                    }
+                    buf.push(0);
+                }
+                TreeVisitEvent::EnterDir => {
+                    let slash_rel = format!("/{rel}");
+                    buf.extend_from_slice(slash_rel.as_bytes());
+                    buf.push(0);
+                }
+                TreeVisitEvent::ExitDir => {
+                    buf.push(0);
                 }
             }
-            buf.push(0);
             Ok(())
         })
         .ok()?;
@@ -3612,7 +3631,7 @@ pub fn execute_action_with(
             ));
         }
         if !pending && out_art.is_tree_artifact {
-            if let Err(e) = visit_tree_artifact(fs, &out_path, |_, _, _| Ok(())) {
+            if let Err(e) = visit_tree_artifact(fs, &out_path, |_, _| Ok(())) {
                 return Ok(fail(
                     vec![
                         format!(
