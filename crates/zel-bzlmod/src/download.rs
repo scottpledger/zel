@@ -159,11 +159,7 @@ impl Url {
             }
             return Ok(u);
         };
-        if u.userinfo.is_none()
-            && u.scheme.eq_ignore_ascii_case(&self.scheme)
-            && u.host == self.host
-            && u.port == self.port
-        {
+        if u.userinfo.is_none() && u.host == self.host && u.port == self.port {
             u.userinfo = self.userinfo.clone();
         }
         Ok(u)
@@ -1950,6 +1946,71 @@ mod tests {
         assert_eq!(base.join("d").unwrap().path_and_query, "/a/b/d");
         assert_eq!(base.join("https://o/p").unwrap().host, "o");
         assert_eq!(base.join("//o2/p").unwrap().host, "o2");
+
+        // `HttpUtils.mergeUrls` userInfo inheritance across redirects.
+        let authed = Url::parse("http://alice:secret@lol.example/a").unwrap();
+        assert_eq!(
+            authed.join("/hi").unwrap().to_url_string(),
+            "http://alice:secret@lol.example/hi"
+        );
+        assert_eq!(
+            authed
+                .join("http://lol.example/hi")
+                .unwrap()
+                .to_url_string(),
+            "http://alice:secret@lol.example/hi"
+        );
+        assert_eq!(
+            authed
+                .join("https://lol.example/hi")
+                .unwrap()
+                .to_url_string(),
+            "https://alice:secret@lol.example/hi"
+        );
+        assert_eq!(
+            authed
+                .join("https://bob:other@lol.example/hi")
+                .unwrap()
+                .to_url_string(),
+            "https://bob:other@lol.example/hi"
+        );
+        assert_eq!(
+            authed
+                .join("http://new.example/hi")
+                .unwrap()
+                .to_url_string(),
+            "http://new.example/hi"
+        );
+        assert_eq!(
+            authed
+                .join("http://lol.example:81/hi")
+                .unwrap()
+                .to_url_string(),
+            "http://lol.example:81/hi"
+        );
+        let authed_port = Url::parse("http://alice:secret@lol.example:8080/a").unwrap();
+        assert_eq!(
+            authed_port
+                .join("https://lol.example:8080/b")
+                .unwrap()
+                .to_url_string(),
+            "https://alice:secret@lol.example:8080/b"
+        );
+        assert_eq!(
+            authed_port
+                .join("https://lol.example:8443/b")
+                .unwrap()
+                .to_url_string(),
+            "https://lol.example:8443/b"
+        );
+        let authed_80 = Url::parse("http://alice:secret@lol.example:80/a").unwrap();
+        assert_eq!(
+            authed_80
+                .join("https://lol.example/b")
+                .unwrap()
+                .to_url_string(),
+            "https://lol.example/b"
+        );
     }
 
     #[test]
