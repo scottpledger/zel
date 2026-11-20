@@ -987,6 +987,58 @@ pub struct GoogleAuthCallCredentialsProvider {
     state: Mutex<GoogleTokenState>,
 }
 
+fn well_known_adc_path_with<F>(is_windows: bool, get_env: &mut F) -> Option<PathBuf>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    const ADC_FILE: &str = "application_default_credentials.json";
+    if let Some(cfg_dir) = get_env("CLOUDSDK_CONFIG").filter(|s| !s.is_empty()) {
+        return Some(PathBuf::from(cfg_dir).join(ADC_FILE));
+    }
+    if is_windows {
+        if let Some(appdata) = get_env("APPDATA").filter(|s| !s.is_empty()) {
+            return Some(PathBuf::from(appdata).join("gcloud").join(ADC_FILE));
+        }
+        return get_env("USERPROFILE").filter(|s| !s.is_empty()).map(|u| {
+            PathBuf::from(u)
+                .join("AppData")
+                .join("Roaming")
+                .join("gcloud")
+                .join(ADC_FILE)
+        });
+    }
+    get_env("HOME").filter(|s| !s.is_empty()).map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("gcloud")
+            .join(ADC_FILE)
+    })
+}
+
+fn resolve_adc_path_with<F>(is_windows: bool, get_env: &mut F) -> Result<PathBuf, CredentialError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if let Some(p) = get_env("GOOGLE_APPLICATION_CREDENTIALS").filter(|s| !s.is_empty()) {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Ok(pb);
+        }
+        return Err(CredentialError::Auth(format!(
+            "GOOGLE_APPLICATION_CREDENTIALS file not found: {}",
+            pb.display()
+        )));
+    }
+    if let Some(adc) = well_known_adc_path_with(is_windows, get_env) {
+        if adc.is_file() {
+            return Ok(adc);
+        }
+    }
+    Err(CredentialError::Auth(
+        "Unable to find Application Default Credentials".into(),
+    ))
+}
+
 impl GoogleAuthCallCredentialsProvider {
     pub fn from_file(path: PathBuf, scopes: Vec<String>, tls: TlsConfig) -> Self {
         Self {
@@ -1007,30 +1059,20 @@ impl GoogleAuthCallCredentialsProvider {
     }
 
     pub fn from_adc(scopes: Vec<String>, tls: TlsConfig) -> Result<Self, CredentialError> {
-        if let Ok(p) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-            if !p.is_empty() {
-                let pb = PathBuf::from(p);
-                if pb.is_file() {
-                    return Ok(Self::from_file(pb, scopes, tls));
-                }
-                return Err(CredentialError::Auth(format!(
-                    "GOOGLE_APPLICATION_CREDENTIALS file not found: {}",
-                    pb.display()
-                )));
-            }
-        }
-        if let Ok(home) = std::env::var("HOME") {
-            let adc = PathBuf::from(home)
-                .join(".config")
-                .join("gcloud")
-                .join("application_default_credentials.json");
-            if adc.is_file() {
-                return Ok(Self::from_file(adc, scopes, tls));
-            }
-        }
-        Err(CredentialError::Auth(
-            "Unable to find Application Default Credentials".into(),
-        ))
+        Self::from_adc_with_env(scopes, tls, cfg!(windows), |name| std::env::var(name).ok())
+    }
+
+    fn from_adc_with_env<F>(
+        scopes: Vec<String>,
+        tls: TlsConfig,
+        is_windows: bool,
+        mut get_env: F,
+    ) -> Result<Self, CredentialError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let path = resolve_adc_path_with(is_windows, &mut get_env)?;
+        Ok(Self::from_file(path, scopes, tls))
     }
 
     fn fetch_token(&self) -> Result<(String, Option<Duration>), CredentialError> {
@@ -1549,10 +1591,7 @@ impl CallCredentialsProvider for CompositeCredentialsProvider {
     fn get_credentials(&self, uri: &str) -> Result<Vec<Header>, CredentialError> {
         if let Some(h) = &self.helper {
             if h.select_helper(uri).is_some() {
-                let hdrs = h.get_credentials(uri)?;
-                if !hdrs.is_empty() {
-                    return Ok(hdrs);
-                }
+                return h.get_credentials(uri);
             }
         }
         if let Some(g) = &self.google {
@@ -1949,6 +1988,313 @@ mod tests {
             }
             let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600));
         }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn adc_resolves_env_override_cloudsdk_config_windows_appdata_and_unix_home() {
+        let tmp = std::env::temp_dir().join(format!("zel-adc-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let explicit = tmp.join("explicit.json");
+        std::fs::write(&explicit, r#"{"access_token":"tok-explicit"}"#).unwrap();
+
+        let cloudsdk_dir = tmp.join("custom-gcloud");
+        std::fs::create_dir_all(&cloudsdk_dir).unwrap();
+        std::fs::write(
+            cloudsdk_dir.join("application_default_credentials.json"),
+            r#"{"access_token":"tok-cloudsdk"}"#,
+        )
+        .unwrap();
+
+        let appdata = tmp.join("AppData").join("Roaming");
+        std::fs::create_dir_all(appdata.join("gcloud")).unwrap();
+        std::fs::write(
+            appdata
+                .join("gcloud")
+                .join("application_default_credentials.json"),
+            r#"{"access_token":"tok-win-appdata"}"#,
+        )
+        .unwrap();
+
+        let userprofile = tmp.join("Users").join("alice");
+        std::fs::create_dir_all(userprofile.join("AppData").join("Roaming").join("gcloud"))
+            .unwrap();
+        std::fs::write(
+            userprofile
+                .join("AppData")
+                .join("Roaming")
+                .join("gcloud")
+                .join("application_default_credentials.json"),
+            r#"{"access_token":"tok-win-userprofile"}"#,
+        )
+        .unwrap();
+
+        let unix_home = tmp.join("unix-home");
+        std::fs::create_dir_all(unix_home.join(".config").join("gcloud")).unwrap();
+        std::fs::write(
+            unix_home
+                .join(".config")
+                .join("gcloud")
+                .join("application_default_credentials.json"),
+            r#"{"access_token":"tok-unix-home"}"#,
+        )
+        .unwrap();
+
+        let lookup = |map: &BTreeMap<&str, String>, k: &str| map.get(k).cloned();
+
+        // 1. GOOGLE_APPLICATION_CREDENTIALS wins over CLOUDSDK_CONFIG, APPDATA, and HOME.
+        let mut env_explicit = BTreeMap::new();
+        env_explicit.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            explicit.to_string_lossy().into_owned(),
+        );
+        env_explicit.insert(
+            "CLOUDSDK_CONFIG",
+            cloudsdk_dir.to_string_lossy().into_owned(),
+        );
+        env_explicit.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_explicit.insert("HOME", unix_home.to_string_lossy().into_owned());
+        let p_exp = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_explicit, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_exp.get_credentials("https://remote.example.com").unwrap()[0].1,
+            "Bearer tok-explicit"
+        );
+
+        // Missing GOOGLE_APPLICATION_CREDENTIALS errors instead of falling back to well-known ADC.
+        let mut env_bad_explicit = env_explicit.clone();
+        env_bad_explicit.insert(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            tmp.join("missing.json").to_string_lossy().into_owned(),
+        );
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_bad_explicit, k),
+        )
+        .is_err());
+
+        // Empty GOOGLE_APPLICATION_CREDENTIALS is ignored; CLOUDSDK_CONFIG wins on both OSes.
+        let mut env_cloudsdk = BTreeMap::new();
+        env_cloudsdk.insert("GOOGLE_APPLICATION_CREDENTIALS", String::new());
+        env_cloudsdk.insert(
+            "CLOUDSDK_CONFIG",
+            cloudsdk_dir.to_string_lossy().into_owned(),
+        );
+        env_cloudsdk.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_cloudsdk.insert("HOME", unix_home.to_string_lossy().into_owned());
+        for is_win in [false, true] {
+            let p_cs = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+                vec![],
+                TlsConfig::default(),
+                is_win,
+                |k| lookup(&env_cloudsdk, k),
+            )
+            .unwrap();
+            assert_eq!(
+                p_cs.get_credentials("https://remote.example.com").unwrap()[0].1,
+                "Bearer tok-cloudsdk"
+            );
+        }
+
+        // CLOUDSDK_CONFIG pointing to a dir without ADC does NOT fall back to APPDATA or HOME.
+        let empty_cfg = tmp.join("empty-gcloud");
+        std::fs::create_dir_all(&empty_cfg).unwrap();
+        let mut env_empty_cs = BTreeMap::new();
+        env_empty_cs.insert("CLOUDSDK_CONFIG", empty_cfg.to_string_lossy().into_owned());
+        env_empty_cs.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_empty_cs.insert("HOME", unix_home.to_string_lossy().into_owned());
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_empty_cs, k),
+        )
+        .is_err());
+
+        // 2. Windows well-known path: %APPDATA%\gcloud\application_default_credentials.json.
+        let mut env_win = BTreeMap::new();
+        env_win.insert("APPDATA", appdata.to_string_lossy().into_owned());
+        env_win.insert("USERPROFILE", userprofile.to_string_lossy().into_owned());
+        let p_win = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_win, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_win.get_credentials("https://remote.example.com").unwrap()[0].1,
+            "Bearer tok-win-appdata"
+        );
+
+        // Windows fallback when APPDATA is unset: %USERPROFILE%\AppData\Roaming\gcloud\...
+        let mut env_win_up = BTreeMap::new();
+        env_win_up.insert("USERPROFILE", userprofile.to_string_lossy().into_owned());
+        let p_win_up = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |k| lookup(&env_win_up, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_win_up
+                .get_credentials("https://remote.example.com")
+                .unwrap()[0]
+                .1,
+            "Bearer tok-win-userprofile"
+        );
+
+        // Windows with no env vars returns Err cleanly without panicking.
+        assert!(GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            true,
+            |_| None,
+        )
+        .is_err());
+
+        // 3. Unix well-known path: $HOME/.config/gcloud/application_default_credentials.json.
+        let mut env_unix = BTreeMap::new();
+        env_unix.insert("HOME", unix_home.to_string_lossy().into_owned());
+        let p_unix = GoogleAuthCallCredentialsProvider::from_adc_with_env(
+            vec![],
+            TlsConfig::default(),
+            false,
+            |k| lookup(&env_unix, k),
+        )
+        .unwrap();
+        assert_eq!(
+            p_unix
+                .get_credentials("https://remote.example.com")
+                .unwrap()[0]
+                .1,
+            "Bearer tok-unix-home"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn composite_matching_empty_helper_does_not_fall_through_to_google_or_netrc() {
+        assert_eq!(parse_helper_response("{}").unwrap(), Vec::<Header>::new());
+        assert_eq!(
+            parse_helper_response(r#"{"headers":{}}"#).unwrap(),
+            Vec::<Header>::new()
+        );
+
+        let tmp = std::env::temp_dir().join(format!("zel-comp-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        #[cfg(unix)]
+        let (helper_obj, helper_hdrs) = {
+            use std::os::unix::fs::PermissionsExt;
+            let h1 = tmp.join("empty-obj.sh");
+            std::fs::write(&h1, "#!/bin/sh\ncat >/dev/null\necho '{}'\n").unwrap();
+            std::fs::set_permissions(&h1, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+            let h2 = tmp.join("empty-hdrs.sh");
+            std::fs::write(&h2, "#!/bin/sh\ncat >/dev/null\necho '{\"headers\":{}}'\n").unwrap();
+            std::fs::set_permissions(&h2, std::fs::Permissions::from_mode(0o755)).unwrap();
+            (h1, h2)
+        };
+        #[cfg(windows)]
+        let (helper_obj, helper_hdrs) = {
+            let h1 = tmp.join("empty-obj.cmd");
+            std::fs::write(&h1, "@echo off\r\necho {}\r\n").unwrap();
+            let h2 = tmp.join("empty-hdrs.cmd");
+            std::fs::write(&h2, "@echo off\r\necho {\"headers\":{}}\r\n").unwrap();
+            (h1, h2)
+        };
+
+        let helper = CredentialHelperProvider::from_specs(
+            &[
+                format!("*.anon.example={}", helper_obj.display()),
+                format!("explicit.anon.example={}", helper_hdrs.display()),
+            ],
+            None,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
+
+        let g_file = tmp.join("google.json");
+        std::fs::write(&g_file, r#"{"access_token":"google-fallback-tok"}"#).unwrap();
+        let google =
+            GoogleAuthCallCredentialsProvider::from_file(g_file, vec![], TlsConfig::default());
+
+        let netrc =
+            NetrcCredentialsProvider::parse("default login fallbackuser password fallbackpass\n")
+                .unwrap();
+
+        let composite = CompositeCredentialsProvider {
+            helper: Some(helper),
+            google: Some(google),
+            netrc: Some(netrc.clone()),
+        };
+
+        // Matching helper returning `{}` -> explicit empty headers; must NOT attach Google or netrc!
+        assert_eq!(
+            composite
+                .get_credentials("https://api.anon.example:443/cas")
+                .unwrap(),
+            Vec::<Header>::new()
+        );
+        // Matching helper returning `{"headers":{}}` -> explicit empty headers; must NOT fall through!
+        assert_eq!(
+            composite
+                .get_credentials("https://explicit.anon.example:443/cas")
+                .unwrap(),
+            Vec::<Header>::new()
+        );
+        // Non-matching host (`select_helper` is `None`) -> falls through to Google fallback.
+        assert_eq!(
+            composite
+                .get_credentials("https://other.example:443/cas")
+                .unwrap(),
+            vec![(
+                "authorization".to_string(),
+                "Bearer google-fallback-tok".to_string()
+            )]
+        );
+
+        // With Google absent, matching empty helper still returns empty headers while non-matching
+        // host falls through to netrc.
+        let composite_netrc_only = CompositeCredentialsProvider {
+            helper: Some(CredentialHelperProvider::from_specs(
+                &[format!("*.anon.example={}", helper_obj.display())],
+                None,
+                Duration::from_secs(5),
+                Duration::from_secs(60),
+            )),
+            google: None,
+            netrc: Some(netrc),
+        };
+        assert_eq!(
+            composite_netrc_only
+                .get_credentials("https://api.anon.example:443/cas")
+                .unwrap(),
+            Vec::<Header>::new()
+        );
+        assert_eq!(
+            composite_netrc_only
+                .get_credentials("https://other.example:443/cas")
+                .unwrap(),
+            vec![(
+                "authorization".to_string(),
+                format!("Basic {}", base64_encode(b"fallbackuser:fallbackpass"))
+            )]
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
