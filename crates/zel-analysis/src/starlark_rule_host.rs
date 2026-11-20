@@ -1206,7 +1206,7 @@ fn host_contains(
         }
         "toolchains" => {
             if !has_toolchain_context(st) {
-                return err("Toolchains are not valid in this context");
+                return Ok(Value::Bool(false));
             }
             let k = transform_toolchain_key(st, ctx, key)?;
             let k = if k.starts_with("//") {
