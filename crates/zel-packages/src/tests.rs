@@ -3062,3 +3062,98 @@ fn attr_mandatory_with_non_empty_default_rejected() {
         );
     }
 }
+
+#[test]
+fn recursive_pattern_emits_leaf_bzl_compile_error_events_once_and_drains_failed_loads() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("broken.bzl", "X = undefined_bzl_symbol\n"),
+        (
+            "bad1/BUILD",
+            "load(\"//:broken.bzl\", \"X\")\nfilegroup(name = \"b1\")\n",
+        ),
+        (
+            "bad2/BUILD",
+            "load(\"//:broken.bzl\", \"X\")\nfilegroup(name = \"b2\")\n",
+        ),
+        ("good/BUILD", "filegroup(name = \"g1\")\n"),
+    ]);
+
+    let expected_leaf = "ERROR: /ws/broken.bzl:1:5: name 'undefined_bzl_symbol' is not defined";
+
+    let make_resolver = || PatternResolver::new(ws.loader(), PathFragment::create(""));
+
+    // Single-package wildcard emits the leaf `.bzl` diagnostic and marks the package reported so
+    // `drain_new_events()` does not duplicate it.
+    let r_single = make_resolver();
+    let single = r_single.resolve_patterns(&["//bad1:all".to_string()]);
+    let single_rendered: Vec<String> = single.events.iter().map(|e| e.render()).collect();
+    assert_eq!(
+        single_rendered
+            .iter()
+            .filter(|l| l.as_str() == expected_leaf)
+            .count(),
+        1,
+        "single-package wildcard must emit leaf error once: {single_rendered:?}"
+    );
+    assert!(
+        r_single.drain_new_events().is_empty(),
+        "drain_new_events must not re-emit already reported failed package events"
+    );
+
+    // Recursive `//...` without keep_going emits the leaf `.bzl` diagnostic once even when two
+    // failing packages load the same broken `.bzl`.
+    let r_rec = make_resolver();
+    let rec = r_rec.resolve_patterns_with_options(&["//...".to_string()], false, false);
+    assert!(!rec.errors.is_empty());
+    let rec_rendered: Vec<String> = rec.events.iter().map(|e| e.render()).collect();
+    assert_eq!(
+        rec_rendered
+            .iter()
+            .filter(|l| l.as_str() == expected_leaf)
+            .count(),
+        1,
+        "recursive //... must emit leaf error once: {rec_rendered:?}"
+    );
+    assert!(r_rec.drain_new_events().is_empty());
+
+    // Recursive `//...` with keep_going emits the leaf diagnostic once AND retains healthy targets.
+    let r_kg = make_resolver();
+    let kg = r_kg.resolve_patterns_with_options(&["//...".to_string()], false, true);
+    assert_eq!(kg.errors.len(), 2, "{:?}", kg.errors);
+    let kg_targets: Vec<String> = kg
+        .targets
+        .iter()
+        .map(|t| t.label().canonical_form())
+        .collect();
+    assert_eq!(kg_targets, vec!["//good:g1"]);
+    let kg_rendered: Vec<String> = kg.events.iter().map(|e| e.render()).collect();
+    assert_eq!(
+        kg_rendered
+            .iter()
+            .filter(|l| l.as_str() == expected_leaf)
+            .count(),
+        1,
+        "recursive //... --keep_going must emit leaf error once: {kg_rendered:?}"
+    );
+    assert!(r_kg.drain_new_events().is_empty());
+
+    // Direct `package()` followed by `drain_new_events()` also drains failed package events once.
+    let r_direct = make_resolver();
+    assert!(r_direct.package(&pid("bad1")).is_err());
+    assert!(r_direct.package(&pid("bad2")).is_err());
+    let drained: Vec<String> = r_direct
+        .drain_new_events()
+        .iter()
+        .map(|e| e.render())
+        .collect();
+    assert_eq!(
+        drained
+            .iter()
+            .filter(|l| l.as_str() == expected_leaf)
+            .count(),
+        1,
+        "drain_new_events must include failed load leaf events once: {drained:?}"
+    );
+    assert!(r_direct.drain_new_events().is_empty());
+}

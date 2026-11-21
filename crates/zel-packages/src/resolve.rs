@@ -343,6 +343,7 @@ pub struct PatternResolver {
     loader: Arc<PackageLoader>,
     cache: Mutex<HashMap<PackageIdentifier, Result<Arc<Package>, PackageLoadError>>>,
     reported: Mutex<HashSet<PackageIdentifier>>,
+    reported_load_errors: Mutex<Vec<PackageEvent>>,
     /// Client working directory relative to the workspace root.
     pub relative_dir: PathFragment,
     pub main_mapping: RepositoryMapping,
@@ -359,6 +360,7 @@ impl PatternResolver {
             loader,
             cache: Mutex::new(HashMap::new()),
             reported: Mutex::new(HashSet::new()),
+            reported_load_errors: Mutex::new(Vec::new()),
             relative_dir,
             main_mapping,
         }
@@ -382,6 +384,30 @@ impl PatternResolver {
     fn take_events(&self, pkg: &Package, out: &mut Vec<PackageEvent>) {
         if self.reported.lock().unwrap().insert(pkg.id.clone()) {
             out.extend(pkg.events.iter().cloned());
+        }
+    }
+
+    /// Takes the not-yet-reported events of a failed package load (each package's events are
+    /// reported once, and identical leaf error events shared across multiple failing packages —
+    /// such as a broken `.bzl` module loaded by several BUILD files — are emitted only once).
+    fn take_error_events(
+        &self,
+        id: &PackageIdentifier,
+        err: &PackageLoadError,
+        out: &mut Vec<PackageEvent>,
+    ) {
+        if self.reported.lock().unwrap().insert(id.clone()) {
+            let mut seen = self.reported_load_errors.lock().unwrap();
+            for ev in &err.events {
+                if ev.kind == EventKind::Error {
+                    if !seen.contains(ev) {
+                        seen.push(ev.clone());
+                        out.push(ev.clone());
+                    }
+                } else {
+                    out.push(ev.clone());
+                }
+            }
         }
     }
 
@@ -429,7 +455,7 @@ impl PatternResolver {
         match pattern {
             TargetPattern::SingleTarget(label) => {
                 let pkg = self.package(label.package_identifier()).map_err(|e| {
-                    events.extend(e.events.iter().cloned());
+                    self.take_error_events(label.package_identifier(), &e, events);
                     ExpandError {
                         message: e.message,
                         repo_fetch_error: e.repo_fetch_error,
@@ -455,7 +481,7 @@ impl PatternResolver {
                 include_files,
             } => {
                 let pkg = self.package(package).map_err(|e| {
-                    events.extend(e.events.iter().cloned());
+                    self.take_error_events(package, &e, events);
                     ExpandError {
                         message: e.message,
                         repo_fetch_error: e.repo_fetch_error,
@@ -519,6 +545,7 @@ impl PatternResolver {
                     out.extend(Self::rules_or_all(&pkg, include_files));
                 }
                 Err(e) => {
+                    self.take_error_events(&id, &e, events);
                     pkg_failures.push(ExpandError {
                         message: e.message,
                         repo_fetch_error: e.repo_fetch_error,
@@ -1160,18 +1187,24 @@ impl PatternResolver {
 }
 
 impl PatternResolver {
-    /// Events of loaded packages that have not been reported yet (each package once, ordered by
-    /// package identifier).
+    /// Events of loaded packages (including failed package loads) that have not been reported
+    /// yet (each package once, ordered by package identifier).
     pub fn drain_new_events(&self) -> Vec<PackageEvent> {
         let cache = self.cache.lock().unwrap();
         let mut ids: Vec<&PackageIdentifier> = cache.keys().collect();
         ids.sort();
         let mut out = Vec::new();
         for id in ids {
-            if let Some(Ok(p)) = cache.get(id) {
-                if self.reported.lock().unwrap().insert(id.clone()) {
-                    out.extend(p.events.iter().cloned());
+            match cache.get(id) {
+                Some(Ok(p)) => {
+                    if self.reported.lock().unwrap().insert(id.clone()) {
+                        out.extend(p.events.iter().cloned());
+                    }
                 }
+                Some(Err(e)) => {
+                    self.take_error_events(id, e, &mut out);
+                }
+                None => {}
             }
         }
         out

@@ -3137,3 +3137,108 @@ fn genquery_restricts_universe_closure_and_rejects_out_of_scope_paths() {
         vec!["//a:a", "//a:pg"]
     );
 }
+
+#[test]
+fn recursive_query_emits_bzl_compile_errors_and_keep_going_retains_healthy_targets() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("broken.bzl", "X = undefined_bzl_symbol\n"),
+        (
+            "bad1/BUILD",
+            "load(\"//:broken.bzl\", \"X\")\nfilegroup(name = \"b1\")\n",
+        ),
+        (
+            "bad2/BUILD",
+            "load(\"//:broken.bzl\", \"X\")\nfilegroup(name = \"b2\")\n",
+        ),
+        (
+            "good/BUILD",
+            "filegroup(name = \"g1\")\nfilegroup(name = \"g2\")\n",
+        ),
+    ]);
+    let leaf = "ERROR: /ws/broken.bzl:1:5: name 'undefined_bzl_symbol' is not defined";
+
+    // Without `--keep_going`: recursive `//...` emits the leaf `.bzl` compilation error once
+    // before the `error loading package under directory ''` error and exits with code 7.
+    let o = q(&ws, "//...", |_, _| {});
+    assert_eq!(o.exit_code, 7, "{:?}", o.stderr);
+    assert_eq!(
+        o.stderr.iter().filter(|l| l.as_str() == leaf).count(),
+        1,
+        "expected leaf .bzl error once in stderr: {:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.iter().any(|l| {
+            l.starts_with(
+                "ERROR: error loading package under directory '': error loading package '",
+            ) && l.contains("compilation of module 'broken.bzl' failed")
+        }),
+        "{:?}",
+        o.stderr
+    );
+    assert!(lines(&o).is_empty(), "{:?}", lines(&o));
+
+    // With `--keep_going`: recursive `//...` emits the leaf `.bzl` error once, reports each
+    // failing package as `ERROR: error loading package '<pkg>': ...` (without `Skipping '//...'`),
+    // returns all targets from healthy packages, and exits with code 3.
+    let o = q(&ws, "//...", |opts, _| opts.keep_going = true);
+    assert_eq!(o.exit_code, 3, "{:?}", o.stderr);
+    assert_eq!(lines(&o), vec!["//good:g1", "//good:g2"]);
+    assert_eq!(
+        o.stderr.iter().filter(|l| l.as_str() == leaf).count(),
+        1,
+        "expected leaf .bzl error once in stderr: {:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.iter().any(|l| l
+            == "ERROR: error loading package 'bad1': compilation of module 'broken.bzl' failed"),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.iter().any(|l| l
+            == "ERROR: error loading package 'bad2': compilation of module 'broken.bzl' failed"),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        !o.stderr.iter().any(|l| l.contains("Skipping '//...'")),
+        "recursive //... partial failure must not report Skipping '//...': {:?}",
+        o.stderr
+    );
+    assert!(
+        !o.stderr.iter().any(|l| l == "INFO: Empty results"),
+        "healthy targets must not produce Empty results: {:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.starts_with("WARNING: --keep_going specified")),
+        "{:?}",
+        o.stderr
+    );
+
+    // Single-package wildcard under `--keep_going` still emits the leaf `.bzl` error once AND
+    // reports `Skipping '//bad1:all': ...` while retaining targets from `//good:all`.
+    let o = q(&ws, "//bad1:all + //good:all", |opts, _| {
+        opts.keep_going = true
+    });
+    assert_eq!(o.exit_code, 3, "{:?}", o.stderr);
+    assert_eq!(lines(&o), vec!["//good:g1", "//good:g2"]);
+    assert_eq!(
+        o.stderr.iter().filter(|l| l.as_str() == leaf).count(),
+        1,
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr.iter().any(|l| {
+            l == "ERROR: Skipping '//bad1:all': error loading package 'bad1': compilation of module 'broken.bzl' failed"
+        }),
+        "{:?}",
+        o.stderr
+    );
+}
