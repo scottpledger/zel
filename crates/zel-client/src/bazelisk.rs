@@ -1000,6 +1000,29 @@ pub fn populate_bazelisk_cache_entry(
     Ok(sha_bazel_bin)
 }
 
+fn format_version_mismatch_prefix(
+    version: &str,
+    source: &VersionSource,
+    env: &BazeliskEnv,
+) -> String {
+    let is_bazel_source = matches!(
+        source,
+        VersionSource::BazelVersionFile(_) | VersionSource::UseBazelVersionEnv
+    );
+    let compat = normalize_version(&env.bazel_compat_version);
+    if is_bazel_source && !compat.is_empty() && normalize_version(&env.current_version) != compat {
+        format!(
+            "The project requires Bazel version '{version}' (specified in {source}), but the running Zel binary is version '{}' (Bazel {} compatibility)",
+            env.current_version, env.bazel_compat_version
+        )
+    } else {
+        format!(
+            "The project requires Zel version '{version}' (specified in {source}), but the running binary is version '{}'",
+            env.current_version
+        )
+    }
+}
+
 /// Locates or downloads the binary satisfying `version`.
 pub fn resolve_version_binary(
     fs: &dyn FileSystem,
@@ -1137,8 +1160,8 @@ pub fn resolve_version_binary(
     // 3. Download from release URL if allowed
     if env.no_download {
         return Err(format!(
-            "The project requires Zel version '{}' (specified in {}), but the running binary is version '{}' and downloads are disabled ($ZEL_NO_DOWNLOAD / $BAZELISK_NO_DOWNLOAD).",
-            version, source, env.current_version
+            "{} and downloads are disabled ($ZEL_NO_DOWNLOAD / $BAZELISK_NO_DOWNLOAD).",
+            format_version_mismatch_prefix(version, source, env)
         ));
     }
 
@@ -1203,8 +1226,10 @@ pub fn resolve_version_binary(
     }
 
     Err(format!(
-        "The project requires Zel version '{}' (specified in {}), but the running binary is version '{}' and version '{}' could not be found locally or downloaded from {}.",
-        version, source, env.current_version, version, base_url
+        "{} and version '{}' could not be found locally or downloaded from {}.",
+        format_version_mismatch_prefix(version, source, env),
+        version,
+        base_url
     ))
 }
 
@@ -1475,7 +1500,10 @@ mod tests {
         fs.write_file(&ws.get_relative_str(".bazelversion"), b"8.5.0\n")
             .unwrap();
         let err = plan_invocation(&fs, &ws, &ws, &[], &env).unwrap_err();
-        assert!(err.contains("8.5.0"), "{err}");
+        assert_eq!(
+            err,
+            "The project requires Bazel version '8.5.0' (specified in /ws/.bazelversion), but the running Zel binary is version '0.2.0' (Bazel 9.3.2 compatibility) and downloads are disabled ($ZEL_NO_DOWNLOAD / $BAZELISK_NO_DOWNLOAD)."
+        );
     }
 
     #[test]
@@ -1489,12 +1517,54 @@ mod tests {
         // A Zel 0.2.0 binary must NOT treat `.zelversion = 9.3.2` as matching itself.
         let env = make_env("0.2.0", "9.3.2");
         let err = plan_invocation(&fs, &ws, &ws, &[], &env).unwrap_err();
-        assert!(err.contains("9.3.2"), "{err}");
+        assert_eq!(
+            err,
+            "The project requires Zel version '9.3.2' (specified in /ws/.zelversion), but the running binary is version '0.2.0' and downloads are disabled ($ZEL_NO_DOWNLOAD / $BAZELISK_NO_DOWNLOAD)."
+        );
 
         // Matching `.zelversion = 0.2.0` runs in-process.
         fs.write_file(&ws.get_relative_str(".zelversion"), b"0.2.0\n")
             .unwrap();
         let action = plan_invocation(&fs, &ws, &ws, &[], &env).expect("should run in-process");
         assert!(matches!(action, LauncherAction::RunInProcess { .. }));
+    }
+
+    #[test]
+    fn mismatch_messages_distinguish_bazel_compat_and_zel_sources_across_error_paths() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/ws");
+        fs.create_directory_and_parents(&ws).unwrap();
+
+        // Download failure for $USE_BAZEL_VERSION includes both Zel version and Bazel compat version.
+        let mut bazel_env = make_env("0.2.0", "9.3.2");
+        bazel_env.no_download = false;
+        bazel_env.base_url = Some("file:///empty-mirror".to_string());
+        bazel_env.use_bazel_version = Some("9.2.0".to_string());
+        let err = plan_invocation(&fs, &ws, &ws, &[], &bazel_env).unwrap_err();
+        assert_eq!(
+            err,
+            "The project requires Bazel version '9.2.0' (specified in $USE_BAZEL_VERSION), but the running Zel binary is version '0.2.0' (Bazel 9.3.2 compatibility) and version '9.2.0' could not be found locally or downloaded from file:///empty-mirror."
+        );
+
+        // Download failure for $USE_ZEL_VERSION keeps Zel-specific wording.
+        let mut zel_env = make_env("0.2.0", "9.3.2");
+        zel_env.no_download = false;
+        zel_env.base_url = Some("file:///empty-mirror".to_string());
+        zel_env.use_zel_version = Some("0.3.0".to_string());
+        let err = plan_invocation(&fs, &ws, &ws, &[], &zel_env).unwrap_err();
+        assert_eq!(
+            err,
+            "The project requires Zel version '0.3.0' (specified in $USE_ZEL_VERSION), but the running binary is version '0.2.0' and version '0.3.0' could not be found locally or downloaded from file:///empty-mirror."
+        );
+
+        // When current_version already equals bazel_compat_version, do not repeat compat suffix.
+        fs.write_file(&ws.get_relative_str(".bazelversion"), b"9.2.0\n")
+            .unwrap();
+        let same_ver_env = make_env("9.3.2", "9.3.2");
+        let err = plan_invocation(&fs, &ws, &ws, &[], &same_ver_env).unwrap_err();
+        assert_eq!(
+            err,
+            "The project requires Zel version '9.2.0' (specified in /ws/.bazelversion), but the running binary is version '9.3.2' and downloads are disabled ($ZEL_NO_DOWNLOAD / $BAZELISK_NO_DOWNLOAD)."
+        );
     }
 }
