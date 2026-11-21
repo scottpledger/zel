@@ -2907,3 +2907,158 @@ filegroup(name = "fg", srcs = [], target_compatible_with = [":cv", "@myrepo//dup
         );
     }
 }
+
+#[test]
+fn attr_mandatory_with_empty_default_allowed_and_stays_mandatory() {
+    let defs = r#"
+def _impl(ctx):
+    pass
+
+r = rule(
+    implementation = _impl,
+    attrs = {
+        "sl": attr.string_list(default = [], mandatory = True),
+        "il": attr.int_list(default = [], mandatory = True),
+        "ll": attr.label_list(default = [], mandatory = True),
+        "s": attr.string(default = "", mandatory = True),
+        "i": attr.int(default = 0, mandatory = True),
+        "b": attr.bool(default = False, mandatory = True),
+        "sd": attr.string_dict(default = {}, mandatory = True),
+        "sld": attr.string_list_dict(default = {}, mandatory = True),
+        "lksd": attr.label_keyed_string_dict(default = {}, mandatory = True),
+        "skld": attr.string_keyed_label_dict(default = {}, mandatory = True),
+        "lld": attr.label_list_dict(default = {}, mandatory = True),
+        "l": attr.label(default = None, mandatory = True),
+    },
+)
+"#;
+
+    // Providing all mandatory attributes succeeds.
+    let ok_ws = Ws::new(&[
+        ("defs.bzl", defs),
+        (
+            "BUILD",
+            r#"
+load("//:defs.bzl", "r")
+filegroup(name = "dep")
+r(
+    name = "ok",
+    sl = ["-O2"],
+    il = [1],
+    ll = [":dep"],
+    s = "hi",
+    i = 42,
+    b = True,
+    sd = {"k": "v"},
+    sld = {"k": ["v"]},
+    lksd = {":dep": "v"},
+    skld = {"k": ":dep"},
+    lld = {"k": [":dep"]},
+    l = ":dep",
+)
+"#,
+        ),
+    ]);
+    let ok_pkg = ok_ws.load("");
+    assert!(
+        !ok_pkg.contains_errors,
+        "expected no errors when mandatory attrs with empty defaults are supplied, got: {:?}",
+        errors(&ok_pkg)
+    );
+
+    // Omitting a mandatory attribute whose declaration specified an empty default must still fail.
+    let missing_ws = Ws::new(&[
+        ("defs.bzl", defs),
+        (
+            "BUILD",
+            r#"
+load("//:defs.bzl", "r")
+filegroup(name = "dep")
+r(
+    name = "missing_sl",
+    il = [],
+    ll = [],
+    s = "",
+    i = 0,
+    b = False,
+    sd = {},
+    sld = {},
+    lksd = {},
+    skld = {},
+    lld = {},
+    l = ":dep",
+)
+"#,
+        ),
+    ]);
+    let missing_pkg = missing_ws.load("");
+    assert!(
+        missing_pkg.contains_errors,
+        "expected missing mandatory attribute error for 'sl'"
+    );
+    let errs = errors(&missing_pkg).join("\n");
+    assert!(
+        errs.contains("missing value for mandatory attribute 'sl' in 'r' rule"),
+        "unexpected error: {errs}"
+    );
+}
+
+#[test]
+fn attr_mandatory_with_non_empty_default_rejected() {
+    let cases = [
+        (
+            "sl",
+            r#"attr.string_list(default = ["a"], mandatory = True)"#,
+        ),
+        ("il", r#"attr.int_list(default = [1], mandatory = True)"#),
+        (
+            "ll",
+            r#"attr.label_list(default = ["//a:b"], mandatory = True)"#,
+        ),
+        ("s", r#"attr.string(default = "x", mandatory = True)"#),
+        ("i", r#"attr.int(default = 1, mandatory = True)"#),
+        ("b", r#"attr.bool(default = True, mandatory = True)"#),
+        (
+            "sd",
+            r#"attr.string_dict(default = {"k": "v"}, mandatory = True)"#,
+        ),
+        (
+            "sld",
+            r#"attr.string_list_dict(default = {"k": ["v"]}, mandatory = True)"#,
+        ),
+        (
+            "lksd",
+            r#"attr.label_keyed_string_dict(default = {"//a:b": "v"}, mandatory = True)"#,
+        ),
+        (
+            "skld",
+            r#"attr.string_keyed_label_dict(default = {"k": "//a:b"}, mandatory = True)"#,
+        ),
+        (
+            "lld",
+            r#"attr.label_list_dict(default = {"k": ["//a:b"]}, mandatory = True)"#,
+        ),
+        ("l", r#"attr.label(default = "//a:b", mandatory = True)"#),
+    ];
+
+    for (attr_name, attr_expr) in cases {
+        let bzl = format!(
+            "def _impl(ctx): pass\nr = rule(implementation = _impl, attrs = {{'{attr_name}': {attr_expr}}})\n"
+        );
+        let ws = Ws::new(&[("defs.bzl", &bzl), ("BUILD", "load('//:defs.bzl', 'r')\n")]);
+        let err = ws.try_load("").expect_err(&format!(
+            "expected error for mandatory attribute '{attr_name}' with non-empty default ({attr_expr})"
+        ));
+        let errs = err
+            .events
+            .iter()
+            .map(|e| e.render())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let expected = format!("attribute '{attr_name}' has mandatory=True and a default value");
+        assert!(
+            errs.contains(&expected),
+            "for '{attr_name}' ({attr_expr}), expected '{expected}', got: {errs}"
+        );
+    }
+}
