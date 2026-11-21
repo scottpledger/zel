@@ -18,36 +18,19 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zel_proto::failure_details::FailureDetail;
 
-/// The Bazel release whose behavior Zel emulates (the spec is the Bazel 9.3.2 source tree). Everything
-/// that reports or checks "the Bazel version" (`version`, `info release`, `native.bazel_version`,
-/// `bazel_compatibility`, BEP `build_tool_version`, ...) derives from this one constant. The single
-/// documented deviation is the product name (`zel`); an explicit `ZEL_EMBED_LABEL`/`BAZEL_EMBED_LABEL`
-/// replaces the label exactly like Bazel's `--embed_label`-style build stamping.
+/// The Bazel release whose behavior Zel emulates (the spec is the Bazel 9.3.2 source tree).
+/// Bazel semantic version checks (`native.bazel_version`, Bzlmod `bazel_compatibility`,
+/// `.bazelrc` `try-import-if-bazel-version`, BEP `build_tool_version`, and `.bazelversion`
+/// compatibility matching) always use this in-repo version, independent of Zel's own release
+/// label (`ZEL_EMBED_LABEL`, e.g., `0.2.0`) and not overridable via environment variables.
 pub const BAZEL_COMPAT_VERSION: &str = "9.3.2";
 /// `BlazeVersionInfo.getReleaseName()` of [`BAZEL_COMPAT_VERSION`].
 pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
 
-/// The Bazel version string exposed to `native.bazel_version` and Bzlmod `bazel_compatibility`
-/// checks. Honors `BAZEL_DEV_VERSION_OVERRIDE`, `ZEL_EMBED_LABEL`, and `BAZEL_EMBED_LABEL` (in
-/// that order, ignoring empty values), falling back to compile-time `ZEL_EMBED_LABEL` /
-/// `BAZEL_EMBED_LABEL` or [`BAZEL_COMPAT_VERSION`].
+/// Returns [`BAZEL_COMPAT_VERSION`], the fixed in-repo Bazel version that this build of Zel
+/// emulates (not overridable via environment variables).
 pub fn default_bazel_version() -> String {
-    for var in [
-        "BAZEL_DEV_VERSION_OVERRIDE",
-        "ZEL_EMBED_LABEL",
-        "BAZEL_EMBED_LABEL",
-    ] {
-        if let Ok(val) = std::env::var(var) {
-            if !val.is_empty() {
-                return val;
-            }
-        }
-    }
-    option_env!("ZEL_EMBED_LABEL")
-        .or(option_env!("BAZEL_EMBED_LABEL"))
-        .filter(|s| !s.is_empty())
-        .unwrap_or(BAZEL_COMPAT_VERSION)
-        .to_string()
+    BAZEL_COMPAT_VERSION.to_string()
 }
 
 pub mod action_env;
@@ -1360,5 +1343,11 @@ mod exit_code_tests {
             ExitCode::INTERRUPTED
         );
         assert!(d.failure_detail_rawproto().is_some());
+    }
+
+    #[test]
+    fn default_bazel_version_returns_in_repo_bazel_compat_version() {
+        assert_eq!(default_bazel_version(), BAZEL_COMPAT_VERSION);
+        assert_eq!(BAZEL_COMPAT_VERSION, "9.3.2");
     }
 }

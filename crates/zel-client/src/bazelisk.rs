@@ -83,6 +83,7 @@ pub struct BazeliskEnv {
     pub wrapper_rel_path: Option<String>,
     pub current_exe: Option<PathFragment>,
     pub current_version: String,
+    pub bazel_compat_version: String,
     pub invoked_as_bazel: bool,
     pub os_name: String,
     pub arch_name: String,
@@ -108,6 +109,7 @@ impl Default for BazeliskEnv {
             wrapper_rel_path: None,
             current_exe: None,
             current_version: zel_server::build_label(),
+            bazel_compat_version: zel_util::default_bazel_version(),
             invoked_as_bazel: false,
             os_name,
             arch_name,
@@ -177,6 +179,7 @@ impl BazeliskEnv {
             wrapper_rel_path,
             current_exe,
             current_version: zel_server::build_label(),
+            bazel_compat_version: zel_util::default_bazel_version(),
             invoked_as_bazel: zel_server::version_product_prefix() == "bazel",
             os_name,
             arch_name,
@@ -1258,9 +1261,20 @@ pub fn plan_invocation(
             || exe.starts_with(&workspace_dir.get_relative_str("bazel-out"))
     });
 
+    // Because Zel uses its own release versioning (e.g. `0.2.0`) while emulating an in-repo
+    // Bazel compatibility version (`BAZEL_COMPAT_VERSION`, e.g. `9.3.2`), a `.bazelversion` or
+    // `$USE_BAZEL_VERSION` matching the emulated Bazel version is satisfied in-process. Explicit
+    // `.zelversion` / `$USE_ZEL_VERSION` pins continue to match strictly against `current_version`.
+    let matches_bazel_compat = matches!(
+        spec.source,
+        VersionSource::BazelVersionFile(_) | VersionSource::UseBazelVersionEnv
+    ) && normalize_version(&spec.version)
+        == normalize_version(&env.bazel_compat_version);
+
     let version_matches_current = !spec.is_path
         && spec.fork.is_none()
         && (normalize_version(&spec.version) == normalize_version(&env.current_version)
+            || matches_bazel_compat
             || is_workspace_build_exe);
 
     // Determine the target Zel/Bazel binary path if needed
@@ -1422,4 +1436,65 @@ pub fn execute_external_action<O: Write + Send, E: Write + Send>(
         .map_err(|e| format!("Failed to wait for '{}': {e}", program))?;
 
     Ok(status.code().unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zel_vfs::InMemoryFileSystem;
+
+    fn make_env(current_version: &str, bazel_compat_version: &str) -> BazeliskEnv {
+        BazeliskEnv {
+            current_version: current_version.to_string(),
+            bazel_compat_version: bazel_compat_version.to_string(),
+            no_download: true,
+            ..BazeliskEnv::default()
+        }
+    }
+
+    #[test]
+    fn bazelversion_matches_bazel_compat_version_when_zel_release_version_differs() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/ws");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.write_file(&ws.get_relative_str(".bazelversion"), b"9.3.2\n")
+            .unwrap();
+
+        let env = make_env("0.2.0", "9.3.2");
+        let action = plan_invocation(&fs, &ws, &ws, &[], &env).expect("should run in-process");
+        assert!(matches!(action, LauncherAction::RunInProcess { .. }));
+
+        // $USE_BAZEL_VERSION matching bazel_compat_version also runs in-process.
+        let mut env_override = make_env("0.2.0", "9.3.2");
+        env_override.use_bazel_version = Some("9.3.2".to_string());
+        let action =
+            plan_invocation(&fs, &ws, &ws, &[], &env_override).expect("should run in-process");
+        assert!(matches!(action, LauncherAction::RunInProcess { .. }));
+
+        // Incompatible .bazelversion still does not match in-process.
+        fs.write_file(&ws.get_relative_str(".bazelversion"), b"8.5.0\n")
+            .unwrap();
+        let err = plan_invocation(&fs, &ws, &ws, &[], &env).unwrap_err();
+        assert!(err.contains("8.5.0"), "{err}");
+    }
+
+    #[test]
+    fn zelversion_still_matches_strictly_against_zel_release_version() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/ws");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.write_file(&ws.get_relative_str(".zelversion"), b"9.3.2\n")
+            .unwrap();
+
+        // A Zel 0.2.0 binary must NOT treat `.zelversion = 9.3.2` as matching itself.
+        let env = make_env("0.2.0", "9.3.2");
+        let err = plan_invocation(&fs, &ws, &ws, &[], &env).unwrap_err();
+        assert!(err.contains("9.3.2"), "{err}");
+
+        // Matching `.zelversion = 0.2.0` runs in-process.
+        fs.write_file(&ws.get_relative_str(".zelversion"), b"0.2.0\n")
+            .unwrap();
+        let action = plan_invocation(&fs, &ws, &ws, &[], &env).expect("should run in-process");
+        assert!(matches!(action, LauncherAction::RunInProcess { .. }));
+    }
 }
