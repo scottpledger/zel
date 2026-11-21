@@ -2697,7 +2697,12 @@ impl BlazeRuntime {
                         .iter()
                         .find(|c| c.label.canonical_form() == l)
                     {
-                        if ct.default_info.executable.is_some() {
+                        if ct
+                            .default_info
+                            .executable
+                            .as_ref()
+                            .is_some_and(|e| !e.is_source)
+                        {
                             built_rf.insert(ct.label.canonical_form());
                             if let Err(e) = exec_phase::build_target_runfiles(
                                 ct,

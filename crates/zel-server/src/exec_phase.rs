@@ -1642,6 +1642,11 @@ pub(crate) fn build_target_runfiles(
     let Some(exe) = &ct.default_info.executable else {
         return Ok(None);
     };
+    // Source files have no `RunfilesSupport` in Bazel and must not materialize `.runfiles`
+    // trees next to source artifacts inside the workspace tree.
+    if exe.is_source {
+        return Ok(None);
+    }
     let exe_abs = execroot.join(exe.exec_path.path_string());
     let opts = RunfilesTreeOptions {
         enable_runfiles: opt_bool(parsed, "enable_runfiles", true),

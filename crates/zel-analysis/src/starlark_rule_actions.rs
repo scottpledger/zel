@@ -285,7 +285,9 @@ fn collect_attr_runfiles(st: &Arc<CtxState>, data: bool) -> Runfiles {
         let is_data_attr = attr == "data";
         if let Some(ts) = st.deps.get(attr) {
             for t in ts {
-                if !is_data_attr && (t.rule_class == "source file" || t.rule_class == "generated file") {
+                if !is_data_attr
+                    && matches!(t.actual_rule_class_name(), "source file" | "generated file")
+                {
                     continue;
                 }
                 if is_data_attr && always_files_in_data {
@@ -306,7 +308,7 @@ fn collect_attr_runfiles(st: &Arc<CtxState>, data: bool) -> Runfiles {
 pub fn target_runfiles(t: &ConfiguredTarget, data: bool) -> Runfiles {
     // `Runfiles.Builder.addTargetIncludingFileTargets`: file targets (source/generated files)
     // have no `RunfilesProvider` in Bazel and only contribute their `files` to *data* runfiles.
-    if t.rule_class == "source file" || t.rule_class == "generated file" {
+    if matches!(t.actual_rule_class_name(), "source file" | "generated file") {
         return if data {
             Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() }
         } else {

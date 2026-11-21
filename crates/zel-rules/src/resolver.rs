@@ -2188,6 +2188,7 @@ pub(crate) fn source_file_target_with_layout(
     let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), "source file".to_string());
     ct.default_info = DefaultInfo {
         files: vec![art.clone()],
+        executable: Some(art.clone()),
         ..Default::default()
     };
     ct.providers.insert(

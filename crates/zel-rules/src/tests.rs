@@ -7094,3 +7094,280 @@ no_tc = rule(implementation = _no_tc)
         "{rendered}"
     );
 }
+
+#[test]
+fn forwarded_default_info_allows_files_to_run_while_direct_kwarg_still_fails() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r##"
+def _sdk_impl(ctx):
+    f = ctx.actions.declare_file(ctx.label.name + ".sdk")
+    rf = ctx.actions.declare_file(ctx.label.name + ".rf")
+    drf = ctx.actions.declare_file(ctx.label.name + ".drf")
+    ctx.actions.write(f, "sdk")
+    ctx.actions.write(rf, "rf")
+    ctx.actions.write(drf, "drf")
+    return [DefaultInfo(
+        files = depset([f]),
+        default_runfiles = ctx.runfiles(files = [rf]),
+        data_runfiles = ctx.runfiles(files = [drf]),
+    )]
+
+sdk_rule = rule(implementation = _sdk_impl)
+
+def _bin_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    return [DefaultInfo(executable = exe)]
+
+bin_rule = rule(implementation = _bin_impl, executable = True)
+
+def _toolchain_impl(ctx):
+    return [
+        ctx.attr.sdk[DefaultInfo],
+        platform_common.ToolchainInfo(sdk = ctx.attr.sdk),
+    ]
+
+go_toolchain_like = rule(
+    implementation = _toolchain_impl,
+    attrs = {"sdk": attr.label(mandatory = True)},
+)
+
+exec_forwarding = rule(
+    implementation = _toolchain_impl,
+    executable = True,
+    attrs = {"sdk": attr.label(mandatory = True)},
+)
+
+def _direct_files_to_run_impl(ctx):
+    return [DefaultInfo(files_to_run = ctx.attr.sdk[DefaultInfo].files_to_run)]
+
+direct_files_to_run = rule(
+    implementation = _direct_files_to_run_impl,
+    attrs = {"sdk": attr.label(mandatory = True)},
+)
+"##,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "sdk_rule", "bin_rule", "go_toolchain_like", "exec_forwarding", "direct_files_to_run")
+sdk_rule(name = "sdk")
+bin_rule(name = "bin")
+go_toolchain_like(name = "tc_from_sdk", sdk = ":sdk")
+go_toolchain_like(name = "tc_from_bin", sdk = ":bin")
+exec_forwarding(name = "bad_exec_fwd", sdk = ":bin")
+direct_files_to_run(name = "bad_direct", sdk = ":sdk")
+"#,
+        ),
+    ]);
+
+    let tc = ws.analyze("//:tc_from_sdk").unwrap();
+    assert_eq!(tc.default_info.files.len(), 1);
+    assert!(tc.default_info.files[0]
+        .exec_path
+        .path_string()
+        .ends_with("sdk.sdk"));
+    assert_eq!(tc.default_info.default_runfiles.len(), 1);
+    assert!(tc.default_info.default_runfiles[0]
+        .exec_path
+        .path_string()
+        .ends_with("sdk.rf"));
+    assert_eq!(tc.default_info.data_runfiles.len(), 1);
+    assert!(tc.default_info.data_runfiles[0]
+        .exec_path
+        .path_string()
+        .ends_with("sdk.drf"));
+    assert!(tc.default_info.executable.is_none());
+    assert!(tc.providers.contains_key("ToolchainInfo"));
+
+    // Forwarding DefaultInfo from an executable dependency to a non-executable rule must not
+    // fail executable ownership validation and preserves files/runfiles with executable=None.
+    let tc_bin = ws.analyze("//:tc_from_bin").unwrap();
+    assert_eq!(tc_bin.default_info.files.len(), 1);
+    assert!(tc_bin.default_info.files[0]
+        .exec_path
+        .path_string()
+        .ends_with("bin.sh"));
+    assert!(tc_bin.default_info.executable.is_none());
+
+    // An executable rule still cannot satisfy its executable requirement by forwarding a dep's DefaultInfo.
+    let err_exec = ws.analyze("//:bad_exec_fwd").unwrap_err();
+    assert!(
+        err_exec.contains("needs to create an executable File"),
+        "{err_exec}"
+    );
+
+    // Direct Starlark `DefaultInfo(files_to_run = ...)` constructor calls must still fail.
+    let err_direct = ws.analyze("//:bad_direct").unwrap_err();
+    assert!(
+        err_direct.contains("DefaultInfo() got unexpected keyword argument 'files_to_run'"),
+        "{err_direct}"
+    );
+}
+
+#[test]
+fn alias_to_source_file_accepted_by_executable_and_file_attrs() {
+    let ws = Ws::new(&[
+        ("bin/tool.sh", "#!/bin/sh\necho hi\n"),
+        (
+            "defs.bzl",
+            r#"
+MyInfo = provider()
+
+def _non_exec_impl(ctx):
+    f = ctx.actions.declare_file("data.txt")
+    ctx.actions.write(f, "data")
+    return [DefaultInfo(files = depset([f]))]
+
+non_exec = rule(implementation = _non_exec_impl)
+
+def _consumer_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    node_path = ctx.executable.node.path if ctx.executable.node else "none"
+    single_path = ctx.file.single.path if ctx.file.single else "none"
+    ctx.actions.write(out, node_path + "|" + single_path)
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    attrs = {
+        "node": attr.label(executable = True, cfg = "exec", mandatory = True),
+        "single": attr.label(allow_single_file = [".sh"], providers = [MyInfo]),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "non_exec", "consumer")
+alias(name = "node_bin", actual = "bin/tool.sh")
+alias(name = "node_bin_chain", actual = ":node_bin")
+non_exec(name = "plain")
+alias(name = "plain_alias", actual = ":plain")
+consumer(name = "ok_single_alias", node = ":node_bin", single = ":node_bin")
+consumer(name = "ok_chained_alias", node = ":node_bin_chain", single = ":node_bin_chain")
+consumer(name = "bad_non_exec_alias", node = ":plain_alias")
+"#,
+        ),
+    ]);
+
+    let src_alias = ws.analyze("//:node_bin").unwrap();
+    assert_eq!(
+        src_alias
+            .default_info
+            .executable
+            .as_ref()
+            .map(|a| a.exec_path.path_string()),
+        Some("bin/tool.sh")
+    );
+
+    for target in ["//:ok_single_alias", "//:ok_chained_alias"] {
+        let ct = ws.analyze(target).unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!("expected FileWrite action for {target}");
+        };
+        let text = String::from_utf8(content.render()).unwrap();
+        assert_eq!(text, "bin/tool.sh|bin/tool.sh");
+    }
+
+    let err = ws.analyze("//:bad_non_exec_alias").unwrap_err();
+    assert!(
+        err.contains("does not have mandatory executable output"),
+        "{err}"
+    );
+}
+
+#[test]
+fn analysis_test_expect_failure_with_aspect_and_mandatory_dep_providers() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+MyInfo = provider(fields = ["val"])
+ActionsInfo = provider(fields = ["actions"])
+
+def _bad_dep_impl(ctx):
+    fail("Non-deferred itest_service cannot depend on deferred itest_service")
+
+bad_dep = rule(implementation = _bad_dep_impl)
+
+def _no_provider_impl(ctx):
+    return [DefaultInfo()]
+
+no_provider = rule(implementation = _no_provider_impl)
+
+def _mid_impl(ctx):
+    return [MyInfo(val = ctx.attr.dep[MyInfo].val)]
+
+mid_rule = rule(
+    implementation = _mid_impl,
+    attrs = {"dep": attr.label(providers = [MyInfo], mandatory = True)},
+)
+
+def _action_retrieving_aspect_impl(target, ctx):
+    if ctx.rule.attr.dep:
+        pass
+    return [ActionsInfo(actions = target.actions)]
+
+_action_retrieving_aspect = aspect(
+    implementation = _action_retrieving_aspect_impl,
+    attr_aspects = ["*"],
+)
+
+def _failure_test_impl(ctx):
+    tut = ctx.attr.target_under_test[0]
+    ok = AnalysisFailureInfo in tut
+    causes = tut[AnalysisFailureInfo].causes.to_list() if ok else []
+    msg = causes[0].message if len(causes) == 1 else "unexpected causes: " + str(len(causes))
+    matched = ok and "Non-deferred itest_service cannot depend on deferred itest_service" in msg
+    return [AnalysisTestResultInfo(success = matched, message = msg)]
+
+failure_test = rule(
+    implementation = _failure_test_impl,
+    analysis_test = True,
+    attrs = {
+        "target_under_test": attr.label(
+            cfg = analysis_test_transition(
+                settings = {"//command_line_option:allow_analysis_failures": "true"},
+            ),
+            aspects = [_action_retrieving_aspect],
+        ),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "bad_dep", "no_provider", "mid_rule", "failure_test")
+bad_dep(name = "deferred_fail")
+no_provider(name = "missing_p")
+mid_rule(name = "depends_on_failing", dep = ":deferred_fail")
+mid_rule(name = "depends_on_missing", dep = ":missing_p")
+failure_test(name = "test_direct_fail", target_under_test = ":deferred_fail")
+failure_test(name = "test_transitive_fail", target_under_test = ":depends_on_failing")
+"#,
+        ),
+    ]);
+
+    // Both direct failure and transitive failure through mandatory provider attr must succeed
+    // with the aspect attached and preserve the original failure cause message.
+    for test_target in ["//:test_direct_fail", "//:test_transitive_fail"] {
+        let ct = ws.analyze(test_target).unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!("expected FileWrite script for {test_target}");
+        };
+        let script = String::from_utf8(content.render()).unwrap();
+        assert!(script.contains("exit 0"), "{test_target}:\n{script}");
+    }
+
+    // Without allow_analysis_failures, mandatory provider validation still rejects missing providers.
+    let err = ws.analyze("//:depends_on_missing").unwrap_err();
+    assert!(
+        err.contains("does not have mandatory providers: 'MyInfo'"),
+        "{err}"
+    );
+}
