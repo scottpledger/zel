@@ -1966,11 +1966,14 @@ impl DocExtractCtx<'_> {
                     } else {
                         rhs.as_str()
                     };
-                    let next_doc_binding = if module.doc_comments.contains_key(rhs) {
-                        Some(rhs.as_str())
-                    } else {
-                        doc_binding
-                    };
+                    let next_doc_binding =
+                        if doc_binding.is_some_and(|b| module.doc_comments.contains_key(b)) {
+                            doc_binding
+                        } else if module.doc_comments.contains_key(rhs) {
+                            Some(rhs.as_str())
+                        } else {
+                            doc_binding
+                        };
                     self.collect_symbol(
                         module,
                         export_name,
