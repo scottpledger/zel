@@ -1777,9 +1777,10 @@ impl DocExtractCtx<'_> {
 
         // Also handle explicitly requested symbols that come straight from a `load(...)` binding.
         if let Some(ref set) = filter {
+            let mut handled_load_tops: BTreeSet<&str> = BTreeSet::new();
             for wanted in set {
                 let top = wanted.split('.').next().unwrap_or(wanted);
-                if parsed.defs.contains_key(top) {
+                if parsed.defs.contains_key(top) || !handled_load_tops.insert(top) {
                     continue;
                 }
                 if let Some((mod_str, orig_name)) = parsed.loads.get(top) {
@@ -1974,7 +1975,11 @@ impl DocExtractCtx<'_> {
                         out,
                     );
                 } else if matches_exact {
-                    if let Some(doc) = module.doc_comments.get(export_name) {
+                    if let Some(doc) = module
+                        .doc_comments
+                        .get(origin_name)
+                        .or_else(|| module.doc_comments.get(export_name))
+                    {
                         out.other_symbols.push((
                             export_name.to_string(),
                             build_other_symbol_info(export_name, doc, "unknown"),
@@ -1984,7 +1989,11 @@ impl DocExtractCtx<'_> {
             }
             ExtractedDef::Other(expr) => {
                 if matches_exact {
-                    if let Some(doc) = module.doc_comments.get(export_name) {
+                    if let Some(doc) = module
+                        .doc_comments
+                        .get(origin_name)
+                        .or_else(|| module.doc_comments.get(export_name))
+                    {
                         out.other_symbols.push((
                             export_name.to_string(),
                             build_other_symbol_info(export_name, doc, infer_expr_type_name(expr)),
@@ -2804,7 +2813,7 @@ fn normalize_docstring(raw: &str) -> String {
     let min_indent = lines[1..]
         .iter()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
         .min()
         .unwrap_or(0);
     let mut normalized = Vec::with_capacity(lines.len());
@@ -2814,8 +2823,7 @@ fn normalize_docstring(raw: &str) -> String {
         if trimmed_end.is_empty() {
             normalized.push(String::new());
         } else {
-            let strip = min_indent.min(trimmed_end.len());
-            normalized.push(trimmed_end[strip..].to_string());
+            normalized.push(trimmed_end.chars().skip(min_indent).collect());
         }
     }
     while normalized.first().is_some_and(|l| l.is_empty()) {

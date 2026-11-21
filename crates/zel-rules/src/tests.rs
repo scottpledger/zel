@@ -7923,3 +7923,88 @@ starlark_doc_extract(
     let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
     assert_eq!(decoded.get_str("file"), "//docs:generated.bzl");
 }
+
+#[test]
+fn starlark_doc_extract_dedupes_loaded_struct_symbols_reexported_doc_comments_and_unicode_indent() {
+    let ws = Ws::new(&[
+        (
+            "pkg/BUILD",
+            r#"
+exports_files(["impl.bzl", "api.bzl"])
+starlark_doc_extract(
+    name = "api.extract",
+    src = "api.bzl",
+    symbol_names = ["ns.a", "ns.b", "ALIASED_CONST", "unicode_doc"],
+)
+"#,
+        ),
+        (
+            "pkg/impl.bzl",
+            r#"
+def _a():
+    """Function A."""
+    pass
+
+def _b():
+    """Function B."""
+    pass
+
+ns = struct(
+    a = _a,
+    b = _b,
+)
+
+#: Original documented constant.
+ORIG_CONST = 42
+"#,
+        ),
+        (
+            "pkg/api.bzl",
+            "load(\"//pkg:impl.bzl\", \"ns\", ALIASED_CONST = \"ORIG_CONST\")\n\ndef unicode_doc():\n    \"\"\"Header.\n\u{3000}Body line 1.\n    Body line 2.\n    \"\"\"\n    pass\n",
+        ),
+    ]);
+
+    let r = ws.resolver();
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = r
+        .analyze(&Label::parse_canonical("//pkg:api.extract").unwrap(), &cfg)
+        .unwrap();
+    let bin_bytes = ct
+        .typed_actions
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActionKind::FileWrite {
+                content: zel_analysis::FileContent::Bytes(b),
+                ..
+            } => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
+
+    // Multiple dotted symbol_names under the same loaded struct (`ns.a`, `ns.b`) must not duplicate entries.
+    let func_names: Vec<&str> = decoded
+        .get_msgs("func_info")
+        .iter()
+        .map(|f| f.get_str("function_name"))
+        .collect();
+    assert_eq!(func_names, vec!["ns.a", "ns.b", "unicode_doc"]);
+
+    // Unicode whitespace indentation must not panic and should strip cleanly.
+    let unicode_fn = decoded
+        .get_msgs("func_info")
+        .into_iter()
+        .find(|f| f.get_str("function_name") == "unicode_doc")
+        .unwrap();
+    assert!(
+        unicode_fn.get_str("doc_string").contains("Body line 1."),
+        "doc_string={}",
+        unicode_fn.get_str("doc_string")
+    );
+
+    // Re-exported `#:` doc comment is found via origin name (`ORIG_CONST`) under export name (`ALIASED_CONST`).
+    let others = decoded.get_msgs("starlark_other_symbol_info");
+    assert_eq!(others.len(), 1);
+    assert_eq!(others[0].get_str("name"), "ALIASED_CONST");
+    assert_eq!(others[0].get_str("doc"), "Original documented constant.");
+}
