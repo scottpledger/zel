@@ -7934,7 +7934,7 @@ exports_files(["impl.bzl", "api.bzl"])
 starlark_doc_extract(
     name = "api.extract",
     src = "api.bzl",
-    symbol_names = ["ns.a", "ns.b", "ALIASED_CONST", "unicode_doc"],
+    symbol_names = ["ns.a", "ns.b", "ns.UNRELATED", "ALIASED_CONST", "UNDOC_REEXPORT", "unicode_doc"],
 )
 "#,
         ),
@@ -7949,9 +7949,18 @@ def _b():
     """Function B."""
     pass
 
+#: Top-level constant that must NOT bleed into struct field `ns.UNRELATED`.
+UNRELATED = 1
+
+#: Unrelated symbol in impl.bzl sharing the name of an external re-export.
+UNDOC_REEXPORT = 2
+
+UNDOC_ORIG = 3
+
 ns = struct(
     a = _a,
     b = _b,
+    UNRELATED = 99,
 )
 
 #: Original documented constant.
@@ -7960,7 +7969,7 @@ ORIG_CONST = 42
         ),
         (
             "pkg/api.bzl",
-            "load(\"//pkg:impl.bzl\", \"ns\", ALIASED_CONST = \"ORIG_CONST\")\n\ndef unicode_doc():\n    \"\"\"Header.\n\u{3000}Body line 1.\n    Body line 2.\n    \"\"\"\n    pass\n",
+            "load(\"//pkg:impl.bzl\", \"ns\", ALIASED_CONST = \"ORIG_CONST\", UNDOC_REEXPORT = \"UNDOC_ORIG\")\n\ndef unicode_doc():\n    \"\"\"Header.\n\u{3000}Body line 1.\n    Body line 2.\n    \"\"\"\n    pass\n",
         ),
     ]);
 

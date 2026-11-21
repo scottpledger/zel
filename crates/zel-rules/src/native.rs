@@ -1772,7 +1772,16 @@ impl DocExtractCtx<'_> {
             if !should_consider {
                 continue;
             }
-            self.collect_symbol(&parsed, name, name, def, filter.as_ref(), 0, &mut collector);
+            self.collect_symbol(
+                &parsed,
+                name,
+                name,
+                Some(name),
+                def,
+                filter.as_ref(),
+                0,
+                &mut collector,
+            );
         }
 
         // Also handle explicitly requested symbols that come straight from a `load(...)` binding.
@@ -1807,6 +1816,7 @@ impl DocExtractCtx<'_> {
         module: &ParsedBzlModule,
         export_name: &str,
         origin_name: &str,
+        doc_binding: Option<&str>,
         def: &ExtractedDef,
         filter: Option<&BTreeSet<&str>>,
         depth: usize,
@@ -1941,6 +1951,7 @@ impl DocExtractCtx<'_> {
                         module,
                         &qualified,
                         field_name,
+                        None,
                         &field_def,
                         filter,
                         depth + 1,
@@ -1955,10 +1966,16 @@ impl DocExtractCtx<'_> {
                     } else {
                         rhs.as_str()
                     };
+                    let next_doc_binding = if module.doc_comments.contains_key(rhs) {
+                        Some(rhs.as_str())
+                    } else {
+                        doc_binding
+                    };
                     self.collect_symbol(
                         module,
                         export_name,
                         next_origin,
+                        next_doc_binding,
                         &local_def,
                         filter,
                         depth + 1,
@@ -1975,11 +1992,7 @@ impl DocExtractCtx<'_> {
                         out,
                     );
                 } else if matches_exact {
-                    if let Some(doc) = module
-                        .doc_comments
-                        .get(origin_name)
-                        .or_else(|| module.doc_comments.get(export_name))
-                    {
+                    if let Some(doc) = doc_binding.and_then(|b| module.doc_comments.get(b)) {
                         out.other_symbols.push((
                             export_name.to_string(),
                             build_other_symbol_info(export_name, doc, "unknown"),
@@ -1989,11 +2002,7 @@ impl DocExtractCtx<'_> {
             }
             ExtractedDef::Other(expr) => {
                 if matches_exact {
-                    if let Some(doc) = module
-                        .doc_comments
-                        .get(origin_name)
-                        .or_else(|| module.doc_comments.get(export_name))
-                    {
+                    if let Some(doc) = doc_binding.and_then(|b| module.doc_comments.get(b)) {
                         out.other_symbols.push((
                             export_name.to_string(),
                             build_other_symbol_info(export_name, doc, infer_expr_type_name(expr)),
@@ -2044,6 +2053,7 @@ impl DocExtractCtx<'_> {
                         &loaded_mod,
                         export_name,
                         orig_name,
+                        Some(orig_name),
                         &def,
                         filter,
                         depth + 1,
