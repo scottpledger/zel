@@ -67,6 +67,7 @@ impl Env {
             "ZEL_PRODUCT_PREFIX",
             "ZEL_EMBED_LABEL",
             "BAZEL_EMBED_LABEL",
+            "BAZEL_DEV_VERSION_OVERRIDE",
             "XDG_CACHE_HOME",
         ] {
             c.env_remove(var);
@@ -816,5 +817,86 @@ fn test_print_action_and_mobile_install_parity() {
         s(&mi_nonexistent.stderr).contains("Build failed. Not running mobile-install on target."),
         "{}",
         s(&mi_nonexistent.stderr)
+    );
+}
+
+#[test]
+fn test_zel_embed_label_does_not_affect_bazel_compatibility_or_rc_version() {
+    let e = Env::new("zel_embed_label_compat");
+    fs::write(
+        e.ws.join("MODULE.bazel"),
+        "module(name = \"t\", bazel_compatibility = [\">=6.5.0\"])\n",
+    )
+    .unwrap();
+    fs::write(
+        e.ws.join("defs.bzl"),
+        format!(
+            "if native.bazel_version != \"{}\":\n    fail(\"unexpected native.bazel_version: \" + native.bazel_version)\nOK = \"ok\"\n",
+            zel_util::BAZEL_COMPAT_VERSION
+        ),
+    )
+    .unwrap();
+    fs::write(
+        e.ws.join("BUILD"),
+        "load(\"//:defs.bzl\", \"OK\")\nfilegroup(name = OK, srcs = [])\n",
+    )
+    .unwrap();
+    fs::write(
+        e.ws.join(".bazelrc"),
+        "try-import-if-bazel-version >=8.0.0 %workspace%/v8plus.bazelrc\n",
+    )
+    .unwrap();
+    fs::write(e.ws.join("v8plus.bazelrc"), "query --output=label_kind\n").unwrap();
+
+    // Release label (`ZEL_EMBED_LABEL=0.2.0`) still stamps `zel version` and `info release`.
+    let ver = e
+        .cmd(&["--batch"], &["version", "--gnu_format"])
+        .env("ZEL_EMBED_LABEL", "0.2.0")
+        .output()
+        .unwrap();
+    assert_eq!(ver.status.code(), Some(0), "{}", s(&ver.stderr));
+    assert_eq!(s(&ver.stdout).trim(), "zel 0.2.0");
+
+    let rel = e
+        .cmd(&["--batch"], &["info", "release"])
+        .env("ZEL_EMBED_LABEL", "0.2.0")
+        .output()
+        .unwrap();
+    assert_eq!(rel.status.code(), Some(0), "{}", s(&rel.stderr));
+    assert_eq!(s(&rel.stdout).trim(), "release 0.2.0");
+
+    // Bzlmod `bazel_compatibility`, `native.bazel_version`, and `.bazelrc` version conditionals
+    // must still evaluate against BAZEL_COMPAT_VERSION (9.3.2), not Zel's release label (0.2.0).
+    let q = e
+        .cmd(&["--batch"], &["query", "//..."])
+        .env("ZEL_EMBED_LABEL", "0.2.0")
+        .output()
+        .unwrap();
+    assert_eq!(
+        q.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        s(&q.stdout),
+        s(&q.stderr)
+    );
+    assert!(
+        s(&q.stdout).contains("filegroup rule //:ok"),
+        "expected try-import-if-bazel-version >=8.0.0 to apply; stdout={}\nstderr={}",
+        s(&q.stdout),
+        s(&q.stderr)
+    );
+
+    // Explicit BAZEL_DEV_VERSION_OVERRIDE still overrides the Bazel version check.
+    let q_override = e
+        .cmd(&["--batch"], &["query", "//..."])
+        .env("ZEL_EMBED_LABEL", "0.2.0")
+        .env("BAZEL_DEV_VERSION_OVERRIDE", "5.0.0")
+        .output()
+        .unwrap();
+    assert_ne!(q_override.status.code(), Some(0));
+    assert!(
+        s(&q_override.stderr).contains("Bazel version 5.0.0 is not compatible with module"),
+        "stderr={}",
+        s(&q_override.stderr)
     );
 }

@@ -703,7 +703,7 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         home.as_deref(),
         cwd,
         fs.as_ref(),
-        &zel_server::build_label(),
+        &zel_util::default_bazel_version(),
     ) {
         Ok(cfg) => cfg,
         Err(e) => {
