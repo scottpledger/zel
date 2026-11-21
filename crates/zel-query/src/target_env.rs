@@ -2258,7 +2258,21 @@ impl<'a> TargetEnv<'a> {
                                 .map(|t| node(t.label())),
                         );
                     }
-                    Err(e) => errors.push(e.message),
+                    Err(e) => {
+                        let evs = self.resolver.drain_new_events();
+                        self.pending_events.borrow_mut().extend(evs);
+                        let key = format!(
+                            "err:{}//{}",
+                            id.repository().canonical_form(),
+                            id.package_fragment()
+                        );
+                        if self.pkg_error_reported.borrow_mut().insert(key) {
+                            self.pending_events
+                                .borrow_mut()
+                                .push(zel_packages::PackageEvent::error(None, e.message.clone()));
+                        }
+                        errors.push(format!("\0{}", e.message));
+                    }
                 }
             }
             return (nodes, errors);
@@ -2414,17 +2428,13 @@ impl QueryEnv for TargetEnv<'_> {
                     }
                     return Err(QueryError::raw(err.clone()));
                 }
-                // The error was already reported as `package contains errors` events.
+                // The error was already reported as `package contains errors` events
+                // (or per-package load errors under a recursive `//...` pattern).
                 diag.had_error |= errors.iter().any(|e| silent(e));
                 for e in errors.iter().filter(|e| !silent(e)) {
                     diag.report(format!("Skipping '{p}': {e}"));
                 }
-                let keep = if errors.iter().any(|e| silent(e)) {
-                    nodes
-                } else {
-                    Vec::new()
-                };
-                self.preloaded.borrow_mut().insert(p.clone(), keep);
+                self.preloaded.borrow_mut().insert(p.clone(), nodes);
             } else {
                 self.preloaded.borrow_mut().insert(p.clone(), nodes);
             }
