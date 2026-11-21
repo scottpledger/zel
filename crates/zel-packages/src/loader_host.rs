@@ -3136,21 +3136,29 @@ impl PackageLoader {
             let skip = a.late_bound.is_some()
                 || matches!(d, Value::None | Value::UserFunction(_) | Value::BuiltinFunction(_));
             if !skip {
-                if a.mandatory {
-                    return Err(format!(
-                        "attribute '{name}' has mandatory=True and a default value"
-                    ));
-                }
                 let mapping = self.cfg.lookup.resolver.mapping(pkg.repository());
                 let cctx = ConvertCtx {
                     pkg,
                     mapping: &mapping,
                     rule_class: "rule",
                 };
-                a.default = Some(
-                    convert_value(d, &a, &cctx)
-                        .map_err(|e| format!("for attribute '{name}': {e}"))?,
-                );
+                let converted = convert_value(d, &a, &cctx)
+                    .map_err(|e| format!("for attribute '{name}': {e}"))?;
+                if a.mandatory {
+                    // Bazel's `attr.*` Starlark signatures declare `default` with the type's
+                    // empty/zero value (`[]`, `{}`, `""`, `0`, `False`, `None`), so passing it
+                    // explicitly alongside `mandatory = True` is indistinguishable from omitting
+                    // `default` and leaves the attribute mandatory with no default.
+                    let is_empty_default =
+                        !matches!(d, Value::SelectorList(_)) && converted == a.default_value();
+                    if !is_empty_default {
+                        return Err(format!(
+                            "attribute '{name}' has mandatory=True and a default value"
+                        ));
+                    }
+                } else {
+                    a.default = Some(converted);
+                }
             }
         } else if !a.mandatory && ty == AttrType::String {
             a.default = Some(AttrValue::Str(String::new()));
