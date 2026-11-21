@@ -155,6 +155,7 @@ dependencies = [
  "zel-cmdline",
  "zel-options",
  "zel-packages",
+ "zel-proto",
  "zel-starlark",
  "zel-util",
  "zel-vfs",

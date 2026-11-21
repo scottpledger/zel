@@ -9,6 +9,7 @@ zel-analysis = { workspace = true }
 zel-cmdline = { workspace = true }
 zel-options = { workspace = true }
 zel-packages = { workspace = true }
+zel-proto = { workspace = true }
 zel-starlark = { workspace = true }
 zel-util = { workspace = true }
 zel-vfs = { workspace = true }

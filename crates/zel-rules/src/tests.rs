@@ -7371,3 +7371,649 @@ failure_test(name = "test_transitive_fail", target_under_test = ":depends_on_fai
         "{err}"
     );
 }
+
+#[test]
+fn starlark_doc_extract_emits_binaryproto_and_textproto_and_extracts_symbols() {
+    let ws = Ws::new(&[
+        ("pkg/BUILD", r#"exports_files(["defs.bzl"])"#),
+        (
+            "pkg/defs.bzl",
+            r#""""Module summary docstring.
+
+    More module details.
+"""
+
+def _private_helper():
+    """Should not be exported."""
+    pass
+
+def greet(who, greeting = "hello", *args, loud = False, **kwargs):
+    """Greets someone.
+
+    Args:
+        who: The recipient name.
+        greeting: Greeting prefix.
+        loud: Whether to shout.
+        *args: Extra positional args.
+        **kwargs: Extra keyword args.
+
+    Returns:
+        The formatted greeting string.
+
+    Deprecated:
+        Use greet_v2 instead.
+    """
+    pass
+
+MyInfo = provider(
+    doc = "Carries build metadata.",
+    fields = {
+        "files": "Output files.",
+        "tag": "Optional tag.",
+    },
+)
+
+my_test = rule(
+    implementation = _private_helper,
+    doc = "Runs a custom test.",
+    test = True,
+    provides = [MyInfo],
+    attrs = {
+        "srcs": attr.label_list(doc = "Source files.", mandatory = True),
+        "mode": attr.string(doc = "Execution mode.", default = "fast", values = ["fast", "full"]),
+        "verbose": attr.bool(doc = "Enable verbose logging."),
+        "out": attr.output(doc = "Explicit output."),
+        "_tool": attr.label(default = "//pkg:defs.bzl"),
+    },
+)
+
+my_aspect = aspect(
+    implementation = _private_helper,
+    doc = "Collects metadata across deps.",
+    attr_aspects = ["deps", "srcs"],
+    attrs = {
+        "flag": attr.int(doc = "Numeric flag.", default = 7),
+    },
+)
+
+my_repo = repository_rule(
+    implementation = _private_helper,
+    doc = "Fetches an external archive.",
+    environ = ["MY_ENV_VAR"],
+    attrs = {
+        "url": attr.string(doc = "Download URL.", mandatory = True),
+    },
+)
+
+my_ext = module_extension(
+    implementation = _private_helper,
+    doc = "Configures toolchains.",
+    tag_classes = {
+        "install": tag_class(
+            doc = "Installs a version.",
+            attrs = {
+                "version": attr.string(doc = "Tool version.", mandatory = True),
+            },
+        ),
+    },
+)
+
+my_macro = macro(
+    implementation = _private_helper,
+    doc = "Wraps my_test.",
+    finalizer = True,
+    attrs = {
+        "extra": attr.string_list(doc = "Extra tags."),
+    },
+)
+
+#: Default timeout in seconds.
+DEFAULT_TIMEOUT = 30
+"#,
+        ),
+        (
+            "docs/BUILD",
+            r#"
+starlark_doc_extract(
+    name = "api.extract",
+    src = "//pkg:defs.bzl",
+)
+"#,
+        ),
+    ]);
+
+    let r = ws.resolver();
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = r
+        .analyze(&Label::parse_canonical("//docs:api.extract").unwrap(), &cfg)
+        .unwrap();
+
+    // DefaultInfo.files contains only %{name}.binaryproto (matching StarlarkDocExtract.java).
+    assert_eq!(ct.default_info.files.len(), 1);
+    assert!(
+        ct.default_info.files[0]
+            .root_relative_path
+            .path_string()
+            .ends_with("docs/api.extract.binaryproto"),
+        "unexpected default output: {:?}",
+        ct.default_info.files[0].root_relative_path
+    );
+    assert_eq!(ct.output_groups.groups["binaryproto"].len(), 1);
+    assert_eq!(ct.output_groups.groups["textproto"].len(), 1);
+    assert!(ct.output_groups.groups["textproto"][0]
+        .root_relative_path
+        .path_string()
+        .ends_with("docs/api.extract.textproto"));
+
+    // Both implicit output file targets resolve cleanly through Target::OutputFile.
+    let bin_ct = r
+        .analyze(
+            &Label::parse_canonical("//docs:api.extract.binaryproto").unwrap(),
+            &cfg,
+        )
+        .unwrap();
+    assert_eq!(bin_ct.default_info.files.len(), 1);
+    let txt_ct = r
+        .analyze(
+            &Label::parse_canonical("//docs:api.extract.textproto").unwrap(),
+            &cfg,
+        )
+        .unwrap();
+    assert_eq!(txt_ct.default_info.files.len(), 1);
+
+    // Extract the binaryproto and textproto payloads from the registered FileWrite actions.
+    let bin_bytes = ct
+        .typed_actions
+        .iter()
+        .find_map(|a| {
+            if a.outputs
+                .iter()
+                .any(|o| o.root_relative_path.path_string().ends_with(".binaryproto"))
+            {
+                if let ActionKind::FileWrite {
+                    content: zel_analysis::FileContent::Bytes(b),
+                    ..
+                } = &a.kind
+                {
+                    return Some(b.clone());
+                }
+            }
+            None
+        })
+        .expect("missing binaryproto FileWrite action");
+
+    let txt_str = ct
+        .typed_actions
+        .iter()
+        .find_map(|a| {
+            if a.outputs
+                .iter()
+                .any(|o| o.root_relative_path.path_string().ends_with(".textproto"))
+            {
+                if let ActionKind::FileWrite {
+                    content: zel_analysis::FileContent::Literal(s),
+                    ..
+                } = &a.kind
+                {
+                    return Some(s.clone());
+                }
+            }
+            None
+        })
+        .expect("missing textproto FileWrite action");
+
+    let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
+    assert_eq!(decoded.to_text(), txt_str);
+    assert_eq!(decoded.get_str("file"), "//pkg:defs.bzl");
+    assert_eq!(
+        decoded.get_str("module_docstring"),
+        "Module summary docstring.\n\nMore module details."
+    );
+
+    // Function check (private helper excluded; params ordered ordinary -> kw_only -> *args -> **kwargs).
+    let funcs = decoded.get_msgs("func_info");
+    assert_eq!(funcs.len(), 1);
+    assert_eq!(funcs[0].get_str("function_name"), "greet");
+    assert_eq!(funcs[0].get_str("doc_string"), "Greets someone.");
+    assert_eq!(
+        funcs[0].get_msg("return").unwrap().get_str("doc_string"),
+        "The formatted greeting string."
+    );
+    assert_eq!(
+        funcs[0]
+            .get_msg("deprecated")
+            .unwrap()
+            .get_str("doc_string"),
+        "Use greet_v2 instead."
+    );
+    let params = funcs[0].get_msgs("parameter");
+    let param_summary: Vec<(&str, &str, bool, String)> = params
+        .iter()
+        .map(|p| {
+            (
+                p.get_str("name"),
+                p.get_str("default_value"),
+                p.get_bool("mandatory"),
+                p.get_enum_name("role"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        param_summary,
+        vec![
+            ("who", "", true, "PARAM_ROLE_ORDINARY".to_string()),
+            (
+                "greeting",
+                "\"hello\"",
+                false,
+                "PARAM_ROLE_ORDINARY".to_string()
+            ),
+            (
+                "loud",
+                "False",
+                false,
+                "PARAM_ROLE_KEYWORD_ONLY".to_string()
+            ),
+            ("args", "", false, "PARAM_ROLE_VARARGS".to_string()),
+            ("kwargs", "", false, "PARAM_ROLE_KWARGS".to_string()),
+        ]
+    );
+    assert_eq!(params[0].get_str("doc_string"), "The recipient name.");
+
+    // Rule check (private _tool excluded; implicit name attr first; test=true implies executable=true).
+    let rules = decoded.get_msgs("rule_info");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].get_str("rule_name"), "my_test");
+    assert_eq!(rules[0].get_str("doc_string"), "Runs a custom test.");
+    assert!(rules[0].get_bool("test"));
+    assert!(rules[0].get_bool("executable"));
+    let attrs = rules[0].get_msgs("attribute");
+    let attr_names: Vec<&str> = attrs.iter().map(|a| a.get_str("name")).collect();
+    assert_eq!(attr_names, vec!["name", "srcs", "mode", "verbose", "out"]);
+    assert_eq!(attrs[0].get_enum_name("type"), "NAME");
+    assert!(attrs[0].get_bool("natively_defined"));
+    assert_eq!(attrs[1].get_enum_name("type"), "LABEL_LIST");
+    assert!(attrs[1].get_bool("mandatory"));
+    assert_eq!(attrs[2].get_enum_name("type"), "STRING");
+    assert_eq!(attrs[2].get_str("default_value"), "\"fast\"");
+    assert_eq!(attrs[3].get_enum_name("type"), "BOOLEAN");
+    assert_eq!(attrs[3].get_str("default_value"), "False");
+    assert_eq!(attrs[4].get_enum_name("type"), "OUTPUT");
+    assert!(attrs[4].get_bool("nonconfigurable"));
+
+    // Provider check.
+    let provs = decoded.get_msgs("provider_info");
+    assert_eq!(provs.len(), 1);
+    assert_eq!(provs[0].get_str("provider_name"), "MyInfo");
+    assert_eq!(provs[0].get_str("doc_string"), "Carries build metadata.");
+    let pfields = provs[0].get_msgs("field_info");
+    assert_eq!(pfields.len(), 2);
+    assert_eq!(pfields[0].get_str("name"), "files");
+    assert_eq!(pfields[0].get_str("doc_string"), "Output files.");
+
+    // Aspect check.
+    let aspects = decoded.get_msgs("aspect_info");
+    assert_eq!(aspects.len(), 1);
+    assert_eq!(aspects[0].get_str("aspect_name"), "my_aspect");
+    assert_eq!(aspects[0].values("aspect_attribute").len(), 2);
+
+    // Repository rule, module extension, macro, and other-symbol doc comment checks.
+    let repo_rules = decoded.get_msgs("repository_rule_info");
+    assert_eq!(repo_rules.len(), 1);
+    assert_eq!(repo_rules[0].get_str("rule_name"), "my_repo");
+    assert_eq!(repo_rules[0].values("environ").len(), 1);
+
+    let exts = decoded.get_msgs("module_extension_info");
+    assert_eq!(exts.len(), 1);
+    assert_eq!(exts[0].get_str("extension_name"), "my_ext");
+    assert_eq!(exts[0].get_msgs("tag_class").len(), 1);
+    assert_eq!(
+        exts[0].get_msgs("tag_class")[0].get_str("tag_name"),
+        "install"
+    );
+
+    let macros = decoded.get_msgs("macro_info");
+    assert_eq!(macros.len(), 1);
+    assert_eq!(macros[0].get_str("macro_name"), "my_macro");
+    assert!(macros[0].get_bool("finalizer"));
+
+    let others = decoded.get_msgs("starlark_other_symbol_info");
+    assert_eq!(others.len(), 1);
+    assert_eq!(others[0].get_str("name"), "DEFAULT_TIMEOUT");
+    assert_eq!(others[0].get_str("doc"), "Default timeout in seconds.");
+    assert_eq!(others[0].get_str("type_name"), "int");
+}
+
+#[test]
+fn starlark_doc_extract_symbol_names_and_render_main_repo_name() {
+    let ws = Ws::new(&[
+        ("pkg/BUILD", r#"exports_files(["defs.bzl"])"#),
+        (
+            "pkg/defs.bzl",
+            r#""Public API"
+
+def alpha():
+    """Alpha doc."""
+    pass
+
+def beta():
+    """Beta doc."""
+    pass
+
+def _secret():
+    """Secret doc."""
+    pass
+"#,
+        ),
+        (
+            "docs/BUILD",
+            r#"
+starlark_doc_extract(
+    name = "filtered",
+    src = "//pkg:defs.bzl",
+    symbol_names = ["alpha", "_secret"],
+    render_main_repo_name = True,
+)
+"#,
+        ),
+    ]);
+
+    let mut repo_resolver = SimpleRepoResolver::new(ws.root.clone());
+    repo_resolver
+        .apparent
+        .insert("my_rules".to_string(), RepositoryName::main());
+    let lc = LoaderConfig::new(ws.fs.clone(), Arc::new(repo_resolver));
+    let r = TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new());
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    let ct = r
+        .analyze(&Label::parse_canonical("//docs:filtered").unwrap(), &cfg)
+        .unwrap();
+    let bin_bytes = ct
+        .typed_actions
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActionKind::FileWrite {
+                content: zel_analysis::FileContent::Bytes(b),
+                ..
+            } => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+
+    let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
+    assert_eq!(decoded.get_str("file"), "@my_rules//pkg:defs.bzl");
+    let func_names: Vec<&str> = decoded
+        .get_msgs("func_info")
+        .iter()
+        .map(|f| f.get_str("function_name"))
+        .collect();
+    assert_eq!(func_names, vec!["_secret", "alpha"]);
+    assert_eq!(
+        decoded.get_msgs("func_info")[1]
+            .get_msg("origin_key")
+            .unwrap()
+            .get_str("file"),
+        "@my_rules//pkg:defs.bzl"
+    );
+}
+
+#[test]
+fn starlark_doc_extract_reexports_and_downstream_consumer() {
+    let ws = Ws::new(&[
+        ("pkg/BUILD", r#"exports_files(["defs.bzl", "impl.bzl"])"#),
+        (
+            "pkg/impl.bzl",
+            r#"
+def _impl(ctx):
+    pass
+
+impl_rule = rule(
+    implementation = _impl,
+    doc = "Rule defined in impl.bzl.",
+)
+
+def impl_fn(x):
+    """Function defined in impl.bzl."""
+    pass
+"#,
+        ),
+        (
+            "pkg/defs.bzl",
+            r#""Re-exports."
+load(":impl.bzl", _impl_fn = "impl_fn", _impl_rule = "impl_rule")
+
+public_rule = _impl_rule
+api = struct(fn = _impl_fn)
+"#,
+        ),
+        (
+            "docs/render.bzl",
+            r#"
+def _render_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".md")
+    ctx.actions.run_shell(
+        inputs = [ctx.file.src],
+        outputs = [out],
+        command = "cp $1 $2",
+        arguments = [ctx.file.src.path, out.path],
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+render_docs = rule(
+    implementation = _render_impl,
+    attrs = {
+        "src": attr.label(allow_single_file = True, mandatory = True),
+    },
+)
+"#,
+        ),
+        (
+            "docs/BUILD",
+            r#"
+load(":render.bzl", "render_docs")
+
+starlark_doc_extract(
+    name = "rules.extract",
+    src = "//pkg:defs.bzl",
+)
+
+render_docs(
+    name = "rules",
+    src = ":rules.extract.binaryproto",
+)
+"#,
+        ),
+    ]);
+
+    let r = ws.resolver();
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    // Downstream rule depending on `:rules.extract.binaryproto` succeeds in analysis!
+    let render_ct = r
+        .analyze(&Label::parse_canonical("//docs:rules").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(render_ct.default_info.files.len(), 1);
+    assert_eq!(render_ct.typed_actions.len(), 1);
+    assert!(render_ct.typed_actions[0].inputs.iter().any(|i| i
+        .root_relative_path
+        .path_string()
+        .ends_with("docs/rules.extract.binaryproto")));
+
+    // Re-exported rule and struct-nested function preserve their origin_key from impl.bzl.
+    let extract_ct = r
+        .analyze(
+            &Label::parse_canonical("//docs:rules.extract").unwrap(),
+            &cfg,
+        )
+        .unwrap();
+    let bin_bytes = extract_ct
+        .typed_actions
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActionKind::FileWrite {
+                content: zel_analysis::FileContent::Bytes(b),
+                ..
+            } => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
+    let rules = decoded.get_msgs("rule_info");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].get_str("rule_name"), "public_rule");
+    assert_eq!(
+        rules[0].get_msg("origin_key").unwrap().get_str("name"),
+        "impl_rule"
+    );
+    assert_eq!(
+        rules[0].get_msg("origin_key").unwrap().get_str("file"),
+        "//pkg:impl.bzl"
+    );
+
+    let funcs = decoded.get_msgs("func_info");
+    assert_eq!(funcs.len(), 1);
+    assert_eq!(funcs[0].get_str("function_name"), "api.fn");
+    assert_eq!(
+        funcs[0].get_msg("origin_key").unwrap().get_str("name"),
+        "impl_fn"
+    );
+    assert_eq!(
+        funcs[0].get_msg("origin_key").unwrap().get_str("file"),
+        "//pkg:impl.bzl"
+    );
+}
+
+#[test]
+fn starlark_doc_extract_generated_src_handled_gracefully() {
+    let ws = Ws::new(&[(
+        "docs/BUILD",
+        r#"
+genrule(
+    name = "gen_bzl",
+    outs = ["generated.bzl"],
+    cmd = "echo 'def f(): pass' > $@",
+)
+
+starlark_doc_extract(
+    name = "gen.extract",
+    src = ":generated.bzl",
+)
+"#,
+    )]);
+
+    let r = ws.resolver();
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = r
+        .analyze(&Label::parse_canonical("//docs:gen.extract").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(ct.default_info.files.len(), 1);
+    assert_eq!(ct.typed_actions.len(), 2);
+    let bin_bytes = ct
+        .typed_actions
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActionKind::FileWrite {
+                content: zel_analysis::FileContent::Bytes(b),
+                ..
+            } => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
+    assert_eq!(decoded.get_str("file"), "//docs:generated.bzl");
+}
+
+#[test]
+fn starlark_doc_extract_dedupes_loaded_struct_symbols_reexported_doc_comments_and_unicode_indent() {
+    let ws = Ws::new(&[
+        (
+            "pkg/BUILD",
+            r#"
+exports_files(["impl.bzl", "api.bzl"])
+starlark_doc_extract(
+    name = "api.extract",
+    src = "api.bzl",
+    symbol_names = ["ns.a", "ns.b", "ns.UNRELATED", "ALIASED_CONST", "UNDOC_REEXPORT", "unicode_doc"],
+)
+"#,
+        ),
+        (
+            "pkg/impl.bzl",
+            r#"
+def _a():
+    """Function A."""
+    pass
+
+def _b():
+    """Function B."""
+    pass
+
+#: Top-level constant that must NOT bleed into struct field `ns.UNRELATED`.
+UNRELATED = 1
+
+#: Unrelated symbol in impl.bzl sharing the name of an external re-export.
+UNDOC_REEXPORT = 2
+
+UNDOC_ORIG = 3
+
+ns = struct(
+    a = _a,
+    b = _b,
+    UNRELATED = 99,
+)
+
+#: Original documented constant.
+ORIG_CONST = 42
+"#,
+        ),
+        (
+            "pkg/api.bzl",
+            "load(\"//pkg:impl.bzl\", \"ns\", ALIASED_CONST = \"ORIG_CONST\", UNDOC_REEXPORT = \"UNDOC_ORIG\")\n\ndef unicode_doc():\n    \"\"\"Header.\n\u{3000}Body line 1.\n    Body line 2.\n    \"\"\"\n    pass\n",
+        ),
+    ]);
+
+    let r = ws.resolver();
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = r
+        .analyze(&Label::parse_canonical("//pkg:api.extract").unwrap(), &cfg)
+        .unwrap();
+    let bin_bytes = ct
+        .typed_actions
+        .iter()
+        .find_map(|a| match &a.kind {
+            ActionKind::FileWrite {
+                content: zel_analysis::FileContent::Bytes(b),
+                ..
+            } => Some(b.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let decoded = zel_proto::dynamic::Msg::decode("stardoc_output.ModuleInfo", &bin_bytes).unwrap();
+
+    // Multiple dotted symbol_names under the same loaded struct (`ns.a`, `ns.b`) must not duplicate entries.
+    let func_names: Vec<&str> = decoded
+        .get_msgs("func_info")
+        .iter()
+        .map(|f| f.get_str("function_name"))
+        .collect();
+    assert_eq!(func_names, vec!["ns.a", "ns.b", "unicode_doc"]);
+
+    // Unicode whitespace indentation must not panic and should strip cleanly.
+    let unicode_fn = decoded
+        .get_msgs("func_info")
+        .into_iter()
+        .find(|f| f.get_str("function_name") == "unicode_doc")
+        .unwrap();
+    assert!(
+        unicode_fn.get_str("doc_string").contains("Body line 1."),
+        "doc_string={}",
+        unicode_fn.get_str("doc_string")
+    );
+
+    // Re-exported `#:` doc comment is found via origin name (`ORIG_CONST`) under export name (`ALIASED_CONST`).
+    let others = decoded.get_msgs("starlark_other_symbol_info");
+    assert_eq!(others.len(), 1);
+    assert_eq!(others[0].get_str("name"), "ALIASED_CONST");
+    assert_eq!(others[0].get_str("doc"), "Original documented constant.");
+}

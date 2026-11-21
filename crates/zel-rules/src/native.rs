@@ -16,19 +16,24 @@
 //! `genrule`, `config_setting`, `test_suite`, `sh_binary`/`sh_test`/`sh_library`,
 //! `label_flag`/`label_setting`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use zel_analysis::location::{expand_make_variables, LocationMode};
 use zel_analysis::starlark_rule::{
-    default_info_provider, mk_list, provider_instance, target_runfiles, DepResolver,
+    default_info_provider, files_depset, mk_list, provider_instance, target_runfiles, DepResolver,
 };
 use zel_analysis::{
     Action, ActionKind, Artifact, ArtifactRoot, BuildConfigurationKey, CommandLineArgs,
     ConfiguredTarget, DefaultInfo, FileContent, OutputGroupInfo, Runfiles,
 };
-use zel_cmdline::Label;
+use zel_cmdline::{Label, RepositoryName};
 use zel_packages::attr::AttrValue;
-use zel_packages::RuleInstance;
+use zel_packages::{RepoResolver, RuleInstance};
+use zel_proto::dynamic::Msg;
+use zel_starlark::syntax::{
+    AssignOp, AssignTarget, BinaryOpKind, Expr, Lexer, ParamDef, Parser, Pattern, Stmt,
+    UnaryOpKind, UserFunctionDef,
+};
 use zel_starlark::Value;
 use zel_vfs::PathFragment;
 
@@ -799,8 +804,8 @@ pub(crate) fn cc_libc_top_alias(n: &Nctx) -> Result<ConfiguredTarget, String> {
     }
 }
 
-/// `ExtraAction`/`ActionListener`/`Environment`/`starlark_doc_extract`: analysed for their
-/// dependencies (`tools`, `extra_actions`) only; they provide no files.
+/// `ExtraAction`/`ActionListener`/`Environment`: analysed for their dependencies
+/// (`tools`, `extra_actions`) only; they provide no files.
 pub(crate) fn extra_action_like(n: &Nctx) -> Result<ConfiguredTarget, String> {
     match n.rule.rule_class.as_str() {
         "extra_action" => {
@@ -1424,6 +1429,1540 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
         executable,
         extra_actions,
     )
+}
+
+// ---------------------------------------------------------------------------------- starlark_doc_extract
+
+/// Native `starlark_doc_extract` rule (`StarlarkDocExtract.java`).
+///
+/// Parses the Starlark `.bzl` module referenced by `src`, extracts documentation into a
+/// `stardoc_output.ModuleInfo` protobuf message, and registers `FileWrite` actions for both
+/// implicit outputs (`%{name}.binaryproto` as the default output and `%{name}.textproto`).
+pub(crate) fn starlark_doc_extract(n: &Nctx) -> Result<ConfiguredTarget, String> {
+    let src_labels = n.labels("src")?;
+    let src_label = src_labels.first().ok_or_else(|| {
+        n.attr_err(
+            "src",
+            "missing value for mandatory attribute 'src' in 'starlark_doc_extract' rule",
+        )
+    })?;
+    let src_deps = n.deps("src", false)?;
+    let _deps = n.deps("deps", false)?;
+    let _data = n.deps("data", false)?;
+
+    let symbol_names = n.strings("symbol_names")?;
+    let render_main_repo_name = n.boolean("render_main_repo_name")?;
+
+    let effective_src_label = src_deps
+        .first()
+        .map(|ct| ct.actual_target_label().clone())
+        .unwrap_or_else(|| src_label.clone());
+    let src_is_generated = src_deps
+        .first()
+        .and_then(|ct| ct.default_info.files.first())
+        .is_some_and(|a| !a.is_source);
+
+    let rule_repo = n.rule.label.package_identifier().repository();
+    let loader = n.resolver.package_loader();
+    let repo_resolver = loader.as_ref().map(|l| l.config().lookup.resolver.as_ref());
+    let file_display = render_doc_label(
+        &effective_src_label,
+        rule_repo,
+        render_main_repo_name,
+        repo_resolver,
+    );
+
+    let mut module_info = Msg::new("stardoc_output.ModuleInfo");
+    module_info.set_str("file", &file_display);
+
+    if !src_is_generated {
+        if let Some(loader) = loader.as_ref() {
+            if let Some(source) = read_bzl_source(loader, &effective_src_label) {
+                let mut ctx = DocExtractCtx {
+                    loader,
+                    rule_repo,
+                    render_main_repo_name,
+                    visited: BTreeSet::new(),
+                };
+                ctx.extract_module(
+                    &effective_src_label,
+                    &file_display,
+                    &source,
+                    &symbol_names,
+                    &mut module_info,
+                )
+                .map_err(|e| n.err("src", &e))?;
+            }
+        }
+    }
+
+    let pkg_id = n.rule.label.package_identifier();
+    let name = n.rule.label.name();
+    let bin_label = Label::create(pkg_id.clone(), &format!("{name}.binaryproto"))
+        .map_err(|e| n.err("name", &format!("invalid binaryproto output name: {e}")))?;
+    let txt_label = Label::create(pkg_id.clone(), &format!("{name}.textproto"))
+        .map_err(|e| n.err("name", &format!("invalid textproto output name: {e}")))?;
+
+    let bin_art = n.out_artifact(&bin_label);
+    let txt_art = n.out_artifact(&txt_label);
+
+    let mut bin_action = Action::new(
+        n.rule.label.clone(),
+        "FileWrite",
+        ActionKind::FileWrite {
+            content: FileContent::Bytes(module_info.encode_to_vec()),
+            is_executable: false,
+        },
+    );
+    bin_action.outputs.push(bin_art.clone());
+
+    let mut txt_action = Action::new(
+        n.rule.label.clone(),
+        "FileWrite",
+        ActionKind::FileWrite {
+            content: FileContent::Literal(module_info.to_text()),
+            is_executable: false,
+        },
+    );
+    txt_action.outputs.push(txt_art.clone());
+
+    let mut ct = finish(
+        n,
+        vec![bin_art.clone()],
+        Runfiles::default(),
+        Runfiles::default(),
+        None,
+        vec![bin_action, txt_action],
+    )?;
+    ct.output_groups
+        .groups
+        .insert("binaryproto".to_string(), vec![bin_art.clone()]);
+    ct.output_groups
+        .groups
+        .insert("textproto".to_string(), vec![txt_art.clone()]);
+    ct.providers.insert(
+        "OutputGroupInfo".to_string(),
+        provider_instance(
+            "OutputGroupInfo",
+            vec![
+                ("binaryproto", files_depset(&[bin_art])),
+                ("textproto", files_depset(&[txt_art])),
+            ],
+        ),
+    );
+    Ok(ct)
+}
+
+fn render_doc_label(
+    label: &Label,
+    rule_repo: &RepositoryName,
+    render_main_repo_name: bool,
+    resolver: Option<&dyn RepoResolver>,
+) -> String {
+    let pkg = label.package_identifier().package_fragment().path_string();
+    let target = label.name();
+    let label_repo = label.package_identifier().repository();
+    if label_repo.is_main() {
+        if render_main_repo_name {
+            let main_name = resolver.and_then(|r| {
+                r.mapping(rule_repo)
+                    .entries()
+                    .find(|(apparent, canonical)| !apparent.is_empty() && canonical.is_main())
+                    .map(|(apparent, _)| apparent.clone())
+                    .or_else(|| {
+                        r.module_name_and_version(&RepositoryName::main())
+                            .map(|(name, _)| name)
+                            .filter(|name| !name.is_empty())
+                    })
+            });
+            if let Some(repo_name) = main_name {
+                return format!("@{repo_name}//{pkg}:{target}");
+            }
+        }
+        format!("//{pkg}:{target}")
+    } else {
+        if let Some(r) = resolver {
+            if let Some((apparent, _)) = r
+                .mapping(rule_repo)
+                .entries()
+                .find(|(apparent, canonical)| !apparent.is_empty() && *canonical == label_repo)
+            {
+                return format!("@{apparent}//{pkg}:{target}");
+            }
+        }
+        format!("{}//{pkg}:{target}", label_repo.canonical_form())
+    }
+}
+
+fn read_bzl_source(loader: &zel_packages::PackageLoader, label: &Label) -> Option<String> {
+    let repo_root = loader
+        .config()
+        .lookup
+        .resolver
+        .repo_root(label.package_identifier().repository())?;
+    let rel = label
+        .package_identifier()
+        .package_fragment()
+        .get_relative_str(label.name());
+    let abs = repo_root.get_relative(&rel);
+    let bytes = loader.config().lookup.fs.read_file(&abs).ok()?;
+    Some(zel_starlark::source_from_bytes(&bytes))
+}
+
+struct DocExtractCtx<'a> {
+    loader: &'a zel_packages::PackageLoader,
+    rule_repo: &'a RepositoryName,
+    render_main_repo_name: bool,
+    visited: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+enum ExtractedDef {
+    Func(Arc<UserFunctionDef>),
+    Rule(Expr),
+    Provider(Expr),
+    Aspect(Expr),
+    Macro(Expr),
+    RepositoryRule(Expr),
+    ModuleExtension(Expr),
+    Struct(Vec<(String, Expr)>),
+    Alias(String),
+    Other(Expr),
+}
+
+struct ParsedBzlModule {
+    label: Label,
+    file_display: String,
+    module_docstring: Option<String>,
+    loads: BTreeMap<String, (String, String)>,
+    defs: BTreeMap<String, ExtractedDef>,
+    string_consts: BTreeMap<String, String>,
+    string_list_consts: BTreeMap<String, Vec<String>>,
+    dict_consts: BTreeMap<String, Vec<(String, Expr)>>,
+    doc_comments: BTreeMap<String, String>,
+}
+
+impl DocExtractCtx<'_> {
+    fn parse_bzl(
+        &self,
+        label: &Label,
+        file_display: &str,
+        source: &str,
+    ) -> Result<ParsedBzlModule, String> {
+        let mut lex = Lexer::new(file_display, source);
+        let tokens = lex.lex_all().map_err(|e| e.to_string())?;
+        let comments = std::mem::take(&mut lex.comments);
+        let standalone_lines = std::mem::take(&mut lex.standalone_comment_lines);
+        let mut parser = Parser::new(tokens);
+        let stmts = parser.parse_module().map_err(|e| e.0)?;
+        let (raw_doc_comments, _unused) =
+            zel_starlark::syntax::extract_doc_comments(&stmts, &comments, &standalone_lines);
+        let mut doc_comments = BTreeMap::new();
+        for (name, dc) in raw_doc_comments {
+            doc_comments.insert(name, dc.text());
+        }
+
+        let module_docstring = match stmts.first() {
+            Some(Stmt::Expr(Expr::Literal(Value::String(s)))) => Some(normalize_docstring(s)),
+            _ => None,
+        };
+
+        let mut loads = BTreeMap::new();
+        let mut defs = BTreeMap::new();
+        let mut string_consts = BTreeMap::new();
+        let mut string_list_consts = BTreeMap::new();
+        let mut dict_consts = BTreeMap::new();
+
+        for stmt in &stmts {
+            match stmt {
+                Stmt::Load(load_stmt, _) => {
+                    for (local, exported) in &load_stmt.symbols {
+                        loads.insert(
+                            local.clone(),
+                            (load_stmt.module_label.clone(), exported.clone()),
+                        );
+                    }
+                }
+                Stmt::Def(func_def) => {
+                    defs.insert(func_def.name.clone(), ExtractedDef::Func(func_def.clone()));
+                }
+                Stmt::Assign {
+                    target,
+                    op: AssignOp::Assign,
+                    value,
+                    ..
+                } => match target {
+                    AssignTarget::Ident(name) => {
+                        if let Some(s) = eval_string_expr(value, &string_consts) {
+                            string_consts.insert(name.clone(), s);
+                        }
+                        if let Some(sl) =
+                            eval_string_list_expr(value, &string_consts, &string_list_consts)
+                        {
+                            string_list_consts.insert(name.clone(), sl);
+                        }
+                        if let Some(entries) = eval_dict_expr(value, &string_consts, &dict_consts) {
+                            dict_consts.insert(name.clone(), entries);
+                        }
+                        defs.insert(name.clone(), classify_assigned_expr(value));
+                    }
+                    AssignTarget::Tuple(patterns) => {
+                        if let Some((callee_name, _)) = top_call_name(value) {
+                            if callee_name == "provider" {
+                                if let Some(Pattern::Name(name)) = patterns.first() {
+                                    defs.insert(
+                                        name.clone(),
+                                        ExtractedDef::Provider(value.clone()),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+
+        Ok(ParsedBzlModule {
+            label: label.clone(),
+            file_display: file_display.to_string(),
+            module_docstring,
+            loads,
+            defs,
+            string_consts,
+            string_list_consts,
+            dict_consts,
+            doc_comments,
+        })
+    }
+
+    fn extract_module(
+        &mut self,
+        label: &Label,
+        file_display: &str,
+        source: &str,
+        symbol_names: &[String],
+        out: &mut Msg,
+    ) -> Result<(), String> {
+        let parsed = self.parse_bzl(label, file_display, source)?;
+        if let Some(ref doc) = parsed.module_docstring {
+            out.set_str("module_docstring", doc);
+        }
+
+        let filter: Option<BTreeSet<&str>> = if symbol_names.is_empty() {
+            None
+        } else {
+            Some(symbol_names.iter().map(String::as_str).collect())
+        };
+
+        let mut collector = CollectedEntries::default();
+        self.visited.insert(label.canonical_form());
+
+        for (name, def) in &parsed.defs {
+            let should_consider = match &filter {
+                None => !name.starts_with('_'),
+                Some(set) => {
+                    set.contains(name.as_str())
+                        || set
+                            .iter()
+                            .any(|wanted| wanted.starts_with(&format!("{name}.")))
+                }
+            };
+            if !should_consider {
+                continue;
+            }
+            self.collect_symbol(
+                &parsed,
+                name,
+                name,
+                Some(name),
+                def,
+                filter.as_ref(),
+                0,
+                &mut collector,
+            );
+        }
+
+        // Also handle explicitly requested symbols that come straight from a `load(...)` binding.
+        if let Some(ref set) = filter {
+            let mut handled_load_tops: BTreeSet<&str> = BTreeSet::new();
+            for wanted in set {
+                let top = wanted.split('.').next().unwrap_or(wanted);
+                if parsed.defs.contains_key(top) || !handled_load_tops.insert(top) {
+                    continue;
+                }
+                if let Some((mod_str, orig_name)) = parsed.loads.get(top) {
+                    self.collect_from_load(
+                        &parsed,
+                        mod_str,
+                        orig_name,
+                        top,
+                        filter.as_ref(),
+                        0,
+                        &mut collector,
+                    );
+                }
+            }
+        }
+
+        collector.write_into(out);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_symbol(
+        &mut self,
+        module: &ParsedBzlModule,
+        export_name: &str,
+        origin_name: &str,
+        doc_binding: Option<&str>,
+        def: &ExtractedDef,
+        filter: Option<&BTreeSet<&str>>,
+        depth: usize,
+        out: &mut CollectedEntries,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        let matches_exact = match filter {
+            None => true,
+            Some(set) => {
+                set.contains(export_name)
+                    || set
+                        .iter()
+                        .any(|w| export_name.starts_with(&format!("{w}.")))
+            }
+        };
+
+        match def {
+            ExtractedDef::Func(func_def) => {
+                if matches_exact {
+                    out.funcs.push((
+                        export_name.to_string(),
+                        build_function_info(
+                            export_name,
+                            origin_name,
+                            &module.file_display,
+                            func_def,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::Rule(expr) => {
+                if matches_exact {
+                    out.rules.push((
+                        export_name.to_string(),
+                        build_rule_info(
+                            export_name,
+                            origin_name,
+                            &module.file_display,
+                            expr,
+                            module,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::Provider(expr) => {
+                if matches_exact {
+                    out.providers.push((
+                        export_name.to_string(),
+                        build_provider_info(
+                            export_name,
+                            origin_name,
+                            &module.file_display,
+                            expr,
+                            module,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::Aspect(expr) => {
+                if matches_exact {
+                    out.aspects.push((
+                        export_name.to_string(),
+                        build_aspect_info(
+                            export_name,
+                            origin_name,
+                            &module.file_display,
+                            expr,
+                            module,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::Macro(expr) => {
+                if matches_exact {
+                    out.macros.push((
+                        export_name.to_string(),
+                        build_macro_info(
+                            export_name,
+                            origin_name,
+                            &module.file_display,
+                            expr,
+                            module,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::RepositoryRule(expr) => {
+                if matches_exact {
+                    out.repo_rules.push((
+                        export_name.to_string(),
+                        build_repository_rule_info(
+                            export_name,
+                            origin_name,
+                            &module.file_display,
+                            expr,
+                            module,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::ModuleExtension(expr) => {
+                if matches_exact {
+                    out.module_extensions.push((
+                        export_name.to_string(),
+                        build_module_extension_info(
+                            export_name,
+                            &module.file_display,
+                            expr,
+                            module,
+                        ),
+                    ));
+                }
+            }
+            ExtractedDef::Struct(fields) => {
+                for (field_name, field_expr) in fields {
+                    let qualified = format!("{export_name}.{field_name}");
+                    let consider = match filter {
+                        None => !field_name.starts_with('_'),
+                        Some(set) => {
+                            set.contains(export_name)
+                                || set.contains(qualified.as_str())
+                                || set.iter().any(|w| w.starts_with(&format!("{qualified}.")))
+                        }
+                    };
+                    if !consider {
+                        continue;
+                    }
+                    let field_def = classify_assigned_expr(field_expr);
+                    self.collect_symbol(
+                        module,
+                        &qualified,
+                        field_name,
+                        None,
+                        &field_def,
+                        filter,
+                        depth + 1,
+                        out,
+                    );
+                }
+            }
+            ExtractedDef::Alias(rhs) => {
+                if let Some(local_def) = module.defs.get(rhs).cloned() {
+                    let next_origin = if rhs.starts_with('_') {
+                        origin_name
+                    } else {
+                        rhs.as_str()
+                    };
+                    let next_doc_binding =
+                        if doc_binding.is_some_and(|b| module.doc_comments.contains_key(b)) {
+                            doc_binding
+                        } else if module.doc_comments.contains_key(rhs) {
+                            Some(rhs.as_str())
+                        } else {
+                            doc_binding
+                        };
+                    self.collect_symbol(
+                        module,
+                        export_name,
+                        next_origin,
+                        next_doc_binding,
+                        &local_def,
+                        filter,
+                        depth + 1,
+                        out,
+                    );
+                } else if let Some((mod_str, orig_name)) = module.loads.get(rhs).cloned() {
+                    self.collect_from_load(
+                        module,
+                        &mod_str,
+                        &orig_name,
+                        export_name,
+                        filter,
+                        depth + 1,
+                        out,
+                    );
+                } else if matches_exact {
+                    if let Some(doc) = doc_binding.and_then(|b| module.doc_comments.get(b)) {
+                        out.other_symbols.push((
+                            export_name.to_string(),
+                            build_other_symbol_info(export_name, doc, "unknown"),
+                        ));
+                    }
+                }
+            }
+            ExtractedDef::Other(expr) => {
+                if matches_exact {
+                    if let Some(doc) = doc_binding.and_then(|b| module.doc_comments.get(b)) {
+                        out.other_symbols.push((
+                            export_name.to_string(),
+                            build_other_symbol_info(export_name, doc, infer_expr_type_name(expr)),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_from_load(
+        &mut self,
+        current: &ParsedBzlModule,
+        mod_str: &str,
+        orig_name: &str,
+        export_name: &str,
+        filter: Option<&BTreeSet<&str>>,
+        depth: usize,
+        out: &mut CollectedEntries,
+    ) {
+        if depth > 8 {
+            return;
+        }
+        let repo = current.label.package_identifier().repository();
+        let mapping = self.loader.config().lookup.resolver.mapping(repo);
+        let Ok(target_label) = Label::parse_with_package_context(
+            mod_str,
+            current.label.package_identifier(),
+            &mapping,
+        ) else {
+            return;
+        };
+        let key = target_label.canonical_form();
+        if !self.visited.insert(key.clone()) {
+            return;
+        }
+        let target_display = render_doc_label(
+            &target_label,
+            self.rule_repo,
+            self.render_main_repo_name,
+            Some(self.loader.config().lookup.resolver.as_ref()),
+        );
+        if let Some(src) = read_bzl_source(self.loader, &target_label) {
+            if let Ok(loaded_mod) = self.parse_bzl(&target_label, &target_display, &src) {
+                if let Some(def) = loaded_mod.defs.get(orig_name).cloned() {
+                    self.collect_symbol(
+                        &loaded_mod,
+                        export_name,
+                        orig_name,
+                        Some(orig_name),
+                        &def,
+                        filter,
+                        depth + 1,
+                        out,
+                    );
+                }
+            }
+        }
+        self.visited.remove(&key);
+    }
+}
+
+#[derive(Default)]
+struct CollectedEntries {
+    rules: Vec<(String, Msg)>,
+    providers: Vec<(String, Msg)>,
+    funcs: Vec<(String, Msg)>,
+    aspects: Vec<(String, Msg)>,
+    module_extensions: Vec<(String, Msg)>,
+    repo_rules: Vec<(String, Msg)>,
+    macros: Vec<(String, Msg)>,
+    other_symbols: Vec<(String, Msg)>,
+}
+
+impl CollectedEntries {
+    fn write_into(mut self, out: &mut Msg) {
+        self.rules.sort_by(|a, b| a.0.cmp(&b.0));
+        self.providers.sort_by(|a, b| a.0.cmp(&b.0));
+        self.funcs.sort_by(|a, b| a.0.cmp(&b.0));
+        self.aspects.sort_by(|a, b| a.0.cmp(&b.0));
+        self.module_extensions.sort_by(|a, b| a.0.cmp(&b.0));
+        self.repo_rules.sort_by(|a, b| a.0.cmp(&b.0));
+        self.macros.sort_by(|a, b| a.0.cmp(&b.0));
+        self.other_symbols.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for (_, m) in self.rules {
+            out.set_msg("rule_info", m);
+        }
+        for (_, m) in self.providers {
+            out.set_msg("provider_info", m);
+        }
+        for (_, m) in self.funcs {
+            out.set_msg("func_info", m);
+        }
+        for (_, m) in self.aspects {
+            out.set_msg("aspect_info", m);
+        }
+        for (_, m) in self.module_extensions {
+            out.set_msg("module_extension_info", m);
+        }
+        for (_, m) in self.repo_rules {
+            out.set_msg("repository_rule_info", m);
+        }
+        for (_, m) in self.macros {
+            out.set_msg("macro_info", m);
+        }
+        for (_, m) in self.other_symbols {
+            out.set_msg("starlark_other_symbol_info", m);
+        }
+    }
+}
+
+fn top_call_name(expr: &Expr) -> Option<(&str, &Expr)> {
+    if let Expr::Call { callee, .. } = expr {
+        if let Expr::Ident(name, _) = callee.as_ref() {
+            return Some((name.as_str(), expr));
+        }
+    }
+    None
+}
+
+fn classify_assigned_expr(expr: &Expr) -> ExtractedDef {
+    if let Expr::Call {
+        callee, kw_args, ..
+    } = expr
+    {
+        if let Expr::Ident(name, _) = callee.as_ref() {
+            match name.as_str() {
+                "rule" => return ExtractedDef::Rule(expr.clone()),
+                "provider" => return ExtractedDef::Provider(expr.clone()),
+                "aspect" => return ExtractedDef::Aspect(expr.clone()),
+                "macro" => return ExtractedDef::Macro(expr.clone()),
+                "repository_rule" => return ExtractedDef::RepositoryRule(expr.clone()),
+                "module_extension" => return ExtractedDef::ModuleExtension(expr.clone()),
+                "struct" => return ExtractedDef::Struct(kw_args.clone()),
+                _ => {}
+            }
+        }
+    }
+    if let Expr::Ident(rhs, _) = expr {
+        if !matches!(rhs.as_str(), "True" | "False" | "None") {
+            return ExtractedDef::Alias(rhs.clone());
+        }
+    }
+    ExtractedDef::Other(expr.clone())
+}
+
+fn call_kwarg<'a>(expr: &'a Expr, key: &str) -> Option<&'a Expr> {
+    if let Expr::Call { kw_args, .. } = expr {
+        kw_args.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    } else {
+        None
+    }
+}
+
+fn make_origin_key(name: &str, file: &str) -> Msg {
+    let mut origin = Msg::new("stardoc_output.OriginKey");
+    if !name.is_empty() && !name.starts_with('_') {
+        origin.set_str("name", name);
+    }
+    if !file.is_empty() {
+        origin.set_str("file", file);
+    }
+    origin
+}
+
+fn make_implicit_name_attr() -> Msg {
+    let mut attr = Msg::new("stardoc_output.AttributeInfo");
+    attr.set_str("name", "name");
+    attr.set_str("doc_string", "A unique name for this target.");
+    attr.set_enum("type", "NAME");
+    attr.set_bool("mandatory", true);
+    attr.set_bool("nonconfigurable", true);
+    attr.set_bool("natively_defined", true);
+    attr
+}
+
+fn build_rule_info(
+    export_name: &str,
+    origin_name: &str,
+    file_display: &str,
+    expr: &Expr,
+    module: &ParsedBzlModule,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.RuleInfo");
+    info.set_str("rule_name", export_name);
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    info.set_msg("attribute", make_implicit_name_attr());
+    if let Some(attrs_expr) = call_kwarg(expr, "attrs") {
+        for attr in extract_attrs(attrs_expr, module) {
+            info.set_msg("attribute", attr);
+        }
+    }
+    info.set_msg("origin_key", make_origin_key(origin_name, file_display));
+    if let Some(provides_expr) = call_kwarg(expr, "provides") {
+        if let Some(group) = extract_provider_name_group(provides_expr, file_display) {
+            info.set_msg("advertised_providers", group);
+        }
+    }
+    let is_test = call_kwarg(expr, "test")
+        .and_then(eval_bool_expr)
+        .unwrap_or(false);
+    let is_exec = is_test
+        || call_kwarg(expr, "executable")
+            .and_then(eval_bool_expr)
+            .unwrap_or(false);
+    info.set_bool("test", is_test);
+    info.set_bool("executable", is_exec);
+    info
+}
+
+fn build_macro_info(
+    export_name: &str,
+    origin_name: &str,
+    file_display: &str,
+    expr: &Expr,
+    module: &ParsedBzlModule,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.MacroInfo");
+    info.set_str("macro_name", export_name);
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    info.set_msg("attribute", make_implicit_name_attr());
+    if let Some(attrs_expr) = call_kwarg(expr, "attrs") {
+        for attr in extract_attrs(attrs_expr, module) {
+            info.set_msg("attribute", attr);
+        }
+    }
+    info.set_msg("origin_key", make_origin_key(origin_name, file_display));
+    let finalizer = call_kwarg(expr, "finalizer")
+        .and_then(eval_bool_expr)
+        .unwrap_or(false);
+    info.set_bool("finalizer", finalizer);
+    info
+}
+
+fn build_provider_info(
+    export_name: &str,
+    origin_name: &str,
+    file_display: &str,
+    expr: &Expr,
+    module: &ParsedBzlModule,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.ProviderInfo");
+    info.set_str("provider_name", export_name);
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    if let Some(fields_expr) = call_kwarg(expr, "fields") {
+        if let Some(entries) =
+            eval_dict_expr(fields_expr, &module.string_consts, &module.dict_consts)
+        {
+            for (field_name, field_doc_expr) in entries {
+                let mut f = Msg::new("stardoc_output.ProviderFieldInfo");
+                f.set_str("name", &field_name);
+                if let Some(doc) = eval_string_expr(&field_doc_expr, &module.string_consts) {
+                    f.set_str("doc_string", normalize_docstring(&doc));
+                }
+                info.set_msg("field_info", f);
+            }
+        } else if let Some(names) = eval_string_list_expr(
+            fields_expr,
+            &module.string_consts,
+            &module.string_list_consts,
+        ) {
+            for field_name in names {
+                let mut f = Msg::new("stardoc_output.ProviderFieldInfo");
+                f.set_str("name", &field_name);
+                info.set_msg("field_info", f);
+            }
+        }
+    }
+    info.set_msg("origin_key", make_origin_key(origin_name, file_display));
+    info
+}
+
+fn build_aspect_info(
+    export_name: &str,
+    origin_name: &str,
+    file_display: &str,
+    expr: &Expr,
+    module: &ParsedBzlModule,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.AspectInfo");
+    info.set_str("aspect_name", export_name);
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    if let Some(aa_expr) = call_kwarg(expr, "attr_aspects") {
+        if let Some(items) =
+            eval_string_list_expr(aa_expr, &module.string_consts, &module.string_list_consts)
+        {
+            for item in items {
+                info.set_str("aspect_attribute", item);
+            }
+        }
+    }
+    info.set_msg("attribute", make_implicit_name_attr());
+    if let Some(attrs_expr) = call_kwarg(expr, "attrs") {
+        for attr in extract_attrs(attrs_expr, module) {
+            info.set_msg("attribute", attr);
+        }
+    }
+    info.set_msg("origin_key", make_origin_key(origin_name, file_display));
+    info
+}
+
+fn build_repository_rule_info(
+    export_name: &str,
+    origin_name: &str,
+    file_display: &str,
+    expr: &Expr,
+    module: &ParsedBzlModule,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.RepositoryRuleInfo");
+    info.set_str("rule_name", export_name);
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    info.set_msg("attribute", make_implicit_name_attr());
+    if let Some(attrs_expr) = call_kwarg(expr, "attrs") {
+        for attr in extract_attrs(attrs_expr, module) {
+            info.set_msg("attribute", attr);
+        }
+    }
+    if let Some(env_expr) = call_kwarg(expr, "environ") {
+        if let Some(items) =
+            eval_string_list_expr(env_expr, &module.string_consts, &module.string_list_consts)
+        {
+            for item in items {
+                info.set_str("environ", item);
+            }
+        }
+    }
+    info.set_msg("origin_key", make_origin_key(origin_name, file_display));
+    info
+}
+
+fn build_module_extension_info(
+    export_name: &str,
+    file_display: &str,
+    expr: &Expr,
+    module: &ParsedBzlModule,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.ModuleExtensionInfo");
+    info.set_str("extension_name", export_name);
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    if let Some(tc_expr) = call_kwarg(expr, "tag_classes") {
+        if let Some(entries) = eval_dict_expr(tc_expr, &module.string_consts, &module.dict_consts) {
+            for (tag_name, tag_expr) in entries {
+                let mut tc = Msg::new("stardoc_output.ModuleExtensionTagClassInfo");
+                tc.set_str("tag_name", &tag_name);
+                if let Some(doc_expr) = call_kwarg(&tag_expr, "doc") {
+                    if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+                        tc.set_str("doc_string", normalize_docstring(&doc));
+                    }
+                }
+                if let Some(attrs_expr) = call_kwarg(&tag_expr, "attrs") {
+                    for attr in extract_attrs(attrs_expr, module) {
+                        tc.set_msg("attribute", attr);
+                    }
+                }
+                info.set_msg("tag_class", tc);
+            }
+        }
+    }
+    let mut origin = Msg::new("stardoc_output.OriginKey");
+    if !file_display.is_empty() {
+        origin.set_str("file", file_display);
+    }
+    info.set_msg("origin_key", origin);
+    info
+}
+
+fn build_other_symbol_info(name: &str, doc: &str, type_name: &str) -> Msg {
+    let mut info = Msg::new("stardoc_output.StarlarkOtherSymbolInfo");
+    info.set_str("name", name);
+    info.set_str("doc", doc);
+    info.set_str("type_name", type_name);
+    info
+}
+
+fn build_function_info(
+    export_name: &str,
+    origin_name: &str,
+    file_display: &str,
+    func_def: &UserFunctionDef,
+) -> Msg {
+    let mut info = Msg::new("stardoc_output.StarlarkFunctionInfo");
+    info.set_str("function_name", export_name);
+
+    let raw_doc = match func_def.body.first() {
+        Some(Stmt::Expr(Expr::Literal(Value::String(s)))) => Some(s.as_str()),
+        _ => None,
+    };
+    let parsed_doc = raw_doc.map(parse_function_docstring).unwrap_or_default();
+
+    // Proto specifies ordering: ordinary -> keyword-only -> *args -> **kwargs.
+    let mut ordinary: Vec<&ParamDef> = Vec::new();
+    let mut kw_only: Vec<&ParamDef> = Vec::new();
+    let mut varargs: Option<&ParamDef> = None;
+    let mut kwargs: Option<&ParamDef> = None;
+    for p in &func_def.params {
+        if p.is_args {
+            varargs = Some(p);
+        } else if p.is_kwargs {
+            kwargs = Some(p);
+        } else if p.is_kw_only {
+            kw_only.push(p);
+        } else {
+            ordinary.push(p);
+        }
+    }
+
+    let ordered = ordinary
+        .into_iter()
+        .map(|p| (p, "PARAM_ROLE_ORDINARY"))
+        .chain(kw_only.into_iter().map(|p| (p, "PARAM_ROLE_KEYWORD_ONLY")))
+        .chain(varargs.into_iter().map(|p| (p, "PARAM_ROLE_VARARGS")))
+        .chain(kwargs.into_iter().map(|p| (p, "PARAM_ROLE_KWARGS")));
+
+    for (p, role) in ordered {
+        let mut pm = Msg::new("stardoc_output.FunctionParamInfo");
+        pm.set_str("name", &p.name);
+        if let Some(pdoc) = parsed_doc.param_docs.get(&p.name) {
+            pm.set_str("doc_string", pdoc);
+        }
+        if let Some(ref def_expr) = p.default {
+            pm.set_str("default_value", format_starlark_expr(def_expr));
+        }
+        let mandatory = !p.is_args && !p.is_kwargs && p.default.is_none();
+        pm.set_bool("mandatory", mandatory);
+        pm.set_enum("role", role);
+        info.set_msg("parameter", pm);
+    }
+
+    if !parsed_doc.summary.is_empty() {
+        info.set_str("doc_string", &parsed_doc.summary);
+    }
+    if let Some(ref ret) = parsed_doc.returns {
+        let mut r = Msg::new("stardoc_output.FunctionReturnInfo");
+        r.set_str("doc_string", ret);
+        info.set_msg("return", r);
+    }
+    if let Some(ref dep) = parsed_doc.deprecated {
+        let mut d = Msg::new("stardoc_output.FunctionDeprecationInfo");
+        d.set_str("doc_string", dep);
+        info.set_msg("deprecated", d);
+    }
+    info.set_msg("origin_key", make_origin_key(origin_name, file_display));
+    info
+}
+
+fn extract_attrs(attrs_expr: &Expr, module: &ParsedBzlModule) -> Vec<Msg> {
+    let Some(entries) = eval_dict_expr(attrs_expr, &module.string_consts, &module.dict_consts)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (attr_name, attr_expr) in entries {
+        if attr_name.starts_with('_') {
+            continue;
+        }
+        out.push(build_attribute_info(&attr_name, &attr_expr, module));
+    }
+    out
+}
+
+fn build_attribute_info(attr_name: &str, expr: &Expr, module: &ParsedBzlModule) -> Msg {
+    let mut info = Msg::new("stardoc_output.AttributeInfo");
+    info.set_str("name", attr_name);
+
+    let (attr_type_enum, default_fallback, implicit_nonconfigurable) = match expr {
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Attr { attr, .. } => match attr.as_str() {
+                "int" => ("INT", "0", false),
+                "label" => ("LABEL", "None", false),
+                "string" => ("STRING", "\"\"", false),
+                "string_list" => ("STRING_LIST", "[]", false),
+                "int_list" => ("INT_LIST", "[]", false),
+                "label_list" => ("LABEL_LIST", "[]", false),
+                "bool" => ("BOOLEAN", "False", false),
+                "label_keyed_string_dict" => ("LABEL_STRING_DICT", "{}", false),
+                "string_dict" => ("STRING_DICT", "{}", false),
+                "string_list_dict" => ("STRING_LIST_DICT", "{}", false),
+                "output" => ("OUTPUT", "None", true),
+                "output_list" => ("OUTPUT_LIST", "[]", true),
+                "label_dict" => ("LABEL_DICT_UNARY", "{}", false),
+                "label_list_dict" => ("LABEL_LIST_DICT", "{}", false),
+                _ => ("UNKNOWN", "", false),
+            },
+            _ => ("UNKNOWN", "", false),
+        },
+        _ => ("UNKNOWN", "", false),
+    };
+
+    if let Some(doc_expr) = call_kwarg(expr, "doc") {
+        if let Some(doc) = eval_string_expr(doc_expr, &module.string_consts) {
+            info.set_str("doc_string", normalize_docstring(&doc));
+        }
+    }
+    info.set_enum("type", attr_type_enum);
+
+    let mandatory = call_kwarg(expr, "mandatory")
+        .and_then(eval_bool_expr)
+        .unwrap_or(false);
+    info.set_bool("mandatory", mandatory);
+
+    if !mandatory {
+        if let Some(def_expr) = call_kwarg(expr, "default") {
+            let formatted = format_starlark_expr(def_expr);
+            if !formatted.is_empty() {
+                info.set_str("default_value", formatted);
+            }
+        } else if !default_fallback.is_empty() {
+            info.set_str("default_value", default_fallback);
+        }
+    }
+
+    let nonconfigurable = implicit_nonconfigurable
+        || call_kwarg(expr, "configurable")
+            .and_then(eval_bool_expr)
+            .is_some_and(|c| !c);
+    info.set_bool("nonconfigurable", nonconfigurable);
+
+    if let Some(values_expr) = call_kwarg(expr, "values") {
+        if let Some(vals) = eval_string_list_expr(
+            values_expr,
+            &module.string_consts,
+            &module.string_list_consts,
+        ) {
+            for v in vals {
+                info.set_str("values", format!("\"{}\"", v.replace('"', "\\\"")));
+            }
+        }
+    }
+
+    if let Some(provs_expr) = call_kwarg(expr, "providers") {
+        if let Expr::List(items, _) | Expr::Tuple(items, _) = provs_expr {
+            let is_nested = items
+                .iter()
+                .any(|e| matches!(e, Expr::List(_, _) | Expr::Tuple(_, _)));
+            if is_nested {
+                for group_expr in items {
+                    if let Some(g) = extract_provider_name_group(group_expr, &module.file_display) {
+                        info.set_msg("provider_name_group", g);
+                    }
+                }
+            } else if let Some(g) = extract_provider_name_group(provs_expr, &module.file_display) {
+                info.set_msg("provider_name_group", g);
+            }
+        }
+    }
+
+    info
+}
+
+fn extract_provider_name_group(expr: &Expr, file_display: &str) -> Option<Msg> {
+    let items = match expr {
+        Expr::List(v, _) | Expr::Tuple(v, _) => v,
+        _ => return None,
+    };
+    if items.is_empty() {
+        return None;
+    }
+    let mut group = Msg::new("stardoc_output.ProviderNameGroup");
+    let mut added = false;
+    for item in items {
+        let pname = match item {
+            Expr::Ident(n, _) => Some(n.clone()),
+            Expr::Literal(Value::String(s)) => Some(s.clone()),
+            Expr::Attr { attr, .. } => Some(attr.clone()),
+            _ => None,
+        };
+        if let Some(name) = pname {
+            group.set_str("provider_name", &name);
+            group.set_msg("origin_key", make_origin_key(&name, file_display));
+            added = true;
+        }
+    }
+    added.then_some(group)
+}
+
+fn eval_string_expr(expr: &Expr, consts: &BTreeMap<String, String>) -> Option<String> {
+    match expr {
+        Expr::Literal(Value::String(s)) => Some(s.clone()),
+        Expr::Ident(name, _) => consts.get(name).cloned(),
+        Expr::BinaryOp {
+            op: BinaryOpKind::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let l = eval_string_expr(lhs, consts)?;
+            let r = eval_string_expr(rhs, consts)?;
+            Some(format!("{l}{r}"))
+        }
+        _ => None,
+    }
+}
+
+fn eval_bool_expr(expr: &Expr) -> Option<bool> {
+    match expr {
+        Expr::Literal(Value::Bool(b)) => Some(*b),
+        Expr::Ident(name, _) if name == "True" => Some(true),
+        Expr::Ident(name, _) if name == "False" => Some(false),
+        Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            expr,
+            ..
+        } => eval_bool_expr(expr).map(|b| !b),
+        _ => None,
+    }
+}
+
+fn eval_string_list_expr(
+    expr: &Expr,
+    str_consts: &BTreeMap<String, String>,
+    list_consts: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    match expr {
+        Expr::List(items, _) | Expr::Tuple(items, _) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(eval_string_expr(item, str_consts)?);
+            }
+            Some(out)
+        }
+        Expr::Ident(name, _) => list_consts.get(name).cloned(),
+        Expr::BinaryOp {
+            op: BinaryOpKind::Add,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let mut l = eval_string_list_expr(lhs, str_consts, list_consts)?;
+            let r = eval_string_list_expr(rhs, str_consts, list_consts)?;
+            l.extend(r);
+            Some(l)
+        }
+        _ => None,
+    }
+}
+
+fn eval_dict_expr(
+    expr: &Expr,
+    str_consts: &BTreeMap<String, String>,
+    dict_consts: &BTreeMap<String, Vec<(String, Expr)>>,
+) -> Option<Vec<(String, Expr)>> {
+    match expr {
+        Expr::Dict(entries, _, _) => {
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let key = eval_string_expr(k, str_consts)?;
+                out.push((key, v.clone()));
+            }
+            Some(out)
+        }
+        Expr::Ident(name, _) => dict_consts.get(name).cloned(),
+        Expr::BinaryOp {
+            op: BinaryOpKind::BitOr,
+            lhs,
+            rhs,
+            ..
+        } => {
+            let mut merged = eval_dict_expr(lhs, str_consts, dict_consts)?;
+            let right = eval_dict_expr(rhs, str_consts, dict_consts)?;
+            merge_dict_entries(&mut merged, right);
+            Some(merged)
+        }
+        Expr::Call {
+            callee,
+            pos_args,
+            kw_args,
+            ..
+        } => {
+            let is_dict_merge = match callee.as_ref() {
+                Expr::Ident(n, _) => n == "dict",
+                Expr::Attr { attr, .. } => attr == "add",
+                _ => false,
+            };
+            if !is_dict_merge {
+                return None;
+            }
+            let mut merged = Vec::new();
+            for arg in pos_args {
+                if let Some(entries) = eval_dict_expr(arg, str_consts, dict_consts) {
+                    merge_dict_entries(&mut merged, entries);
+                }
+            }
+            for (k, v) in kw_args {
+                merge_dict_entries(&mut merged, vec![(k.clone(), v.clone())]);
+            }
+            Some(merged)
+        }
+        _ => None,
+    }
+}
+
+fn merge_dict_entries(base: &mut Vec<(String, Expr)>, extra: Vec<(String, Expr)>) {
+    for (k, v) in extra {
+        if let Some(existing) = base.iter_mut().find(|(ek, _)| ek == &k) {
+            existing.1 = v;
+        } else {
+            base.push((k, v));
+        }
+    }
+}
+
+fn format_starlark_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Literal(v) => v.repr(),
+        Expr::Ident(name, _) => name.clone(),
+        Expr::List(elems, _) => {
+            let inner: Vec<String> = elems.iter().map(format_starlark_expr).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        Expr::Tuple(elems, _) => {
+            let inner: Vec<String> = elems.iter().map(format_starlark_expr).collect();
+            if elems.len() == 1 {
+                format!("({},)", inner[0])
+            } else {
+                format!("({})", inner.join(", "))
+            }
+        }
+        Expr::Dict(entries, _, _) => {
+            let inner: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}: {}", format_starlark_expr(k), format_starlark_expr(v)))
+                .collect();
+            format!("{{{}}}", inner.join(", "))
+        }
+        Expr::UnaryOp { op, expr, .. } => {
+            let inner = format_starlark_expr(expr);
+            match op {
+                UnaryOpKind::Neg => format!("-{inner}"),
+                UnaryOpKind::Pos => format!("+{inner}"),
+                UnaryOpKind::Not => format!("not {inner}"),
+                UnaryOpKind::Invert => format!("~{inner}"),
+            }
+        }
+        Expr::BinaryOp { op, lhs, rhs, .. } => {
+            let op_s = match op {
+                BinaryOpKind::Add => "+",
+                BinaryOpKind::Sub => "-",
+                BinaryOpKind::Mul => "*",
+                BinaryOpKind::Div => "/",
+                BinaryOpKind::FloorDiv => "//",
+                BinaryOpKind::Mod => "%",
+                BinaryOpKind::BitAnd => "&",
+                BinaryOpKind::BitOr => "|",
+                BinaryOpKind::BitXor => "^",
+                BinaryOpKind::Shl => "<<",
+                BinaryOpKind::Shr => ">>",
+                BinaryOpKind::And => "and",
+                BinaryOpKind::Or => "or",
+            };
+            format!(
+                "{} {op_s} {}",
+                format_starlark_expr(lhs),
+                format_starlark_expr(rhs)
+            )
+        }
+        Expr::Attr { target, attr, .. } => format!("{}.{attr}", format_starlark_expr(target)),
+        Expr::Call {
+            callee,
+            pos_args,
+            kw_args,
+            ..
+        } => {
+            let mut parts: Vec<String> = pos_args.iter().map(format_starlark_expr).collect();
+            for (k, v) in kw_args {
+                parts.push(format!("{k} = {}", format_starlark_expr(v)));
+            }
+            format!("{}({})", format_starlark_expr(callee), parts.join(", "))
+        }
+        _ => String::new(),
+    }
+}
+
+fn infer_expr_type_name(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Literal(v) => v.type_name(),
+        Expr::Ident(n, _) if n == "True" || n == "False" => "bool",
+        Expr::Ident(n, _) if n == "None" => "NoneType",
+        Expr::List(_, _) | Expr::ListComp { .. } => "list",
+        Expr::Tuple(_, _) => "tuple",
+        Expr::Dict(_, _, _) | Expr::DictComp { .. } => "dict",
+        Expr::Lambda { .. } => "function",
+        _ => "unknown",
+    }
+}
+
+fn normalize_docstring(raw: &str) -> String {
+    let lines: Vec<&str> = raw.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let first = lines[0].trim();
+    let min_indent = lines[1..]
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.chars().take_while(|c| c.is_whitespace()).count())
+        .min()
+        .unwrap_or(0);
+    let mut normalized = Vec::with_capacity(lines.len());
+    normalized.push(first.to_string());
+    for line in &lines[1..] {
+        let trimmed_end = line.trim_end();
+        if trimmed_end.is_empty() {
+            normalized.push(String::new());
+        } else {
+            normalized.push(trimmed_end.chars().skip(min_indent).collect());
+        }
+    }
+    while normalized.first().is_some_and(|l| l.is_empty()) {
+        normalized.remove(0);
+    }
+    while normalized.last().is_some_and(|l| l.is_empty()) {
+        normalized.pop();
+    }
+    normalized.join("\n")
+}
+
+#[derive(Default)]
+struct ParsedFunctionDoc {
+    summary: String,
+    param_docs: BTreeMap<String, String>,
+    returns: Option<String>,
+    deprecated: Option<String>,
+}
+
+fn parse_function_docstring(raw: &str) -> ParsedFunctionDoc {
+    let norm = normalize_docstring(raw);
+    if norm.is_empty() {
+        return ParsedFunctionDoc::default();
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Section {
+        Summary,
+        Args,
+        Returns,
+        Deprecated,
+    }
+
+    let mut section = Section::Summary;
+    let mut summary_lines: Vec<&str> = Vec::new();
+    let mut args_lines: Vec<&str> = Vec::new();
+    let mut returns_lines: Vec<&str> = Vec::new();
+    let mut deprecated_lines: Vec<&str> = Vec::new();
+
+    for line in norm.lines() {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        if indent == 0 && trimmed == "Args:" {
+            section = Section::Args;
+            continue;
+        } else if indent == 0 && trimmed == "Returns:" {
+            section = Section::Returns;
+            continue;
+        } else if indent == 0 && trimmed == "Deprecated:" {
+            section = Section::Deprecated;
+            continue;
+        }
+        match section {
+            Section::Summary => summary_lines.push(line),
+            Section::Args => args_lines.push(line),
+            Section::Returns => returns_lines.push(line),
+            Section::Deprecated => deprecated_lines.push(line),
+        }
+    }
+
+    let trim_lines = |lines: Vec<&str>| -> String {
+        let joined = lines.join("\n");
+        normalize_docstring(&joined)
+    };
+
+    let mut param_docs = BTreeMap::new();
+    if !args_lines.is_empty() {
+        let base_indent = args_lines
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| l.len() - l.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        let mut cur_param: Option<String> = None;
+        let mut cur_lines: Vec<String> = Vec::new();
+        let flush = |cur_param: &mut Option<String>,
+                     cur_lines: &mut Vec<String>,
+                     out: &mut BTreeMap<String, String>| {
+            if let Some(p) = cur_param.take() {
+                let text = normalize_docstring(&cur_lines.join("\n"));
+                out.insert(p, text);
+            }
+            cur_lines.clear();
+        };
+        for line in args_lines {
+            let trimmed = line.trim();
+            let indent = line.len() - line.trim_start().len();
+            if !trimmed.is_empty() && indent == base_indent {
+                if let Some((head, rest)) = trimmed.split_once(':') {
+                    let pname = head
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .trim_start_matches('*');
+                    if !pname.is_empty()
+                        && pname.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    {
+                        flush(&mut cur_param, &mut cur_lines, &mut param_docs);
+                        cur_param = Some(pname.to_string());
+                        cur_lines.push(rest.trim().to_string());
+                        continue;
+                    }
+                }
+            }
+            if cur_param.is_some() {
+                cur_lines.push(line.to_string());
+            }
+        }
+        flush(&mut cur_param, &mut cur_lines, &mut param_docs);
+    }
+
+    let returns = {
+        let s = trim_lines(returns_lines);
+        (!s.is_empty()).then_some(s)
+    };
+    let deprecated = {
+        let s = trim_lines(deprecated_lines);
+        (!s.is_empty()).then_some(s)
+    };
+
+    ParsedFunctionDoc {
+        summary: trim_lines(summary_lines),
+        param_docs,
+        returns,
+        deprecated,
+    }
 }
 
 // ---------------------------------------------------------------------------------- misc
