@@ -199,19 +199,23 @@ fn attr_to_value_in(
         if let Some(h) = hook {
             ct = h(&attr.name, ct, dep_cfg)?;
         }
-        if !attr.providers.is_empty() {
+        let dep_failed = ct.providers.contains_key("AnalysisFailureInfo")
+            && (cfg.bool_option("allow_analysis_failures", false)
+                || dep_cfg.bool_option("allow_analysis_failures", false));
+        if !attr.providers.is_empty() && !dep_failed {
             // Source/generated files are accepted when the attribute allows files.
-            let is_file = ct.rule_class == "source file" || ct.rule_class == "generated file";
+            let actual_rc = ct.actual_rule_class_name();
+            let is_file = actual_rc == "source file" || actual_rc == "generated file";
             let file_allowed = match &attr.allowed_files {
                 zel_packages::attr::FileTypes::Any => !attr.files_unspecified,
                 zel_packages::attr::FileTypes::NoFiles => false,
                 zel_packages::attr::FileTypes::Extensions(exts) => {
-                    exts.iter().any(|e| ct.label.name().ends_with(e))
+                    exts.iter().any(|e| ct.actual_target_label().name().ends_with(e))
                 }
             };
             let ok = attr.providers.iter().any(|group| group.iter().all(|k| ct.providers.contains_key(&zel_packages::provider::resolve_provider_ref(k))));
             // An allowed rule class (`allow_rules`) is accepted even without the providers.
-            let allowed_class = attr.allowed_rule_classes.as_ref().map(|l| l.contains(&ct.rule_class)).unwrap_or(false);
+            let allowed_class = attr.allowed_rule_classes.as_ref().map(|l| l.iter().any(|c| c == actual_rc)).unwrap_or(false);
             if !(ok || allowed_class || is_file && file_allowed) {
                 let desc = attr
                     .providers
@@ -530,7 +534,9 @@ fn convert_rule_attrs(
                         Some(d) => match &d.default_info.executable {
                             Some(e) => file_value(e),
                             // FilesToRunProvider.fromSingleExecutableArtifact: a file target is its own executable.
-                            None if (d.rule_class == "source file" || d.rule_class == "generated file") && d.default_info.files.len() == 1 => {
+                            None if matches!(d.actual_rule_class_name(), "source file" | "generated file")
+                                && d.default_info.files.len() == 1 =>
+                            {
                                 file_value(&d.default_info.files[0])
                             }
                             None => {
@@ -1310,7 +1316,18 @@ fn finish_target(
     let fields = match &default_info {
         Some(Value::ProviderInstance { fields, .. }) => {
             for k in fields.keys() {
-                if !matches!(k.as_str(), "files" | "runfiles" | "data_runfiles" | "default_runfiles" | "executable") {
+                // Allow `files_to_run` on an already-materialized `DefaultInfo` forwarded from a
+                // dependency (direct `DefaultInfo(files_to_run = ...)` calls are still rejected by
+                // the Starlark constructor in `zel-starlark`).
+                if !matches!(
+                    k.as_str(),
+                    "files"
+                        | "runfiles"
+                        | "data_runfiles"
+                        | "default_runfiles"
+                        | "executable"
+                        | "files_to_run"
+                ) {
                     return Err(format!("DefaultInfo() got unexpected keyword argument '{k}'"));
                 }
             }

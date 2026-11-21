@@ -250,7 +250,7 @@ fn apply_aspect_path(
     path: &[(Value, Arc<zel_packages::aspect::AspectDef>)],
     params: &BTreeMap<String, AttrValue>,
 ) -> Result<Arc<ConfiguredTarget>, String> {
-    if path.is_empty() {
+    if path.is_empty() || base_ct.providers.contains_key("AnalysisFailureInfo") {
         return Ok(base_ct);
     }
     let resolver = inputs.resolver.clone();
