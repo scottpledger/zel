@@ -886,17 +886,25 @@ fn test_zel_embed_label_does_not_affect_bazel_compatibility_or_rc_version() {
         s(&q.stderr)
     );
 
-    // Explicit BAZEL_DEV_VERSION_OVERRIDE still overrides the Bazel version check.
-    let q_override = e
+    // Runtime environment variables must NOT override the in-repo Bazel compatibility version.
+    let q_env = e
         .cmd(&["--batch"], &["query", "//..."])
         .env("ZEL_EMBED_LABEL", "0.2.0")
+        .env("BAZEL_EMBED_LABEL", "5.0.0")
         .env("BAZEL_DEV_VERSION_OVERRIDE", "5.0.0")
         .output()
         .unwrap();
-    assert_ne!(q_override.status.code(), Some(0));
+    assert_eq!(
+        q_env.status.code(),
+        Some(0),
+        "stdout={}\nstderr={}",
+        s(&q_env.stdout),
+        s(&q_env.stderr)
+    );
     assert!(
-        s(&q_override.stderr).contains("Bazel version 5.0.0 is not compatible with module"),
-        "stderr={}",
-        s(&q_override.stderr)
+        s(&q_env.stdout).contains("filegroup rule //:ok"),
+        "expected env vars not to override BAZEL_COMPAT_VERSION; stdout={}\nstderr={}",
+        s(&q_env.stdout),
+        s(&q_env.stderr)
     );
 }

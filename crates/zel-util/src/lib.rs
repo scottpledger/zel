@@ -20,41 +20,17 @@ use zel_proto::failure_details::FailureDetail;
 
 /// The Bazel release whose behavior Zel emulates (the spec is the Bazel 9.3.2 source tree).
 /// Bazel semantic version checks (`native.bazel_version`, Bzlmod `bazel_compatibility`,
-/// `.bazelrc` `try-import-if-bazel-version`, BEP `build_tool_version`) default to this version,
-/// independent of Zel's own release label (`ZEL_EMBED_LABEL`, e.g., `0.2.0`).
+/// `.bazelrc` `try-import-if-bazel-version`, BEP `build_tool_version`, and `.bazelversion`
+/// compatibility matching) always use this in-repo version, independent of Zel's own release
+/// label (`ZEL_EMBED_LABEL`, e.g., `0.2.0`) and not overridable via environment variables.
 pub const BAZEL_COMPAT_VERSION: &str = "9.3.2";
 /// `BlazeVersionInfo.getReleaseName()` of [`BAZEL_COMPAT_VERSION`].
 pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
 
-/// The Bazel version string exposed to `native.bazel_version`, Bzlmod `bazel_compatibility`
-/// checks, and `.bazelrc` `try-import-if-bazel-version` directives. Honors
-/// `BAZEL_DEV_VERSION_OVERRIDE` and `BAZEL_EMBED_LABEL` (in that order, ignoring empty values),
-/// falling back to compile-time `BAZEL_EMBED_LABEL` or [`BAZEL_COMPAT_VERSION`].
-///
-/// Intentionally ignores `ZEL_EMBED_LABEL`, which stamps Zel's own release version (e.g., `0.2.0`)
-/// rather than the emulated Bazel version (`9.3.2`).
+/// Returns [`BAZEL_COMPAT_VERSION`], the fixed in-repo Bazel version that this build of Zel
+/// emulates (not overridable via environment variables).
 pub fn default_bazel_version() -> String {
-    default_bazel_version_with(
-        |var| std::env::var(var).ok(),
-        option_env!("BAZEL_EMBED_LABEL"),
-    )
-}
-
-fn default_bazel_version_with<F: Fn(&str) -> Option<String>>(
-    env_var: F,
-    compile_time_bazel_embed_label: Option<&str>,
-) -> String {
-    for var in ["BAZEL_DEV_VERSION_OVERRIDE", "BAZEL_EMBED_LABEL"] {
-        if let Some(val) = env_var(var) {
-            if !val.is_empty() {
-                return val;
-            }
-        }
-    }
-    compile_time_bazel_embed_label
-        .filter(|s| !s.is_empty())
-        .unwrap_or(BAZEL_COMPAT_VERSION)
-        .to_string()
+    BAZEL_COMPAT_VERSION.to_string()
 }
 
 pub mod action_env;
@@ -1370,46 +1346,8 @@ mod exit_code_tests {
     }
 
     #[test]
-    fn default_bazel_version_ignores_zel_embed_label_and_honors_bazel_overrides() {
-        // Default without overrides returns BAZEL_COMPAT_VERSION.
-        assert_eq!(
-            default_bazel_version_with(|_| None, None),
-            BAZEL_COMPAT_VERSION
-        );
-        // ZEL_EMBED_LABEL (e.g. a packaged Zel release like 0.2.0) must not pollute Bazel version.
-        assert_eq!(
-            default_bazel_version_with(
-                |k| (k == "ZEL_EMBED_LABEL").then(|| "0.2.0".to_string()),
-                None,
-            ),
-            BAZEL_COMPAT_VERSION
-        );
-        // Compile-time BAZEL_EMBED_LABEL overrides the default.
-        assert_eq!(default_bazel_version_with(|_| None, Some("8.5.0")), "8.5.0");
-        // Empty compile-time and runtime values fall through.
-        assert_eq!(
-            default_bazel_version_with(|_| Some(String::new()), Some("")),
-            BAZEL_COMPAT_VERSION
-        );
-        // Runtime BAZEL_EMBED_LABEL wins over compile-time BAZEL_EMBED_LABEL.
-        assert_eq!(
-            default_bazel_version_with(
-                |k| (k == "BAZEL_EMBED_LABEL").then(|| "8.4.0".to_string()),
-                Some("8.5.0"),
-            ),
-            "8.4.0"
-        );
-        // Runtime BAZEL_DEV_VERSION_OVERRIDE wins over BAZEL_EMBED_LABEL.
-        assert_eq!(
-            default_bazel_version_with(
-                |k| match k {
-                    "BAZEL_DEV_VERSION_OVERRIDE" => Some("7.5.0".to_string()),
-                    "BAZEL_EMBED_LABEL" => Some("8.4.0".to_string()),
-                    _ => None,
-                },
-                Some("8.5.0"),
-            ),
-            "7.5.0"
-        );
+    fn default_bazel_version_returns_in_repo_bazel_compat_version() {
+        assert_eq!(default_bazel_version(), BAZEL_COMPAT_VERSION);
+        assert_eq!(BAZEL_COMPAT_VERSION, "9.3.2");
     }
 }
